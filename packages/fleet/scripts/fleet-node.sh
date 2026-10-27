@@ -3670,7 +3670,7 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #
 #
 # def retire_from_fleet_api():
-#     """Tell the fleet API this node is leaving. Best effort: ten seconds at most, and no failure here
+#     """Tell the fleet controller this node is leaving. Best effort: ten seconds at most, and no failure here
 #     ever blocks or fails the removal. FLEET_AGENT names the command (tests); a test state directory
 #     without it skips the call."""
 #     command = os.environ.get("FLEET_AGENT")

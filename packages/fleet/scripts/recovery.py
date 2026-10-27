@@ -15,8 +15,8 @@ one, never half of either. docs/resilience.md lists the failure modes.
   status     print the recovery facts the agent reports, as JSON.
 
 The outbox holds events until Fleet accepts them. Each has a stable key, so a
-retried heartbeat cannot record an event twice: the server ignores a key it has
-seen (packages/fleet-api, insertEvents). Delivery is therefore at least once from
+retried heartbeat cannot record an event twice: the controller ignores a key it has
+seen (packages/fleet-controller, insertEvents). Delivery is therefore at least once from
 the node and once in Fleet. Nothing here reads a secret.
 """
 import json

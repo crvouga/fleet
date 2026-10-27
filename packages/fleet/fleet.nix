@@ -8,7 +8,7 @@ in {
   rotateAgeKey = false;
   reboot = shared.reboot // { drainCommand = "fleet-drain"; resumeCommand = "fleet-resume"; };
   # One data file for bootstrap registration. Runtime repository assignments
-  # can override this through the fleet API's Postgres-backed settings.
+  # can override this through the fleet controller's Postgres-backed settings.
   github = builtins.fromJSON (builtins.readFile ./settings/github.json);
   containers = false; # opt into rootless per-slot Podman and its Docker-compatible socket
   secretsFile = null; # Set to your own SOPS file after setup.

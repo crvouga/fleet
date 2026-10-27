@@ -97,7 +97,7 @@ The desktop is a single trusted operator environment, not a multi-tenant service
 Anyone authorized as `agent` sees its conversation and signed-in browser. OMP auth
 (`~/.omp/agent/agent.db`), native CLI auth, sessions, projects and Chromium's profile
 (`~/.config/fleet-chromium`) survive tmpfs-root reboots and system generations.
-They never enter Nix inputs, sops, runner jobs, caches or the fleet API. Reinstalling
+They never enter Nix inputs, sops, runner jobs, caches or the fleet controller. Reinstalling
 erases them. Previous Pi state is not copied or deleted automatically; OMP uses its
 own `.omp` directory. Runner users cannot read the home or desktop runtime directory.
 
@@ -136,7 +136,7 @@ claims subscription entitlement without the owner's consent.
 After the reviewed change lands, the existing Fleet cache workflow publishes
 `ci`, `ci-gpu` and `devbox`, and nodes pull them. The GPU variant is included in
 publication so it can receive the same harness updates; it stays off the installer
-ISO. The live fleet API had no
+ISO. The live fleet controller had no
 registered nodes at initial implementation, so physical installation is unverified.
 
 Before reporting rollout complete, a connecting agent verifies every active node's

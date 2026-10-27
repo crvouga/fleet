@@ -1,0 +1,153 @@
+import { StartupError, databaseFailure } from './startup-error';
+import { createLogger, errorDetails, type Logger } from '@pkgs/logger';
+
+import { createController } from './app';
+import { FleetAdminAuth } from './auth/admin-auth';
+import { createDb } from './db/client';
+import { SqliteStore } from './db/sqlite-store';
+import { SqliteAccessStore } from './db/access-store';
+import { FleetBrowserAuth } from './auth/browser-auth';
+import type { AppDeps } from './deps';
+import {
+  ConfigurationError,
+  readControllerEnv,
+  type ControllerEnv,
+} from './env';
+import { startJobs } from './jobs/scheduler';
+import { GithubRevisionSource } from './revisions/github';
+import { mountUi } from './routes/ui';
+import { localResponse } from './local-response';
+
+const SHUTDOWN_GRACE_MS = 10_000;
+
+export interface ControllerOptions {
+  /** Local development uses the live store without duplicating deployed jobs. */
+  readonly local?: boolean;
+}
+
+export interface RunningController {
+  readonly port: number;
+  stop(): Promise<void>;
+}
+
+/** Wires the real database, relay authentication, GitHub lookup and clock into AppDeps. */
+export function buildDeps(
+  env: ControllerEnv,
+  store: SqliteStore,
+  log: Logger,
+  browserAuth?: FleetBrowserAuth
+): AppDeps {
+  const now = () => new Date();
+  return {
+    store,
+    ...(browserAuth ? { browserAuth } : {}),
+    auth: new FleetAdminAuth({
+      env,
+      now,
+      fetch,
+      log,
+      ...(browserAuth && env.relay
+        ? { browser: browserAuth, publicOrigin: env.relay.origin }
+        : {}),
+    }),
+    revisions: new GithubRevisionSource({
+      repo: env.githubRepo,
+      fetch,
+      now,
+      log,
+    }),
+    env,
+    now,
+  };
+}
+
+/** Boots the controller HTTP listener and the background jobs. Names no secret in any log. */
+export async function startController(
+  env: ControllerEnv,
+  log: Logger,
+  options: ControllerOptions = {}
+): Promise<RunningController> {
+  const db = await createDb(env.storage);
+  try {
+    const store = new SqliteStore(db);
+    const browser = env.relay
+      ? new FleetBrowserAuth(new SqliteAccessStore(db), env.relay)
+      : undefined;
+    const deps = buildDeps(env, store, log, browser);
+    const app = createController(deps, { log });
+    mountUi(app, deps);
+    await store.health();
+    const listener = Bun.serve({
+      hostname: options.local ? '127.0.0.1' : '0.0.0.0',
+      port: env.port,
+      fetch: async (request, bunServer) => {
+        const response = await app.fetch(request, { server: bunServer });
+        return options.local ? localResponse(response, request) : response;
+      },
+    });
+    const jobs = options.local
+      ? undefined
+      : startJobs({ store, now: deps.now, fetch, log });
+    log.info('fleet controller listening', { port: listener.port });
+    return {
+      port: listener.port ?? env.port,
+      stop: async () => {
+        jobs?.stop();
+        await listener.stop();
+        await db.close();
+      },
+    };
+  } catch (error) {
+    await db.close();
+    throw databaseFailure(error);
+  }
+}
+
+function shutdownOn(running: RunningController, log: Logger): void {
+  let stopping = false;
+  const handler = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    log.info('shutting down', { signal });
+    setTimeout(() => process.exit(1), SHUTDOWN_GRACE_MS).unref();
+    running
+      .stop()
+      .then(() => process.exit(0))
+      .catch((err: unknown) => {
+        log.error('shutdown failed', { error: errorDetails(err) });
+        process.exit(1);
+      });
+  };
+  process.on('SIGTERM', () => handler('SIGTERM'));
+  process.on('SIGINT', () => handler('SIGINT'));
+}
+
+export async function main(options: ControllerOptions = {}): Promise<void> {
+  const log = createLogger({ name: 'fleet-controller', level: 'info' });
+  try {
+    const env = readControllerEnv();
+    if (process.env['FLEET_REPLICATION_MANAGED'] !== '1') {
+      throw new ConfigurationError([
+        'use bun run start so Litestream restores and replicates the database',
+      ]);
+    }
+    const running = await startController(env, log, options);
+    shutdownOn(running, log);
+  } catch (err: unknown) {
+    // Log only authored operator messages; database errors can contain SQL details.
+    const message =
+      err instanceof ConfigurationError || err instanceof StartupError
+        ? err.message
+        : databaseFailure(err).message;
+    log.error('fleet controller failed to start', {
+      error: message,
+      stage:
+        err instanceof StartupError ? err.stage : databaseFailure(err).stage,
+    });
+    process.exit(1);
+  }
+}
+
+if (import.meta.main) {
+  void main();
+}

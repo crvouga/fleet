@@ -31,12 +31,12 @@
 in {
   inherit scripts;
   # fleetconf get KEY DEFAULT: the setting this node last applied from the
-  # fleet API, else DEFAULT. It never fails, so a unit can always call it.
+  # fleet controller, else DEFAULT. It never fails, so a unit can always call it.
   fleetconf = pkgs.writeShellScriptBin "fleetconf" ''
     exec ${python} ${scripts}/fleetconf.py "$@"
   '';
   # fleet-agent run|once|status|retire. A shell started by hand gets the same
-  # API address as the unit.
+  # Controller address as the unit.
   agent = pkgs.writeShellScriptBin "fleet-agent" ''
     export PATH=${lib.makeBinPath [ pkgs.iproute2 pkgs.systemd pkgs.coreutils ]}:$PATH
     export FLEET_API_URL="''${FLEET_API_URL-${apiUrl}}"

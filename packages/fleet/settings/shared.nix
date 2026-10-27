@@ -16,12 +16,12 @@
 
   disk = {
     # fleet-disk fails when /nix or /boot is at or above this percent.
-    # The failure is also reported in the heartbeat to the fleet API
-    # (packages/fleet-api), so it shows on the dashboard.
+    # The failure is also reported in the heartbeat to the fleet controller
+    # (packages/fleet-controller), so it shows on the dashboard.
     alertPercent = 90;
   };
 
-  # The fleet API (packages/fleet-api). Every node reports to it with a
+  # The fleet controller (packages/fleet-controller). Every node reports to it with a
   # heartbeat and receives its dynamic settings from it: sync pause, reboot
   # policy, disk alert, capacity, runner repositories and labels. It sends data,
   # never code, and a node works without it: unreachable means the last
@@ -30,10 +30,10 @@
   # lists every key. The role token that lets a node register without a
   # person is not here; the installer places it on the machine.
   fleetApi = {
-    url = ""; # Optional: your Fleet API HTTPS origin.
+    url = ""; # Optional: your Fleet controller HTTPS origin.
   };
 
-  # Central monitoring is the fleet API (fleetApi.url): every node reports a
+  # Central monitoring is the fleet controller (fleetApi.url): every node reports a
   # heartbeat to it. pushUrl is not read and stays null. Logs stay in the
   # journal and metrics stay on 127.0.0.1:9101.
   monitoring = {

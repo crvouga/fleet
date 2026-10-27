@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fleet-agent against a real local HTTP server that speaks packages/fleet-api/PROTOCOL.md."""
+"""fleet-agent against a real local HTTP server that speaks packages/fleet-controller/PROTOCOL.md."""
 
 import hashlib
 import http.server
@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
-PROTOCOL = Path(__file__).parents[2] / "fleet-api" / "PROTOCOL.md"
+PROTOCOL = Path(__file__).parents[2] / "fleet-controller" / "PROTOCOL.md"
 sys.path.insert(0, str(SCRIPTS))
 
 import agent  # noqa: E402
@@ -51,7 +51,7 @@ class Clock:
 
 
 def validate_heartbeat(body):
-    """The limits in packages/fleet-api/src/domain/heartbeat-validation.ts, as errors."""
+    """The limits in packages/fleet-controller/src/domain/heartbeat-validation.ts, as errors."""
     errors = []
 
     def need(condition, message):
@@ -455,7 +455,7 @@ class RegistrationTests(AgentCase):
 class HeartbeatPayloadTests(AgentCase):
     def example(self):
         if not PROTOCOL.is_file():
-            self.skipTest("packages/fleet-api/PROTOCOL.md is not present")
+            self.skipTest("packages/fleet-controller/PROTOCOL.md is not present")
         text = PROTOCOL.read_text()
         for block in re.findall(r"```json\n(.*?)```", text, re.S):
             if '"v": 1' in block and '"nodeId"' in block:
@@ -1146,9 +1146,9 @@ class FleetconfTests(unittest.TestCase):
         self.assertEqual(self.cli("nope").returncode, 2)
 
     def test_sanitize_matches_the_server_schema_keys(self):
-        schema = (Path(__file__).parents[2] / "fleet-api/src/config/fields.ts")
+        schema = (Path(__file__).parents[2] / "fleet-controller/src/config/fields.ts")
         if not schema.is_file():
-            self.skipTest("fleet-api schema is not present")
+            self.skipTest("fleet-controller schema is not present")
         text = schema.read_text()
         block = text[text.index("export const RULES"):text.index("export const SECTIONS")]
         found = set()

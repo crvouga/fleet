@@ -78,7 +78,7 @@ class FleetImpactTests(unittest.TestCase):
     def test_integration_skip_requires_every_changed_file_to_be_fleet_documentation(self):
         docs = ["packages/fleet/docs/installer.md"]
         self.assertTrue(impact.only_documentation(docs, "pull_request"))
-        for paths in [None, [], [*docs, "packages/fleet-api/src/server.ts"], [*docs, "package.json"], [*docs, "packages/fleet/fleet.nix"]]:
+        for paths in [None, [], [*docs, "packages/fleet-controller/src/controller.ts"], [*docs, "package.json"], [*docs, "packages/fleet/fleet.nix"]]:
             self.assertFalse(impact.only_documentation(paths, "pull_request"))
         self.assertFalse(impact.only_documentation(docs, "merge_group"))
 

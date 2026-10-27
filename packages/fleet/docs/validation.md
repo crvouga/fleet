@@ -1,5 +1,46 @@
 # Validation record
 
+> Historical evidence below includes the former infrastructure and PostgreSQL deployment.
+> Current standalone deployment uses native SQLite and mandatory Litestream; follow
+> [the current controller guide](../../fleet-controller/README.md) instead of historical rollout commands.
+
+## 2026-10-27 Fleet controller naming
+
+Renamed the management package, native entry points, test helpers, service
+example, console branding, logs and documentation to Fleet controller. Existing
+configuration keys, node settings, HTTP routes, payload fields, port defaults and
+explicit storage paths remain compatible. Package-local working data moves with
+the package directory.
+
+`bun run check` passed, including 492 controller tests. Final controller
+lint/typecheck also passed with structural limits enabled. Both opt-in real
+Litestream/Moto drills passed under the renamed package path: fresh-host restore
+and startup refusal when S3 writes are denied. Roles were synchronized and the
+node download regenerated. Linux Nix checks were not run on this macOS host.
+
+## 2026-10-27 Native single-node startup and deployment
+
+`bun run check` passed on macOS with Bun 1.4.4. After the final supervisor exit
+handling change, controller typecheck/lint and the full controller suite passed again: 492 tests
+passed, with the two opt-in storage integration tests skipped in that run.
+Those two tests passed separately using real Litestream 0.5.17 against a loopback
+Moto S3 emulator: a replacement restored nodes, settings, events and owner access
+after all local working state was deleted; denied S3 writes prevented HTTP
+startup and produced a nonzero exit with bucket-permission guidance. Startup
+checks also cover missing/invalid settings, removed backends, binary versions,
+filesystem access, bounded restore retries, unexpected clean worker exits, and
+an occupied port. The missing-configuration CLI was exercised without credentials.
+
+Production now uses Bun's built-in SQLite and mandatory Litestream. Remote SQL
+clients, local-only production mode, Docker files and controller image CI were removed.
+Configuration is documented in root CONFIGURATION.md and deployment.env.example;
+a native systemd unit is provided as an operator-installed example.
+
+Linux Nix evaluations/builds and VM checks were not run on this macOS host. No
+physical disk, cloud resource, GitHub setting or production service was changed;
+no service unit or credentials were installed. Emulator results do not establish
+access to any production bucket.
+
 ## 2026-10-27 native CI toolchain timeouts
 
 PR #158's four native Nix lanes reached the 12-minute check limit while compiling
@@ -128,7 +169,7 @@ runner withdrawal order and closed job admission. They do not erase a physical
 disk or boot an actual installer kernel.
 
 `bun run check` also passes: **42 tasks**, including **572 Fleet Python tests**.
-Focused Fleet BDD and Fleet API typecheck/lint checks pass.
+Focused Fleet BDD and Fleet controller typecheck/lint checks pass.
 
 The Fleet workflow now runs browser acceptance against every compiled platform
 download, and additionally against native Nix packages on Linux x86-64 and
@@ -184,8 +225,8 @@ produced a generated-test source-location mismatch with this BDD version;
 
 The full `bun run check` passed all **42 tasks**, including **568 Fleet tests**,
 with native PowerShell on PATH. The initial full run hit a concurrent Tailwind
-package-cache copy error in the API CSS test; a direct CSS build populated the
-cache and the complete rerun passed, including all 571 API tests. No dependency
+package-cache copy error in the controller CSS test; a direct CSS build populated the
+cache and the complete rerun passed, including all 571 controller tests. No dependency
 or check was patched or weakened. Fleet BDD typecheck and ESLint also pass.
 
 Gherkin and step definitions are under `bdd/`. The ignored HTML report is
@@ -207,7 +248,7 @@ The planned role/path is now CI by converting an existing Windows installation.
 The chosen repository was verified private through GitHub's read-only API.
 Its bootstrap registration data is confined to `settings/github.json`; Nix,
 setup and the runner health check consume that file. Runtime routing continues
-to use the existing fleet API/Postgres settings. No repository-specific value
+to use the existing fleet controller/Postgres settings. No repository-specific value
 was added to Python, Nix modules or workflow code.
 
 Generated distinct role age keys with `just fleet-keys`. Private values remain
@@ -255,7 +296,7 @@ Validated locally on macOS ARM64:
   directory; the default amd64 Docker image crashed under emulation and that
   initial run was stopped, then rerun with native PowerShell.
 - The nine full-chain tests passed with the actual release packager and a
-  multipart HTTP release: shipped shell entry, enrollment, installer, real API,
+  multipart HTTP release: shipped shell entry, enrollment, installer, real controller,
   throwaway PostgreSQL and dashboard. Process mode, not Docker image mode.
 - Packaged and reassembled **2,147,549,184 bytes** with default part sizes
   **1,073,741,824 + 1,073,741,824 + 65,536**, checking each part and the full
@@ -273,8 +314,8 @@ five wizard builds/self-tests/browser tests. Its **publish failed** with HTTP
 it does not prove publication. These are prior-build results, not CI results
 for this fix. No Nix or VM build was run locally for this change.
 
-`bun run health`: **220 pass, 14 warn, 8 fail, 9 skip**. Fleet API DNS/TLS/health,
-its image, Vault enrollment policy/JWT role/API settings and the CI deployment
+`bun run health`: **220 pass, 14 warn, 8 fail, 9 skip**. Fleet controller DNS/TLS/health,
+its image, Vault enrollment policy/JWT role/controller settings and the CI deployment
 are not healthy. Runner settings and the binary cache remain unconfigured.
 The live main ruleset lacks the declared Fleet check and merge queue. No
 production plan/apply, GitHub settings/secret change, release publication,
@@ -343,18 +384,18 @@ The installer release does not exist until a fleet change lands on `main` and th
 
 Run on a Mac, without Windows. Added: both one-time boot mechanisms (`bcdedit` and direct UEFI variables), the early shrink check that also asks for the download's room and the exact re-measurement after the download, deleting the installer's own downloaded copy, the RAM refusal (image size plus 2 GiB), the retry through the partition device, `--plan`, and `docs/windows.md`. Ran and passed here: every generated PowerShell script through the real PowerShell 7.6 parser and against stand-in cmdlets (Docker, arm64 Linux); the `Boot####` load option byte for byte against a hand-derived value; the `kernel32` calls against stand-in DLLs; the whole conversion against a model of Windows with a failure injected at each step, requiring the model to end as it began; raw writes at offsets past 4 GiB and past 2 TiB (a real sparse file and a sector-checking fake device). **Not run:** anything on Windows. See "What is verified and what is not" in `docs/windows.md` for the six places a first real run is most likely to fail.
 
-## 2026-10-14 fleet API, node agent and the full-chain test
+## 2026-10-14 fleet controller, node agent and the full-chain test
 
-Added: the fleet API and dashboard (`packages/fleet-api`, deployed by OpenTofu as a Railway Docker service at fleet.example.com, on the shared Postgres in its own `fleet` schema built by Atlas), the node agent with dynamic settings, hardening of the Windows conversion (a second one-time-boot mechanism through UEFI variables, retry on the partition device, RAM and space checks, `--plan`), and an end-to-end test that runs the real programs against each other.
+Added: the fleet controller and dashboard (`packages/fleet-controller`, deployed by OpenTofu as a Railway Docker service at fleet.example.com, on the shared Postgres in its own `fleet` schema built by Atlas), the node agent with dynamic settings, hardening of the Windows conversion (a second one-time-boot mechanism through UEFI variables, retry on the partition device, RAM and space checks, `--plan`), and an end-to-end test that runs the real programs against each other.
 
 Ran here and passed:
 
-- **Full chain, `tests/test_e2e_chain.py` (9 tests, about 8 s):** `fleet-node.sh` downloads the installer from a release server and shows the GitHub approval link; the owner's click is played by running the real `scripts/enroll.py` against a Vault stand-in that refuses unwrapped reads; the node opens the sealed token and boots the installer only after that; `fleet-install.sh` unwraps the key and installs the node's credentials (mode 0600); the real `agent.py` registers with the real server (`bun src/server.ts`) on a throwaway Postgres whose schema the real Atlas CLI built; the node appears online on the dashboard with its runner slots. Also: an unknown node waits as pending and is approved from the API; settings put through the API reach the node's files (`runner-labels`, `assign/`, `config.json`), out-of-range and misspelled settings are refused, a node-scoped setting beats the fleet's; a deleted node registers again by itself; `retire` is recorded; a wrong role token never approves; a rollback becomes an event; dashboard sign-in through Vault (admin policy only) gives an HttpOnly, SameSite=Lax session; nothing exists outside the `fleet` schema and only a hash of the node secret is stored; the server refuses to start misconfigured without echoing a value.
+- **Full chain, `tests/test_e2e_chain.py` (9 tests, about 8 s):** `fleet-node.sh` downloads the installer from a release server and shows the GitHub approval link; the owner's click is played by running the real `scripts/enroll.py` against a Vault stand-in that refuses unwrapped reads; the node opens the sealed token and boots the installer only after that; `fleet-install.sh` unwraps the key and installs the node's credentials (mode 0600); the real `agent.py` registers with the real controller (`bun src/controller.ts`) on a throwaway Postgres whose schema the real Atlas CLI built; the node appears online on the dashboard with its runner slots. Also: an unknown node waits as pending and is approved from the controller; settings put through the controller reach the node's files (`runner-labels`, `assign/`, `config.json`), out-of-range and misspelled settings are refused, a node-scoped setting beats the fleet's; a deleted node registers again by itself; `retire` is recorded; a wrong role token never approves; a rollback becomes an event; dashboard sign-in through Vault (admin policy only) gives an HttpOnly, SameSite=Lax session; nothing exists outside the `fleet` schema and only a hash of the node secret is stored; the controller refuses to start misconfigured without echoing a value.
 - **It found two real defects, both fixed:** `python3 scripts/enroll.py` crashed because `scripts/token.py` shadows Python's `token` module (the unit tests had hidden it with `-I`; the script now removes its own directory from the import path and the workflow uses `-I`), and, with the Docker image, Bun took its JSX settings from the working directory so the image could not start (it now runs from the package directory).
 - **The Docker image:** builds, runs as the unprivileged `bun` user, passes its own health check, serves the login page, stylesheet and script, and a real agent registered against it with the role token; nothing outside `fleet` appeared in the database.
-- **Fleet API:** 571 tests, lint and typecheck, against real Postgres built by Atlas, with decoy tables in `public` proven untouched.
+- **Fleet controller:** 571 tests, lint and typecheck, against real Postgres built by Atlas, with decoy tables in `public` proven untouched.
 - **Windows scripts under real PowerShell 7.4.6** (`tests/test_powershell.py`, 24 tests): every generated script parses, and the actions run with mocked cmdlets (shrink, new partition, mount, restore). The local image is arm64 Linux; the scripts have not run on Windows.
-- **Nix:** `nix flake check --no-build --all-systems` (Nix 2.35.3, in Docker) printed "all checks passed": every role closure with the agent and dynamic-config changes, the installer ISO, the VM tests as derivations. The new `agent-units` check fails (naming all five roles) when the API address is blank, and passes otherwise. Evaluation only; nothing was built.
+- **Nix:** `nix flake check --no-build --all-systems` (Nix 2.35.3, in Docker) printed "all checks passed": every role closure with the agent and dynamic-config changes, the installer ISO, the VM tests as derivations. The new `agent-units` check fails (naming all five roles) when the controller address is blank, and passes otherwise. Evaluation only; nothing was built.
 - **The fleet suite:** 558 tests, one skipped (it needs 12 GiB of free temp space). The wizard's Chromium click-through passes. Infra: `tofu` fmt, validate and mocked-provider tests, 57 unit tests, Prettier, `llms.txt`, agent links.
 
 Still not run, so not claimed:
@@ -367,8 +408,8 @@ Still not run, so not claimed:
 
 ## 2026-10-26 role registry and the two-role fleet
 
-Added: `roles.json` as the only definition of a role, `roles.nix` (validated read for the flake and modules), and `scripts/fleet_roles.py` (complete rules, repository-side reads, `sync`/`check` of the copies node scripts, fleet-api, Atlas and the vault root keep, and `placement`, which `fleet-sync` runs against `roles.json` at the fetched revision). `ci` and `devbox` are active; `web`, `cache` and `netboot` are retired, with their modules, hosts, settings, tests and sops recipients deleted. The web VM's native-without-nix-ld coverage moved to `tests/native.nix`. Postgres check constraint, vault role list and token set are byte-identical to before, so neither the Atlas schema nor the vault plan changes.
+Added: `roles.json` as the only definition of a role, `roles.nix` (validated read for the flake and modules), and `scripts/fleet_roles.py` (complete rules, repository-side reads, `sync`/`check` of the copies node scripts, fleet-controller, Atlas and the vault root keep, and `placement`, which `fleet-sync` runs against `roles.json` at the fetched revision). `ci` and `devbox` are active; `web`, `cache` and `netboot` are retired, with their modules, hosts, settings, tests and sops recipients deleted. The web VM's native-without-nix-ld coverage moved to `tests/native.nix`. Postgres check constraint, vault role list and token set are byte-identical to before, so neither the Atlas schema nor the vault plan changes.
 
-Ran on a Mac without Nix and passed: the fleet suite (`tests/run.py`, including the new `test_roles.py` and the `fleet-sync` registry cases) with `scripts/lint.sh` (shellcheck, actionlint, bundle freshness, `fleet_roles.py check`); fleet-api unit tests, lint and typecheck of the changed files; the cache-probe test; `tofu fmt` of the vault root and tests; Prettier.
+Ran on a Mac without Nix and passed: the fleet suite (`tests/run.py`, including the new `test_roles.py` and the `fleet-sync` registry cases) with `scripts/lint.sh` (shellcheck, actionlint, bundle freshness, `fleet_roles.py check`); fleet-controller unit tests, lint and typecheck of the changed files; the cache-probe test; `tofu fmt` of the vault root and tests; Prettier.
 
-Not run, so not claimed: `nix flake check`, any closure or ISO build, and the NixOS VM tests (including the new `native-vm` and the `checks.roles` derivation); the `Fleet cache` workflow's registry-driven role list and the `lib.cacheProbe` evaluation; the vault plan and Atlas apply. Whether any live node still carries a retired role is runtime data; such a node's own `fleet-sync` predates this change and fails as a cache miss, while fleet-api marks it not ready with the retirement reason.
+Not run, so not claimed: `nix flake check`, any closure or ISO build, and the NixOS VM tests (including the new `native-vm` and the `checks.roles` derivation); the `Fleet cache` workflow's registry-driven role list and the `lib.cacheProbe` evaluation; the vault plan and Atlas apply. Whether any live node still carries a retired role is runtime data; such a node's own `fleet-sync` predates this change and fails as a cache miss, while fleet-controller marks it not ready with the retirement reason.

@@ -33,7 +33,7 @@
         if [ -z "$extra" ]; then extra=$line; else extra="$extra,$line"; fi
       done < /run/fleet/runner-labels
     fi
-    # The repository the fleet API assigned to this slot. The registration step
+    # The repository the fleet controller assigned to this slot. The registration step
     # records the one it used in /run/fleet/assign-used/<slot>, so the token and
     # the URL always name the same repository. No record: the settings.github scope.
     repo=""
@@ -91,7 +91,7 @@ ${builtins.readFile ../scripts/runner_control.py}
   control = if drainProvider != null then drainProvider else pkgs.writeScriptBin "runner-control" ''#!${pkgs.python3.withPackages (p: [ p.pyjwt p.cryptography ])}/bin/python3
 ${builtins.readFile ../scripts/runner_control.py}
 '';
-  # Registration pre-start for one slot. The fleet API may assign the slot a
+  # Registration pre-start for one slot. The fleet controller may assign the slot a
   # repository (runners.repositories -> /run/fleet/assign/<slot>); the
   # registration token is then requested for that repository, and the choice
   # is recorded in /run/fleet/assign-used/<slot> for the Runner.Listener

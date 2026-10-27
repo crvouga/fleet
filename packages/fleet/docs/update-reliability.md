@@ -43,7 +43,7 @@ kill grace. A stuck candidate cannot hold the timer indefinitely. Failed
 attempts retain diagnostics and do not advance `last-success`.
 
 The updater is not restarted midway through its own NixOS activation. The next
-timer invocation uses the newly installed unit and script. The Fleet API can
+timer invocation uses the newly installed unit and script. The Fleet controller can
 be unavailable without blocking Git-based updates; an explicit `sync.paused`
 setting still pauses updates until the operator clears it.
 

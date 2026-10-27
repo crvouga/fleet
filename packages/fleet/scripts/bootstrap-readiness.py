@@ -39,7 +39,7 @@ def check_api(url, role, token):
     parsed = urlparse(url)
     require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and
             not parsed.password and not parsed.query and not parsed.fragment,
-            'FLEET_API_UNCONFIGURED: the image needs an HTTPS Fleet API address.')
+            'FLEET_API_UNCONFIGURED: the image needs an HTTPS Fleet controller address.')
     request = urllib.request.Request(url.rstrip('/') + '/v1/enrollment/check',
         data=json.dumps({'role': role, 'roleToken': token}).encode(),
         headers={'Content-Type': 'application/json'}, method='POST')
@@ -49,13 +49,13 @@ def check_api(url, role, token):
             require(result == {'ok': True, 'role': role}, 'FLEET_API_PROTOCOL: Fleet did not confirm enrollment readiness.')
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            # A rolling deployment may still expose the old API. The caller
+            # A rolling deployment may still expose the old controller. The caller
             # must still register the hardware and require actual approval;
             # this read-only probe is never the authorization to erase.
             return
         if error.code in (408, 429) or error.code >= 500:
             raise Retryable('FLEET_API_UNAVAILABLE: Fleet is temporarily unavailable; retrying before disk changes.') from None
-        raise NotReady('FLEET_ENROLLMENT_REJECTED: Fleet cannot approve this credential. Repair the role credential or update the Fleet API before installing.') from None
+        raise NotReady('FLEET_ENROLLMENT_REJECTED: Fleet cannot approve this credential. Repair the role credential or update the Fleet controller before installing.') from None
     except (urllib.error.URLError, OSError):
         raise Retryable('FLEET_API_UNAVAILABLE: Fleet could not be reached; retrying before disk changes.') from None
 
@@ -71,9 +71,9 @@ def check(toplevel, role, age_file, token_file, run=subprocess.run, api=check_ap
     token = Path(token_file).read_text().strip() if Path(token_file).is_file() else ''
     local = metadata.get("approvalMode") == "local"
     require(not local or metadata.get("apiUrl") == "",
-            "FLEET_APPROVAL_INVALID: local approval cannot name a remote API.")
+            "FLEET_APPROVAL_INVALID: local approval cannot name a remote controller.")
     require(local or re.fullmatch(r'[A-Za-z0-9._-]{8,512}', token),
-            'FLEET_ENROLLMENT_MISSING: automatic Fleet approval requires an enrolled installer with an API role credential. Nothing was erased.')
+            'FLEET_ENROLLMENT_MISSING: automatic Fleet approval requires an enrolled installer with an controller role credential. Nothing was erased.')
     require((local and metadata.get('secretsFile') is None) or Path(age_file).is_file(), 'FLEET_ROLE_KEY_MISSING: the enrolled role key is required before installation.')
     source = metadata.get('secretsFile')
     if metadata.get('updateMode') == 'local':

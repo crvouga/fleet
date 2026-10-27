@@ -7,7 +7,7 @@ in {
   programs.nix-ld.enable = true;
   virtualisation.podman = lib.mkIf settings.containers { enable = true; dockerCompat = true; };
   # Start slot-1..slot-N from the live count (/run/fleet/slot-count, which the
-  # fleet API's capacity settings can change). The other units exist in this
+  # fleet controller's capacity settings can change). The other units exist in this
   # closure and stay stopped. systemctl start is synchronous enough that
   # multi-user waits until those units have been started. The agent restarts
   # this unit after a capacity change: it starts the missing slots and stops
@@ -29,7 +29,7 @@ in {
         echo 'slot count must be at least 1' >&2
         exit 1
       fi
-      # runners.enabled = false or runners.cordoned = true (fleet API): no slot runs.
+      # runners.enabled = false or runners.cordoned = true (fleet controller): no slot runs.
       enabled=$(${tools.fleetconf}/bin/fleetconf get runners.enabled true 2>/dev/null) || enabled=true
       cordoned=$(${tools.fleetconf}/bin/fleetconf get runners.cordoned false 2>/dev/null) || cordoned=false
       if [ "$enabled" = false ] || [ "$cordoned" = true ]; then

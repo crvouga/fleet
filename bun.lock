@@ -56,8 +56,8 @@
         "playwright-bdd": "9.2.1",
       },
     },
-    "packages/fleet-api": {
-      "name": "@pkgs/fleet-api",
+    "packages/fleet-controller": {
+      "name": "@pkgs/fleet-controller",
       "version": "1.0.0",
       "dependencies": {
         "@mantine/charts": "9.7.3",
@@ -73,6 +73,7 @@
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
         "recharts": "^3.10.1",
+        "yaml": "catalog:",
       },
       "devDependencies": {
         "@playwright/test": "1.63.0",
@@ -269,7 +270,7 @@
 
     "@pkgs/fleet": ["@pkgs/fleet@workspace:packages/fleet"],
 
-    "@pkgs/fleet-api": ["@pkgs/fleet-api@workspace:packages/fleet-api"],
+    "@pkgs/fleet-controller": ["@pkgs/fleet-controller@workspace:packages/fleet-controller"],
 
     "@pkgs/logger": ["@pkgs/logger@workspace:packages/logger"],
 

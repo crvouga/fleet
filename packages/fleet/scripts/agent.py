@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""fleet-agent: report this node to the fleet API and apply the settings it sends.
+"""fleet-agent: report this node to the fleet controller and apply the settings it sends.
 
-The contract is packages/fleet-api/PROTOCOL.md. Two rules shape everything here.
+The contract is packages/fleet-controller/PROTOCOL.md. Two rules shape everything here.
 
-* Data, never code. The API sends typed settings. This program interprets the
+* Data, never code. The controller sends typed settings. This program interprets the
   keys it knows (scripts/fleetconf.py lists them) and ignores the rest. Nothing
-  a server sends is ever executed, written into a unit, or used as a path.
-* The fleet works without the API. Reporting is best effort. A node that cannot
-  reach the server keeps its last settings (cached on disk) and the values built
+  a controller sends is ever executed, written into a unit, or used as a path.
+* The fleet works without the controller. Reporting is best effort. A node that cannot
+  reach the controller keeps its last settings (cached on disk) and the values built
   into its image. Nothing in this program can block fleet-sync or a runner.
 
 Commands:  run (loop, for the unit)   once (one report)   status   retire
 
 Python standard library only, Python 3.11 or newer, runs as root on NixOS.
-FLEET_API_URL names the server; empty (or a URL containing TODO) disables the agent.
+FLEET_API_URL names the controller; empty (or a URL containing TODO) disables the agent.
 """
 import hashlib
 import json
@@ -78,7 +78,7 @@ def redact(text, known=()):
 
 
 class NetworkError(Exception):
-    """The server could not be reached (DNS, TLS, timeout, reset). The message is a class name only."""
+    """The controller could not be reached (DNS, TLS, timeout, reset). The message is a class name only."""
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -289,7 +289,7 @@ class Agent:
         return True
 
     def load_cached(self):
-        """The last config the API sent. Corrupt or missing means no cached config (image defaults)."""
+        """The last config the controller sent. Corrupt or missing means no cached config (image defaults)."""
         if self.loaded:
             return
         self.loaded = True
@@ -445,9 +445,9 @@ class Agent:
             self.log(f"could not record a {kind} event: {type(error).__name__}")
 
     def collect_events(self, identity):
-        """Events since the last accepted report, and the state to remember once the server accepted them.
+        """Events since the last accepted report, and the state to remember once the controller accepted them.
 
-        Every event carries a key, so a report the server stored but whose
+        Every event carries a key, so a report the controller stored but whose
         answer was lost cannot record the same event twice when it is resent.
         Recovery events come from the durable outbox and leave it only once a
         heartbeat carrying them was accepted (self.outbox_sent)."""
@@ -573,7 +573,7 @@ class Agent:
             body["telemetry"] = self.telemetry.collect(identity, failed_units, self.services_unknown)
         except Exception:
             # One broken sensor must never hide the heartbeat or leak its raw
-            # exception. Missing telemetry remains unknown to older servers.
+            # exception. Missing telemetry remains unknown to older controllers.
             body["telemetry"] = {"sampledAt": iso(self.clock.time()), "cpuUsagePercent": None,
                 "filesystems": [], "temperatures": [], "power": [], "swap": None,
                 "network": [], "runnerSlots": [], "logs": [],
@@ -590,7 +590,7 @@ class Agent:
                 break
         return body
 
-    # talking to the API -------------------------------------------------------
+    # talking to the controller -------------------------------------------------------
 
     def api(self, method, path, body, bearer=None, timeout=HTTP_TIMEOUT):
         headers = {
@@ -611,7 +611,7 @@ class Agent:
         return status, document
 
     def describe(self, status, document):
-        """A log-safe description of a failed answer: the status and the server's error code, nothing else."""
+        """A log-safe description of a failed answer: the status and the controller's error code, nothing else."""
         code = document.get("error") if isinstance(document, dict) else None
         return f"HTTP {status}" + (f" ({clip(code, 40)})" if isinstance(code, str) else "")
 
@@ -632,7 +632,7 @@ class Agent:
             interval = document.get("heartbeatIntervalSeconds")
             if type(interval) is int and 15 <= interval <= 3600:
                 self.register_interval = interval
-            self.log(f"registered with the fleet API: {self.approval}")
+            self.log(f"registered with the fleet controller: {self.approval}")
             return True
         self.last_error = "register: " + self.describe(status, document)
         self.log(self.last_error)
@@ -678,7 +678,7 @@ class Agent:
         self.step("restart idle slots", self.refresh_slots, node_conf, outcome)
 
     def reconcile(self):
-        """Every cycle, with or without the API: keep enforcing the cached settings.
+        """Every cycle, with or without the controller: keep enforcing the cached settings.
 
         A drain that did not finish is retried (rate limited); a slot that was
         busy when the capacity went down is stopped once it is idle.
@@ -914,13 +914,13 @@ class Agent:
                 return self.fail(self.last_error or "register failed")
             status, document, update = self.send_heartbeat(identity)
             if status == 401:
-                self.log("the server does not know this node; registering again")
+                self.log("the controller does not know this node; registering again")
                 self.needs_register = True
                 if not self.register(identity):
                     return self.fail(self.last_error or "register failed")
                 status, document, update = self.send_heartbeat(identity)
         except NetworkError as error:
-            return self.fail(f"API unreachable ({error}); keeping the cached config")
+            return self.fail(f"controller unreachable ({error}); keeping the cached config")
         if status == 403:
             self.failures = 0
             self.rejected = True
@@ -942,7 +942,7 @@ class Agent:
         except OSError:
             self.log("could not save reported state")
         # Fleet stored these recovery events; a crash before this line only
-        # resends them, and the server ignores keys it already has.
+        # resends them, and the controller ignores keys it already has.
         try:
             recovery.acknowledge(self.outbox_sent, base=self.recovery_base)
         except OSError:
@@ -973,7 +973,7 @@ class Agent:
     # commands ------------------------------------------------------------------
 
     def retire(self):
-        """Tell the API this node is leaving. Best effort and short: removal never waits on the network."""
+        """Tell the controller this node is leaving. Best effort and short: removal never waits on the network."""
         current = (read_text(self.paths.secret, 256) or "").strip()
         identity = self.identity()
         if not HEX64.fullmatch(current) or identity is None:
@@ -982,10 +982,10 @@ class Agent:
         try:
             status, document = self.api("POST", "/v1/retire", {}, bearer=f"{identity['id']}.{current}", timeout=RETIRE_TIMEOUT)
         except NetworkError as error:
-            self.log(f"retire: API unreachable ({error})")
+            self.log(f"retire: controller unreachable ({error})")
             return 1
         if status == 200:
-            self.log("retired from the fleet API")
+            self.log("retired from the fleet controller")
             return 0
         self.log("retire: " + self.describe(status, document))
         return 1

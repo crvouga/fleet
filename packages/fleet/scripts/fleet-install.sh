@@ -247,7 +247,7 @@ data = data.get("data") if isinstance(data.get("data"), dict) else data
 key = str(data.get("age_key") or "").strip()
 print(key if key.startswith("AGE-SECRET-KEY-") and key.isprintable() and " " not in key else "")
 ' "$reply" 2>/dev/null || true)
-    # Optional: the role token that lets this node register with the fleet API
+    # Optional: the role token that lets this node register with the fleet controller
     # without a person. A document without it is fine. Never printed or logged.
     api_token=$(python3 -I -c '
 import json, re, sys
@@ -432,12 +432,12 @@ if [ -s "$api_token_file" ]; then
     ( umask 077; printf '%s\n' "$api_token" > "$mnt/nix/fleet-state/agent/role-token.new" )
     mv "$mnt/nix/fleet-state/agent/role-token.new" "$mnt/nix/fleet-state/agent/role-token"
     cmp -s "$api_token_file" "$mnt/nix/fleet-state/agent/role-token" || {
-      echo 'FLEET-FAIL: the installed fleet API role token did not read back correctly.' >&2
+      echo 'FLEET-FAIL: the installed fleet controller role token did not read back correctly.' >&2
       exit 1
     }
-    note 'fleet API role token: installed'
+    note 'fleet controller role token: installed'
   else
-    note 'fleet API role token: ignored (not a valid token)'
+    note 'fleet controller role token: ignored (not a valid token)'
   fi
   unset api_token
 fi

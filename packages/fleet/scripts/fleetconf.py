@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Read the dynamic fleet configuration a node last applied.
 
-Data only. The fleet API sends typed settings (packages/fleet-api/src/config/schema.ts)
+Data only. The fleet controller sends typed settings (packages/fleet-controller/src/config/schema.ts)
 and the agent writes the ones it understands to /nix/fleet-state/config.json.
 Shell units read them through this tool. It never fails a unit: a missing or
 corrupt file, a key that is absent, and a value of the wrong type all give the
-caller's default, so the image's built-in values always work without the API.
+caller's default, so the image's built-in values always work without the controller.
 
     fleetconf get sync.paused false     prints true or false
     fleetconf get reboot.delayMaxSeconds 7200
@@ -32,7 +32,7 @@ def _int(low, high):
     return ("int", low, high)
 
 
-# Mirrors RULES in packages/fleet-api/src/config/schema.ts. The server rejects
+# Mirrors RULES in packages/fleet-controller/src/config/schema.ts. The controller rejects
 # bad values; the node checks again because it never trusts what it is sent.
 SPEC = {
     "heartbeat.intervalSeconds": _int(15, 3600),

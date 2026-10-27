@@ -94,7 +94,7 @@ in {
   # reaches userspace.
   systemd.settings.Manager = { RuntimeWatchdogSec = "30s"; RebootWatchdogSec = "5min"; };
   # The root is tmpfs, so the journal lives in RAM. Cap it. Logs stay on the
-  # node; the heartbeat to the fleet API carries failed units and rollbacks.
+  # node; the heartbeat to the fleet controller carries failed units and rollbacks.
   services.journald.storage = "volatile";
   services.journald.extraConfig = ''
     RuntimeMaxUse=256M
@@ -110,7 +110,7 @@ in {
   ];
   # The console screen (console.nix) shows the age public key and host fingerprint.
   # Local signal. A failed unit is the alert, and fleet-agent reports failed
-  # units to the fleet API. Nothing scrapes 127.0.0.1:9101.
+  # units to the fleet controller. Nothing scrapes 127.0.0.1:9101.
   systemd.services.fleet-disk = {
     description = "Fail when /nix or /boot is too full";
     serviceConfig.Type = "oneshot";
@@ -119,7 +119,7 @@ in {
       set -eu
       install -d -m 0755 /run/fleet
       : > /run/fleet/disk-alert
-      # The fleet API may change the threshold (disk.alertPercent). A missing or
+      # The fleet controller may change the threshold (disk.alertPercent). A missing or
       # unusable setting leaves the value built into this image.
       threshold=$(${fleetTools.fleetconf}/bin/fleetconf get disk.alertPercent ${toString settings.disk.alertPercent} 2>/dev/null) || threshold=${toString settings.disk.alertPercent}
       case "$threshold" in

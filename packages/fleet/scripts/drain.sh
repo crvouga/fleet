@@ -41,7 +41,7 @@ for target in "${targets[@]}"; do
     echo "FLEET_GITHUB_DRAIN_DEGRADED: remote drain failed (exit $result); waiting for local jobs behind the closed admission gate" >&2
   fi
 done
-# Repositories the fleet API assigned to slots (recorded at registration in
+# Repositories the fleet controller assigned to slots (recorded at registration in
 # /run/fleet/assign-used). A runner there is drained like any other. One that
 # GitHub cannot be asked about must not block updates; the job markers below
 # are the check that does not depend on GitHub.

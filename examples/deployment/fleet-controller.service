@@ -1,0 +1,21 @@
+[Unit]
+Description=Fleet single-node controller and Litestream replication
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Operator supplies this user, checkout, writable data directory and environment.
+User=fleet
+Group=fleet
+WorkingDirectory=/opt/fleet
+EnvironmentFile=/etc/fleet/fleet.env
+ExecStart=/usr/local/bin/bun run start
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
