@@ -23,7 +23,8 @@
     "build:console": "bun build ./src/console/console.tsx ./src/console/theme-init.ts --outdir ./dist --target browser --production",
     "test:unit": "bun test ./test",
     "test:ui": "bun test ./test/ui",
-    "test:browser": "bun test ./test/auth/browser-journey.test.ts"
+    "test:browser": "bun test ./test/auth/browser-journey.test.ts",
+    "start": "bun src/server.ts"
   },
   "dependencies": {
     "@mantine/charts": "9.7.3",

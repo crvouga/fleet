@@ -33,7 +33,7 @@ Installer downloads default to this project's GitHub releases. For private/fork 
 
 ## Host the dashboard
 
-Build `packages/fleet-api/Dockerfile` with this repository root as context, or run `bun run build` and `bun packages/fleet-api/src/server.ts`. Supply:
+Build `packages/fleet-api/Dockerfile` with this repository root as context, or run `bun run build` and `bun run start`. Supply:
 
 - `DATABASE_URL`: PostgreSQL connection string.
 - `FLEET_ADMIN_TOKEN`: random secret of at least 32 characters.

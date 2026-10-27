@@ -16,7 +16,8 @@
     "check:nix": "bun run --cwd packages/fleet check:nix",
     "roles:sync": "python3 packages/fleet/scripts/fleet_roles.py sync",
     "format": "prettier --write .",
-    "test:support": "bun run --cwd packages/assert test && bun run --cwd packages/logger test && bun run --cwd packages/admin-ui test"
+    "test:support": "bun run --cwd packages/assert test && bun run --cwd packages/logger test && bun run --cwd packages/admin-ui test",
+    "start": "bun run --cwd packages/fleet-api start"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
