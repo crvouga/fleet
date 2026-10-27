@@ -1,0 +1,113 @@
+name: Fleet Windows signing
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: read
+concurrency:
+  group: fleet-windows-signing
+  cancel-in-progress: false
+jobs:
+  sign:
+    if: vars.FLEET_WINDOWS_SIGNING_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id }}
+      FLEET_WINDOWS_SIGNING: ${{ vars.FLEET_WINDOWS_SIGNING }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Locate the tested Windows artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/artifacts" --paginate --slurp | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'FLEET-SIGNING-ARTIFACT: cannot inspect source CI artifacts.' }
+          $found = @($artifacts.artifacts | Where-Object { $_.name -eq 'wizard-windows-latest' -and -not $_.expired })
+          if ($found.Count -gt 1) { throw 'FLEET-SIGNING-ARTIFACT: ambiguous Windows artifact.' }
+          if ($found.Count -eq 0) {
+            $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN/jobs" --paginate --slurp | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw 'FLEET-SIGNING-ARTIFACT: cannot inspect source CI jobs.' }
+            if (@($jobs.jobs | Where-Object { $_.name -eq 'Build installer (windows-latest)' -and $_.conclusion -eq 'success' }).Count -gt 0) {
+              throw 'FLEET-SIGNING-ARTIFACT: tested Windows build is missing or expired. Dispatch CI on current main to rebuild it.'
+            }
+          }
+          "present=$($found.Count -eq 1)".ToLowerInvariant() >> $env:GITHUB_OUTPUT
+      - name: Require the verified publisher configuration
+        if: steps.artifact.outputs.present == 'true'
+        id: config
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:FLEET_WINDOWS_SIGNING)) {
+            throw 'FLEET-SIGNING-NOT-CONFIGURED: configure your verified publisher and short-lived signing identity.'
+          }
+          $config = $env:FLEET_WINDOWS_SIGNING | ConvertFrom-Json
+          foreach ($name in @('client_id', 'tenant_id', 'subscription_id', 'endpoint', 'account', 'profile', 'publisher')) {
+            if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.$name)) {
+              throw 'FLEET-SIGNING-NOT-CONFIGURED: verified publisher identity is unavailable. See packages/fleet/docs/windows-signing.md. No unsigned Windows installer will be published.'
+            }
+            if ($config.$name -match '[\r\n]') { throw 'FLEET-SIGNING-CONFIG: invalid multiline configuration.' }
+            "$name=$($config.$name)" >> $env:GITHUB_OUTPUT
+          }
+      - name: Download the exact tested build
+        if: steps.artifact.outputs.present == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: wizard-windows-latest
+          path: signed-installer
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Authenticate with short-lived GitHub identity
+        if: steps.artifact.outputs.present == 'true'
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ steps.config.outputs.client_id }}
+          tenant-id: ${{ steps.config.outputs.tenant_id }}
+          subscription-id: ${{ steps.config.outputs.subscription_id }}
+      - name: Sign and timestamp the Windows installer
+        if: steps.artifact.outputs.present == 'true'
+        uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1
+        with:
+          endpoint: ${{ steps.config.outputs.endpoint }}
+          signing-account-name: ${{ steps.config.outputs.account }}
+          certificate-profile-name: ${{ steps.config.outputs.profile }}
+          files: ${{ github.workspace }}\signed-installer\fleet-installer-windows-x64.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Verify the actual signed download
+        if: steps.artifact.outputs.present == 'true'
+        shell: pwsh
+        env:
+          EXPECTED_PUBLISHER: ${{ steps.config.outputs.publisher }}
+        run: |
+          $env:FLEET_STATE = Join-Path $env:RUNNER_TEMP 'fleet-signed-selftest'
+          $result = & ./signed-installer/fleet-installer-windows-x64.exe --selftest 2>&1
+          if ($LASTEXITCODE -ne 0 -or "$result" -notmatch 'SELFTEST OK') { throw 'FLEET-SIGNED-SELFTEST: the signed installer failed its self-test.' }
+          ./packages/fleet/scripts/windows/verify-release.ps1 -Path signed-installer/fleet-installer-windows-x64.exe -Publisher $env:EXPECTED_PUBLISHER -Revision $env:SOURCE_SHA -RunId $env:SOURCE_RUN -Proof signed-installer/fleet-installer-windows-x64.signature.json
+      - name: Publish only a current, verified signed Windows installer
+        if: steps.artifact.outputs.present == 'true'
+        shell: pwsh
+        run: |
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/fleet-installer" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'FLEET-SIGNING-RELEASE: cannot inspect the published release.' }
+          if (@($release.assets | Where-Object { $_.name -eq 'fleet-installer-windows-x64.signature.json' }).Count -gt 0) {
+            New-Item -ItemType Directory -Path published-proof -Force | Out-Null
+            gh release download fleet-installer --pattern fleet-installer-windows-x64.signature.json --dir published-proof --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'FLEET-SIGNING-PROOF: cannot inspect the existing publisher proof.' }
+            $existing = Get-Content published-proof/fleet-installer-windows-x64.signature.json -Raw | ConvertFrom-Json
+            if ([long]$existing.runId -le 0) { throw 'FLEET-SIGNING-PROOF: invalid source CI run ID.' }
+            if ([long]$existing.runId -gt [long]$env:SOURCE_RUN) { throw 'FLEET-SIGNING-SUPERSEDED: a newer signed build is already published.' }
+          }
+          gh release upload fleet-installer signed-installer/fleet-installer-windows-x64.exe signed-installer/fleet-installer-windows-x64.signature.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'FLEET-SIGNING-PUBLISH: signed installer upload failed; rerun this job.' }

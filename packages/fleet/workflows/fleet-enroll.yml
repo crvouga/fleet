@@ -1,0 +1,36 @@
+name: Fleet enroll
+on:
+  issues:
+    types:
+      - opened
+permissions: {}
+concurrency:
+  group: fleet-enroll-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  approve:
+    if: vars.FLEET_VAULT_ADDR != '' && github.event.issue.author_association == 'OWNER' && startsWith(github.event.issue.title, 'fleet-enroll ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Mint a wrapped enrollment token and seal it to the node
+        env:
+          VAULT_ADDR: ${{ vars.FLEET_VAULT_ADDR }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          RESULT_FILE: ${{ runner.temp }}/result.txt
+        run: python3 -I packages/fleet/scripts/enroll.py
+      - name: Answer on the issue and close it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          RESULT_FILE: ${{ runner.temp }}/result.txt
+        run: |
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RESULT_FILE"
+          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason completed

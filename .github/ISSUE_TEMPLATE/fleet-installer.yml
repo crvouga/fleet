@@ -1,0 +1,39 @@
+name: Fleet installer problem
+description: Something went wrong while turning a computer into a Fleet node (the installer wizard, fleet-node.sh, or the installer screen after the restart).
+title: "Fleet installer: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The installer filled in what it knows. It removes tokens, keys and Wi-Fi passwords, but this issue is public: read it before you submit.
+
+        - If you saved `fleet-diagnostic.txt`, attach it at the end of **Diagnostic report**.
+        - If the report came from the installer screen after the restart, add a photo of that screen.
+
+        Maintainers and agents: start with [packages/fleet/docs/debugging.md](https://github.com/crvouga/workspace/blob/main/packages/fleet/docs/debugging.md). The **Revision** and **Version** lines name the source to read.
+  - type: input
+    id: step
+    attributes:
+      label: Step where it stopped
+      description: Filled in by the installer. For example `Wizard: Install (writing)` or `Installer screen: step 3 of 7, Check Fleet, the update cache and GitHub`.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What you saw and did
+      description: What was on the screen, and what you did next (for example, restarted the computer or pressed Enter).
+      placeholder: After the restart the screen said ... I waited ... minutes, then ...
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      placeholder: The computer would restart and show up as a ready CI node in Fleet.
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Diagnostic report
+      description: Filled in by the installer. If it says it was shortened, attach the full report file or paste it here.
+      render: text
+    validations:
+      required: true

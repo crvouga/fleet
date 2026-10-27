@@ -1,0 +1,46 @@
+name: Runner check
+on:
+  workflow_call:
+    inputs:
+      use_github_hosted:
+        description: Select ubuntu-24.04 while the fleet is unavailable
+        type: boolean
+        required: false
+        default: false
+      nix_command:
+        description: Shell command to run inside the caller's devShell
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  check:
+    if: github.event_name != 'pull_request_target' && (inputs.use_github_hosted || (github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)))
+    runs-on: ${{ inputs.use_github_hosted && 'ubuntu-24.04' || fromJSON('["self-hosted","nixos","ci"]') }}
+    timeout-minutes: 60
+    concurrency:
+      group: nix-runner-check-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Set up Nix
+        if: inputs.use_github_hosted
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Set fallback cache location
+        if: inputs.use_github_hosted
+        run: echo "CI_CACHE_DIR=${RUNNER_TEMP}/ci-cache" >> "$GITHUB_ENV"
+      - name: Prepare project cache namespace
+        shell: bash
+        run: |
+          repo_cache="${GITHUB_REPOSITORY//\//-}"
+          export CI_PROJECT_CACHE_DIR="$CI_CACHE_DIR/$repo_cache"
+          mkdir -p "$CI_PROJECT_CACHE_DIR"
+          echo "CI_PROJECT_CACHE_DIR=$CI_PROJECT_CACHE_DIR" >> "$GITHUB_ENV"
+      - name: Run project toolchain
+        env:
+          CHECK_COMMAND: ${{ inputs.nix_command }}
+        run: nix develop --command bash -euo pipefail -c "$CHECK_COMMAND"
+run-name: "Runner check · ${{ github.event_name == 'pull_request' && format('PR #{0} · {1}', github.event.pull_request.number, github.head_ref) || format('{0} · {1}', github.repository, github.ref_name) }}"

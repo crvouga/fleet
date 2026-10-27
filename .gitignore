@@ -1,0 +1,57 @@
+node_modules/
+dist/
+.turbo/
+.wrangler/
+env/
+*.env
+**/.dev.vars
+node.env
+.env*.local
+.fly-token
+.railway-token
+.railway-state.json
+.DS_Store
+*.tsbuildinfo
+/actionlint
+.vault-token
+init-output.json
+.cursor/debug-*.log
+packages/portfolio/.astro/
+packages/turborepo-remote-cache/.env
+.superset/config.local.json
+.superset/.run-pid
+.superset/.run-port
+
+# OpenTofu provider cache, credentials, state and plans. Commit provider locks.
+.domain-migration/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.auto.tfvars.json
+*.backend.hcl
+*.backend.json
+zz-cutover-provider.tf
+crash.log
+
+# Superset design-feedback attachments (generated, not source)
+.superset/attachments/
+
+.superset/.auth-dev/
+.superset/.dev-check/
+
+# Disposable CI provider downloads; never state or credentials.
+.cache/tofu-providers/
+
+# Evaluated Nix derivations and public CI result records.
+packages/fleet/.ci/
+
+# Content-validated formatting results.
+.cache/prettier
+
+__pycache__/
+*.pyc
+result*
+.cache/

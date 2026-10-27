@@ -1,0 +1,1038 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fleet installer</title>
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body>
+    <header class="admin-header">
+      <div class="admin-brand">
+        <span class="admin-mark">▤</span>
+        <div>
+          Fleet
+          <div class="admin-subtitle">Installer console</div>
+        </div>
+      </div>
+      <div class="admin-actions">
+        <button
+          type="button"
+          id="report-anywhere"
+          onclick="reportAnywhere()"
+          title="Open a pre-filled GitHub issue about this step"
+        >
+          Report a problem
+        </button>
+        <label class="admin-theme"
+          ><span>Appearance</span
+          ><select id="admin-theme" aria-label="Color theme">
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+            <option value="auto">System</option>
+          </select></label
+        >
+      </div>
+    </header>
+    <p
+      id="report-anywhere-status"
+      class="admin-report-status"
+      role="status"
+    ></p>
+    <main class="admin-main">
+      <div class="admin-intro">
+        <h1>Fleet installer</h1>
+        <p>
+          Choose a node role and confirm the disk. Preparation and installation
+          run automatically.
+        </p>
+      </div>
+      <ol class="admin-stepper" aria-label="Installation progress">
+        <li data-step="choose" aria-current="step">1 · Choose</li>
+        <li data-step="configure">2 · Configure</li>
+        <li data-step="review">3 · Review</li>
+        <li data-step="install">4 · Install</li>
+      </ol>
+      <noscript><p class="fail">This page needs JavaScript.</p></noscript>
+      <section id="app" class="admin-card" aria-live="polite">
+        <p>Looking at this computer…</p>
+      </section>
+    </main>
+
+    <script>
+      'use strict';
+      const TOKEN =
+        new URLSearchParams(location.search).get('t') ||
+        sessionStorage.getItem('fleet-token') ||
+        '';
+      if (TOKEN) sessionStorage.setItem('fleet-token', TOKEN);
+      history.replaceState(null, '', location.pathname);
+      const state = {
+        scan: null,
+        mode: null,
+        role: null,
+        usb: null,
+        token: '',
+        plan: null,
+        sshKey: '',
+        sawReboot: false,
+        lastJob: null,
+        lastBody: null,
+        wifi: null,
+        retry: null,
+        problem: null,
+        report: '',
+        issueUrl: null,
+        diagnostic: null,
+        diagnosticTicket: 0,
+      };
+      const app = document.getElementById('app');
+
+      async function api(path, body) {
+        let res;
+        try {
+          res = await fetch(path, {
+            method: body === undefined ? 'GET' : 'POST',
+            headers: {
+              'X-Fleet-Token': TOKEN,
+              'Content-Type': 'application/json',
+            },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+        } catch (e) {
+          const err = new Error(
+            'This page lost its connection to the Fleet installer program.'
+          );
+          err.fix =
+            'Check that the Fleet installer is still running (its window or terminal is open), then press Try again. If it was closed, start it again.';
+          throw err;
+        }
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (e) {
+          /* not JSON */
+        }
+        if (!res.ok) {
+          const err = new Error(data.error || 'HTTP ' + res.status);
+          err.fix = data.fix;
+          err.guidance = data.guidance;
+          err.log = data.log;
+          throw err;
+        }
+        return data;
+      }
+      function esc(s) {
+        return String(s == null ? '' : s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              '&': '&amp;',
+              '<': '&lt;',
+              '>': '&gt;',
+              '"': '&quot;',
+              "'": '&#39;',
+            })[c]
+        );
+      }
+      function show(html) {
+        const previousHeading = app.querySelector('h2')?.textContent;
+        app.innerHTML = html;
+        const step = /Working|Restarting|Done|did not finish|Cancelled/.test(
+          html
+        )
+          ? 'install'
+          : state.plan
+            ? 'review'
+            : state.mode
+              ? 'configure'
+              : 'choose';
+        document.querySelectorAll('[data-step]').forEach((item) => {
+          if (item.dataset.step === step)
+            item.setAttribute('aria-current', 'step');
+          else item.removeAttribute('aria-current');
+        });
+        const heading = app.querySelector('h2');
+        if (heading && heading.textContent !== previousHeading) {
+          heading.tabIndex = -1;
+          heading.focus({ preventScroll: true });
+        }
+      }
+      function problem(err, retry, where) {
+        return trouble({
+          message: err.message,
+          fix: err.fix,
+          guidance: err.guidance,
+          log: err.log,
+          retry: retry || (() => start()),
+          where: where,
+        });
+      }
+      // One recovery panel for every failure: what happened, what to do, a
+      // retry where it is safe, and a report an agent or an issue can use.
+      function trouble(t) {
+        const g = t.guidance || {};
+        state.retry = t.retry && g.retry !== false ? t.retry : null;
+        state.problem = t.job
+          ? null
+          : {
+              message: t.message,
+              fix: t.fix,
+              where: t.where,
+              mode: state.mode,
+              role: state.role,
+            };
+        state.report = fallbackReport(t);
+        state.issueUrl = null;
+        const steps =
+          g.steps && g.steps.length ? g.steps : t.fix ? [t.fix] : [];
+        const h =
+          '<div class="box"><p class="fail">' +
+          esc(t.message) +
+          '</p>' +
+          (g.summary ? '<p><b>' + esc(g.summary) + '</b></p>' : '') +
+          (steps.length
+            ? '<p>What to do:</p><ol>' +
+              steps.map((step) => '<li>' + esc(step) + '</li>').join('') +
+              '</ol>'
+            : '') +
+          (g.safety ? '<p><small>' + esc(g.safety) + '</small></p>' : '') +
+          (t.log ? '<p><small>Log: ' + esc(t.log) + '</small></p>' : '') +
+          '<p>' +
+          (state.retry
+            ? '<button class="primary" onclick="retry()">' +
+              esc(t.retryLabel || 'Try again') +
+              '</button>'
+            : '') +
+          '<button onclick="copyDiagnostic()">Copy diagnostic report</button>' +
+          '<button onclick="saveDiagnostic()">Save diagnostic report</button>' +
+          '<button onclick="reportIssue()">Report on GitHub</button>' +
+          (t.noStartOver
+            ? ''
+            : '<button onclick="start()">Start over</button>') +
+          '</p><p id="diagnostic-status" role="status"><small>Copy diagnostic report puts the error, this computer\'s details and the recent log on the clipboard, ready to paste to an agent. Report on GitHub opens a pre-filled public issue; review it before you submit.</small></p>' +
+          '<details><summary>Error details for support or an LLM</summary><textarea id="diagnostic-report" readonly rows="12"></textarea></details></div>';
+        loadDiagnostic();
+        return h;
+      }
+      function retry() {
+        const again = state.retry;
+        if (again) again();
+      }
+      function fallbackReport(t) {
+        const j = t.job || state.lastJob;
+        const g = t.guidance || {};
+        return [
+          'Fleet installer diagnostic',
+          '(The installer program did not answer, so this report has only what the page knows.)',
+          'Version: ' + (j?.version || state.scan?.version || 'unknown'),
+          'Attempt: ' + (j?.attempt || 'unknown'),
+          'System: ' +
+            (state.scan?.os || 'unknown') +
+            ' / ' +
+            (state.scan?.arch || 'unknown'),
+          'Where: ' + (t.where || 'install job'),
+          'Mode: ' + state.mode,
+          'State: ' + (j?.state || 'connection lost'),
+          'Step: ' + (j?.step || 'unknown'),
+          'Result: ' + (t.message || j?.message || 'No final result received'),
+          'Next: ' + (t.fix || '-'),
+          ...(g.steps || []).map((step) => '- ' + step),
+          'Log: ' + (t.log || state.scan?.log || 'unavailable'),
+          ...(j?.log || []),
+        ].join('\n');
+      }
+      // The report is set as the textarea's value, never as page text, so it
+      // cannot be mistaken for the message it describes.
+      function fillReport() {
+        const box = document.getElementById('diagnostic-report');
+        if (box) box.value = state.report;
+      }
+      async function loadDiagnostic() {
+        const ticket = ++state.diagnosticTicket;
+        queueMicrotask(fillReport); // after show() has placed the panel
+        state.diagnostic = api('/api/diagnostic', {
+          problem: state.problem,
+        }).then(
+          (d) => {
+            if (ticket !== state.diagnosticTicket) return;
+            state.report = d.report;
+            state.issueUrl = d.issue_url;
+            fillReport();
+          },
+          () => {
+            /* keep the page's own report */
+          }
+        );
+        return state.diagnostic;
+      }
+      function diagnosticStatus(text) {
+        const status = document.getElementById('diagnostic-status');
+        if (status) status.textContent = text;
+      }
+      async function copyText(text) {
+        try {
+          // A clipboard write can wait forever for focus or permission; fall
+          // back to the selection copy after two seconds instead.
+          await Promise.race([
+            navigator.clipboard.writeText(text),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('clipboard timeout')), 2000)
+            ),
+          ]);
+          return true;
+        } catch (_) {
+          const area = document.createElement('textarea');
+          area.value = text;
+          area.setAttribute('readonly', '');
+          area.style.position = 'fixed';
+          area.style.opacity = '0';
+          document.body.appendChild(area);
+          area.select();
+          let copied = false;
+          try {
+            copied = document.execCommand('copy');
+          } catch (__) {
+            copied = false;
+          }
+          area.remove();
+          return copied;
+        }
+      }
+      async function copyDiagnostic() {
+        await state.diagnostic;
+        const copied = await copyText(state.report);
+        diagnosticStatus(
+          copied
+            ? 'Copied. Paste it to an agent, or into a GitHub issue.'
+            : 'The clipboard is not available. Open Error details below and copy the text by hand.'
+        );
+        if (!copied) {
+          const details = document
+            .getElementById('diagnostic-report')
+            ?.closest('details');
+          if (details) details.open = true;
+          document.getElementById('diagnostic-report')?.select();
+        }
+      }
+      async function saveDiagnostic() {
+        await state.diagnostic;
+        const blob = new Blob([state.report], {
+          type: 'text/plain;charset=utf-8',
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'fleet-diagnostic.txt';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        diagnosticStatus(
+          'Saved the full report. Attach fleet-diagnostic.txt to the GitHub issue or give it to an agent.'
+        );
+      }
+      // The same GitHub issue form the installer program fills in
+      // (.github/ISSUE_TEMPLATE/fleet-installer.yml), for when it cannot answer.
+      function fallbackIssueUrl(report, step) {
+        return (
+          'https://github.com/crvouga/fleet/issues/new?template=fleet-installer.yml&title=' +
+          encodeURIComponent('Fleet installer: installer failure') +
+          '&step=' +
+          encodeURIComponent(step || 'Wizard: ' + currentStep()) +
+          '&diagnostic=' +
+          encodeURIComponent(report.slice(0, 2500))
+        );
+      }
+      function currentStep() {
+        const item = document.querySelector('[data-step][aria-current]');
+        const heading = app.querySelector('h2')?.textContent;
+        return (
+          (item ? item.textContent.replace(/^\d+ · /, '') : 'start') +
+          (heading ? ' (' + heading + ')' : '')
+        );
+      }
+      // Available on every screen, whether or not anything failed: the report
+      // says where the person was and carries the job's evidence.
+      async function reportAnywhere() {
+        // Open the tab during the click, or the browser blocks it.
+        const tab = window.open('about:blank', '_blank');
+        const status = document.getElementById('report-anywhere-status');
+        const where = currentStep();
+        let url, report;
+        try {
+          const d = await api('/api/diagnostic', {
+            problem: state.problem || {
+              message: 'Reported by the person at: ' + where,
+              where: where,
+              mode: state.mode,
+              role: state.role,
+            },
+          });
+          url = d.issue_url;
+          report = d.report;
+        } catch (_) {
+          report = fallbackReport({ where: where });
+          url = fallbackIssueUrl(report, 'Wizard: ' + where);
+        }
+        // Navigate before copying: a clipboard write can wait on focus or
+        // permission, and must never keep the issue from opening.
+        if (tab) {
+          tab.opener = null;
+          tab.location.href = url;
+        }
+        status.textContent = tab
+          ? 'A pre-filled GitHub issue opened in a new tab. Say what you saw, review it, then press Create.'
+          : 'Your browser blocked the new tab. ';
+        if (!tab) {
+          const link = document.createElement('a');
+          link.href = url;
+          link.target = '_blank';
+          link.rel = 'noreferrer';
+          link.textContent = 'Open the pre-filled GitHub issue';
+          status.append(link, '.');
+        }
+        copyText(report).then((copied) => {
+          if (copied)
+            status.append(' The full report is also on your clipboard.');
+        });
+      }
+      function reportIssue() {
+        // Open the window first, while the click still allows it.
+        const url = state.issueUrl || fallbackIssueUrl(state.report);
+        // A window opened with 'noopener' is always reported as null, so cut
+        // the opener link by hand to tell a blocked tab from an opened one.
+        const opened = window.open(url, '_blank');
+        if (opened) opened.opener = null;
+        copyText(state.report).then((copied) => {
+          const status = document.getElementById('diagnostic-status');
+          if (!status) return;
+          status.textContent = opened
+            ? 'A pre-filled GitHub issue opened in a new tab. Review it, then press Submit new issue.'
+            : 'Your browser blocked the new tab. ';
+          if (!opened) {
+            const link = document.createElement('a');
+            link.href = url;
+            link.target = '_blank';
+            link.rel = 'noreferrer';
+            link.textContent = 'Open the pre-filled GitHub issue';
+            status.append(link, '.');
+          }
+          if (copied)
+            status.append(
+              ' The full report is also on your clipboard, in case the issue had to be shortened.'
+            );
+        });
+      }
+      // What the person will see after "Erase and install" on this computer.
+      // The live installer's screens use the same seven steps
+      // (scripts/live_console.py STEPS).
+      function nextSteps() {
+        const windows = state.scan?.os === 'Windows';
+        const original = windows ? 'Windows' : 'the current system';
+        return (
+          '<h3>What happens next</h3><ol>' +
+          (windows
+            ? '<li>Windows restarts by itself about 15 seconds after the installer is ready. Save your work first.</li>'
+            : '<li>This computer restarts straight into the installer.</li>') +
+          '<li>A text screen titled <b>FLEET INSTALLER</b> appears. It lists seven steps and says what to do at each one; usually that is nothing. Keep the network cable plugged in, or stay near the same Wi-Fi. If the Wi-Fi does not connect, the screen says why; a cable, a phone&#39;s USB tethering, or a network chosen there with <code>fleet-wifi</code> (Alt+F2) also works. Its DISK line says whether anything has been erased.</li>' +
+          '<li>Steps 1 to 4 check the network, the approval, Fleet and GitHub. Nothing is erased yet. If something is wrong, the screen says what happened and what to do, shows a QR code that opens a pre-filled GitHub issue, and returns to ' +
+          original +
+          ' after two minutes (press Enter to stay).</li>' +
+          '<li>Step 5 erases this disk, ' +
+          original +
+          ' included. Do not turn the computer off from then on. Step 6 installs the system; it usually takes 5 to 20 minutes and the screen updates every 30 seconds.</li>' +
+          '<li>Step 7 restarts into the new node by itself. Its screen then shows the node&#39;s own status: <b>READY</b> once its runners are online in GitHub, or what is wrong and a QR code to report it. It appears in your Fleet dashboard a few minutes later. There is nothing else to do.</li>' +
+          '</ol><p><small>Anything unexpected? On that screen press Alt+F2 and type <code>fleet-status</code> or <code>fleet-report</code>. Back in ' +
+          original +
+          ', open this installer again and press <b>Report a problem</b>.</small></p>'
+        );
+      }
+      function gb(n) {
+        return n ? (n / 1e9).toFixed(1) + ' GB' : 'unknown size';
+      }
+
+      async function start(resume = false) {
+        state.sawReboot = false;
+        state.lastJob = null;
+        state.mode = null;
+        state.plan = null;
+        show('<p>Looking at this computer…</p>');
+        try {
+          if (resume) {
+            const job = await api('/api/job');
+            if (job.state !== 'idle') {
+              state.mode = job.mode;
+              state.sawReboot = job.step === 'reboot';
+              state.lastJob = job;
+              return progress();
+            }
+          }
+          state.scan = await api('/api/scan');
+        } catch (e) {
+          return show(
+            problem(e, () => start(resume), 'looking at this computer')
+          );
+        }
+        home();
+      }
+
+      function home() {
+        const s = state.scan,
+          here = s.here_blockers.length === 0;
+        let h =
+          '<div class="box">This computer: <b>' +
+          esc(s.os) +
+          ' ' +
+          esc(s.arch) +
+          '</b>' +
+          (s.node_role
+            ? ' — already a <b>' + esc(s.node_role) + '</b> node'
+            : '') +
+          '</div>';
+        if (!s.release.ok) {
+          h += trouble({
+            message:
+              'The installer download cannot be reached: ' + s.release.error,
+            fix: s.release.advice,
+            guidance: s.release.guidance,
+            log: s.log,
+            retry: () => start(),
+            where: 'checking the installer download',
+            noStartOver: true,
+          });
+          return show(h);
+        }
+        h += '<h2>What do you want to do?</h2>';
+        h +=
+          '<button class="primary" id="here" ' +
+          (here ? '' : 'disabled') +
+          ' onclick="pickHere()">Turn THIS computer into a node</button>';
+        if (!here)
+          h +=
+            '<div class="box">Not possible from here: <ul>' +
+            s.here_blockers.map((b) => '<li>' + esc(b) + '</li>').join('') +
+            '</ul></div>';
+        h +=
+          '<br><button class="primary" onclick="pickUsb()">Make an install USB stick for another computer</button>';
+        h +=
+          '<p><small>The USB stick works for any new or old x86-64 computer: start it from the stick and it installs by itself. ' +
+          'Version ' +
+          esc(s.version) +
+          '. Log: ' +
+          esc(s.log || 'none') +
+          '</small></p>';
+        show(h);
+      }
+
+      function pickHere() {
+        state.mode = 'here';
+        chooseRole();
+      }
+      function pickUsb() {
+        state.mode = 'usb';
+        if (state.scan.usb.length === 1) state.usb = state.scan.usb[0].id;
+        chooseUsb();
+      }
+
+      function chooseRole() {
+        const s = state.scan;
+        let h = '<h2>What kind of node?</h2>';
+        s.roles.forEach((r) => {
+          h +=
+            '<label class="choice"><input type="radio" name="role" value="' +
+            esc(r.id) +
+            '"' +
+            (state.role === r.id ? ' checked' : '') +
+            ' onchange="roleChanged()"' +
+            '> <b>' +
+            esc(r.title) +
+            '</b><small>' +
+            esc(r.blurb) +
+            '</small></label>';
+        });
+        if (s.node_role)
+          h +=
+            '<label class="choice"><input type="checkbox" id="reinstall"> <b>Hard reinstall</b><small>Erase and replace this node even when keeping the same role. Every file on its internal disk will be lost.</small></label>';
+        h +=
+          '<div id="devbox-access"' +
+          (state.role === 'devbox' ? '' : ' hidden') +
+          '><h2>Devbox SSH access</h2><p>Select your SSH <b>public</b> key file (usually <code>id_ed25519.pub</code> in your <code>.ssh</code> folder), or paste it below.</p>' +
+          '<label for="key-file">SSH public key file</label><input type="file" id="key-file" accept=".pub" onchange="readPublicKey(this)">' +
+          '<label for="ssh-key">SSH public key</label><input type="text" id="ssh-key" autocomplete="off" spellcheck="false" placeholder="ssh-ed25519 AAAA…" value="' +
+          esc(state.sshKey) +
+          '"></div>';
+        h +=
+          '<p>Enrollment is automatic after the repository owner approves the GitHub page that opens during installation.</p>' +
+          '<details><summary>Already have an enrollment token?</summary><p>Paste it here to use it instead of GitHub approval.</p>' +
+          '<label for="token">Enrollment token (optional)</label><input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="hvs.… (optional)" value="' +
+          esc(state.token) +
+          '"></details>';
+        h +=
+          wifiFields() +
+          '<p><button onclick="start()">Back</button><button class="primary" onclick="reviewHere()">Review</button></p>';
+        show(h);
+      }
+
+      function roleChanged() {
+        document.getElementById('devbox-access').hidden =
+          picked('role') !== 'devbox';
+      }
+
+      function chooseUsb() {
+        const s = state.scan;
+        let h = '<h2>Which USB stick?</h2>';
+        if (!s.usb.length)
+          h +=
+            '<div class="box">No USB stick found. Plug one in (at least 8 GB), then press Rescan. Everything on it will be erased.</div>';
+        s.usb.forEach((u) => {
+          h +=
+            '<label class="choice"><input type="radio" name="usb" value="' +
+            esc(u.id) +
+            '"' +
+            (state.usb === u.id ? ' checked' : '') +
+            '> <b>' +
+            esc(u.plain) +
+            '</b><small>' +
+            esc(u.path) +
+            (u.mounted ? ' — in use; it will be released' : '') +
+            '</small></label>';
+        });
+        h +=
+          wifiFields() +
+          '<p><button onclick="start()">Back</button><button onclick="rescanUsb()">Rescan</button>' +
+          '<button class="primary" ' +
+          (s.usb.length ? '' : 'disabled') +
+          ' onclick="reviewUsb()">Review</button></p>';
+        show(h);
+      }
+      async function rescanUsb() {
+        try {
+          state.scan = await api('/api/scan');
+        } catch (e) {
+          return show(problem(e, rescanUsb, 'rescanning USB disks'));
+        }
+        if (state.scan.usb.length === 1) state.usb = state.scan.usb[0].id;
+        chooseUsb();
+      }
+
+      function picked(name) {
+        const el = document.querySelector('input[name="' + name + '"]:checked');
+        return el ? el.value : null;
+      }
+
+      async function reviewHere() {
+        state.role = picked('role');
+        state.token = document.getElementById('token').value.trim();
+        state.sshKey = document.getElementById('ssh-key').value.trim();
+        if (!state.role) return alert('Choose what kind of node first.');
+        review({
+          mode: 'here',
+          role: state.role,
+          token: state.token,
+          ssh_key: state.sshKey,
+          reinstall: document.getElementById('reinstall')?.checked === true,
+          disk_id: state.scan.internal.id,
+          wifi: readWifi(),
+        });
+      }
+      async function readPublicKey(input) {
+        const file = input.files[0];
+        if (!file) return;
+        if (file.size > 2048 || !file.name.endsWith('.pub'))
+          return alert(
+            'Choose the small .pub public key file. Never choose a private key.'
+          );
+        document.getElementById('ssh-key').value = await file.text();
+      }
+      async function reviewUsb() {
+        state.usb = picked('usb');
+        if (!state.usb) return alert('Choose a USB stick first.');
+        review({ mode: 'usb', disk_id: state.usb, wifi: readWifi() });
+      }
+
+      function wifiFields() {
+        const wifi = state.wifi || {};
+        return (
+          '<p>Saved Wi-Fi settings are carried over automatically when the operating system permits it. Ethernet also works.</p>' +
+          '<details><summary>Use a different Wi-Fi network</summary>' +
+          '<p>Enter these only to override automatic detection. Wi-Fi settings saved on an install USB include the password; keep the USB private.</p>' +
+          '<label for="wifi-ssid">Wi-Fi network name</label><input id="wifi-ssid" autocomplete="off" spellcheck="false" value="' +
+          esc(wifi.ssid || '') +
+          '">' +
+          '<label for="wifi-auth">Wi-Fi security</label><select id="wifi-auth">' +
+          [
+            ['wpa-psk', 'WPA/WPA2 Personal'],
+            ['sae', 'WPA3 Personal'],
+            ['open', 'Open network'],
+          ]
+            .map(
+              ([value, label]) =>
+                '<option value="' +
+                value +
+                '"' +
+                ((wifi.auth || 'wpa-psk') === value ? ' selected' : '') +
+                '>' +
+                label +
+                '</option>'
+            )
+            .join('') +
+          '</select>' +
+          '<label for="wifi-password">Wi-Fi password</label><input id="wifi-password" type="password" autocomplete="new-password" value="' +
+          esc(wifi.password || '') +
+          '">' +
+          '<label><input id="wifi-hidden" type="checkbox"' +
+          (wifi.hidden ? ' checked' : '') +
+          '> Hidden network</label></details>'
+        );
+      }
+
+      function readWifi() {
+        const ssid = document.getElementById('wifi-ssid').value;
+        const password = document.getElementById('wifi-password').value;
+        state.wifi =
+          ssid || password
+            ? {
+                ssid,
+                password,
+                auth: document.getElementById('wifi-auth').value,
+                hidden: document.getElementById('wifi-hidden').checked,
+              }
+            : null;
+        return state.wifi;
+      }
+
+      async function review(body) {
+        state.lastBody = body;
+        state.plan = null;
+        show('<p>Checking everything…</p>');
+        try {
+          state.plan = await api('/api/plan', body);
+        } catch (e) {
+          return show(problem(e, () => review(body), 'review'));
+        }
+        const p = state.plan;
+        let h = '<h2>Review</h2>';
+        const attention = p.findings.filter(
+          (f) => f.status === 'fail' || f.status === 'warn'
+        );
+        const automatic = p.findings.filter((f) => f.automatic);
+        if (automatic.length)
+          h +=
+            '<p>The installer will handle this automatically:</p><ul>' +
+            automatic.map((f) => '<li>' + esc(f.detail) + '</li>').join('') +
+            '</ul>';
+        function checkRow(f) {
+          const cls =
+            f.status === 'fail' ? 'fail' : f.status === 'warn' ? 'warn' : 'ok';
+          return (
+            '<tr><td class="' +
+            cls +
+            '">' +
+            esc(f.status.toUpperCase()) +
+            '</td><td>&nbsp;' +
+            esc(f.name) +
+            '&nbsp;</td><td>' +
+            esc(f.detail) +
+            (f.fix && f.status !== 'ok'
+              ? '<br><small>' + esc(f.fix) + '</small>'
+              : '') +
+            '</td></tr>'
+          );
+        }
+        if (attention.length)
+          h += '<table>' + attention.map(checkRow).join('') + '</table>';
+        const passed = p.findings.filter(
+          (f) => f.status !== 'fail' && f.status !== 'warn'
+        );
+        h +=
+          '<details><summary>Automatic checks (' +
+          passed.length +
+          ')</summary><table>' +
+          passed.map(checkRow).join('') +
+          '</table></details>';
+        if (!p.ready) {
+          h +=
+            '<p class="fail">This needs your attention before installation can continue.</p><button onclick="start()">Start over</button><button class="primary" onclick="review(' +
+            esc(JSON.stringify(body)) +
+            ')">Check again</button>';
+          h += diagnostics({
+            state: 'review',
+            message: 'The review has failed checks.',
+          });
+          return show(h);
+        }
+        h += '<div class="erase"><b>' + esc(p.summary) + '</b></div>';
+        if (p.mode === 'here' && p.network)
+          h +=
+            '<p><b>Network after the restart:</b> ' +
+            (p.network.ssid
+              ? 'the Wi-Fi network “' +
+                esc(p.network.ssid) +
+                '” ' +
+                (p.network.source === 'entered'
+                  ? '(as you entered it).'
+                  : 'is carried over. Its password is read only when the installer is prepared, and stays on this computer and the new node.')
+              : 'no Wi-Fi connection was found to carry over. Plug in a network cable before the restart, or enter the Wi-Fi network under <b>Use a different Wi-Fi network</b>.') +
+            ' The installer checks the connection before it erases anything.</p>';
+        if (state.mode === 'here') h += nextSteps();
+        h +=
+          '<label><input type="checkbox" id="ack"> I understand that <b>' +
+          esc(p.erase) +
+          '</b> will be erased.</label>';
+        h +=
+          '<p><button onclick="start()">Cancel</button><button class="danger" onclick="go()">Erase and install</button></p>';
+        show(h);
+      }
+
+      async function go() {
+        if (!document.getElementById('ack').checked)
+          return alert('Tick the box to confirm.');
+        try {
+          await api('/api/run', {
+            plan_id: state.plan.id,
+            ack: true,
+            disk_id: state.plan.disk_id,
+          });
+        } catch (e) {
+          const body = state.lastBody;
+          return show(
+            problem(e, body ? () => review(body) : null, 'starting the install')
+          );
+        }
+        state.wifi = null;
+        progress();
+      }
+
+      async function progress() {
+        let j;
+        try {
+          j = await api('/api/job');
+        } catch (e) {
+          if (state.mode === 'here' && state.sawReboot)
+            return show(
+              '<h2>Waiting for the new node</h2><p>The connection closed during restart. Installation is not yet confirmed. Fleet will show the node after it boots and reports.</p>' +
+                nextSteps() +
+                '<p>your Fleet dashboard</p>' +
+                diagnostics(state.lastJob)
+            );
+          return show(
+            '<h2 class="fail">Connection lost — installation is not confirmed</h2>' +
+              trouble({
+                message: e.message,
+                fix: e.fix,
+                guidance: {
+                  steps: [
+                    'Do not start another erase yet: a disk operation may still be running.',
+                    e.fix ||
+                      'Check that the Fleet installer is still running, then press Reconnect to this job.',
+                  ],
+                },
+                job: state.lastJob,
+                retry: progress,
+                retryLabel: 'Reconnect to this job',
+                where: 'following the install job',
+              })
+          );
+        }
+        state.lastJob = j;
+        if (j.step === 'reboot') state.sawReboot = true;
+        if (
+          j.state === 'done' ||
+          j.state === 'failed' ||
+          j.state === 'cancelled'
+        )
+          return finish(j);
+        working(j);
+        setTimeout(progress, 600);
+      }
+
+      // What each long step is called, and what it has changed so far.
+      const STEP_TITLES = {
+        download: 'Downloading and verifying the installer',
+        readiness: 'Checking the installer for this role',
+        enroll: 'Waiting for approval on GitHub',
+        permission: 'Waiting for administrator permission',
+        prepare: 'Preparing Windows to start the installer',
+        write: 'Writing the installer partition',
+        stage: 'Placing the installer next to the system',
+        network: 'Saving Wi-Fi settings on the USB disk',
+        // Not the done page's heading: that one appears only once the job has finished.
+        reboot: 'Handing over to the installer',
+      };
+      function changedSoFar(j) {
+        if (state.mode === 'usb')
+          return j.step === 'write' || j.step === 'network'
+            ? 'The USB disk is being overwritten. Nothing else on this computer changes.'
+            : 'Nothing has been written yet.';
+        if (j.step === 'prepare' || j.step === 'write')
+          return 'Windows is being prepared: C: shrinks to make room for the installer and a one-time boot entry is added. Nothing is erased, and the wizard undoes these changes if a step fails.';
+        if (j.step === 'reboot')
+          return 'Nothing is erased yet. After the restart the installer checks the network, the approval and GitHub first; it erases the disk only at its step 5.';
+        return 'Nothing on this computer has been changed yet.';
+      }
+      // Updated in place, not redrawn: a link in the log or the approval box
+      // stays clickable and selectable, and the log keeps its scroll position.
+      function working(j) {
+        let view = document.getElementById('job');
+        if (!view) {
+          show(
+            '<h2 id="job-title">Working…</h2><div id="job"><p id="job-message"></p>' +
+              '<div id="job-approval"></div><progress id="job-bar" max="100"></progress>' +
+              '<p id="job-changed"><small></small></p><p id="job-cancel"></p>' +
+              '<details open><summary>Everything so far</summary><pre id="job-log"></pre></details></div>'
+          );
+          view = document.getElementById('job');
+        }
+        document.getElementById('job-title').textContent =
+          STEP_TITLES[j.step] || 'Working…';
+        document.getElementById('job-message').textContent = j.message || '';
+        const bar = document.getElementById('job-bar');
+        if (j.percent == null) bar.removeAttribute('value');
+        else bar.value = j.percent;
+        document.querySelector('#job-changed small').textContent =
+          changedSoFar(j);
+        const approval = j.approval;
+        const box = document.getElementById('job-approval');
+        const key = approval
+          ? approval.url + approval.received + Math.floor(approval.deadline)
+          : '';
+        if (box.dataset.key !== key) {
+          box.dataset.key = key;
+          box.innerHTML = approval
+            ? '<div class="callout"><p><b>Action needed: approve this computer on GitHub.</b> ' +
+              (approval.received
+                ? 'GitHub received the request; waiting for the approval workflow to answer.'
+                : 'The repository owner opens this link, signed in to GitHub, and presses <b>Submit new issue</b>. Nothing is erased while this waits.') +
+              '</p><p><a href="' +
+              esc(approval.url) +
+              '" target="_blank" rel="noreferrer">Open the approval page on GitHub</a> ' +
+              '<button onclick="navigator.clipboard?.writeText(' +
+              esc(JSON.stringify(approval.url)) +
+              ')">Copy link</button></p><p><small id="job-deadline"></small></p></div>'
+            : '';
+        }
+        const deadline = document.getElementById('job-deadline');
+        if (deadline && approval) {
+          const left = Math.max(
+            0,
+            Math.round(approval.deadline - Date.now() / 1000)
+          );
+          deadline.textContent =
+            'Waits ' +
+            Math.floor(left / 60) +
+            ' min ' +
+            (left % 60) +
+            ' s more, then stops with nothing changed.';
+        }
+        // The server allows Cancel until the administrator step claims its work,
+        // including while the permission prompt is still open.
+        const cancel = document.getElementById('job-cancel');
+        const cancellable = j.cancellable ?? j.state === 'downloading';
+        if (cancel.dataset.on !== String(cancellable)) {
+          cancel.dataset.on = String(cancellable);
+          cancel.innerHTML = cancellable
+            ? '<button onclick="cancelBeforeWrite()">Cancel</button>'
+            : '<small>Cancel is no longer possible: the administrator step is changing this computer. Wait for it to finish.</small>';
+        }
+        const log = document.getElementById('job-log');
+        const text = j.log.join('\n');
+        if (log.dataset.text !== text) {
+          const atEnd =
+            log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+          log.dataset.text = text;
+          log.innerHTML = esc(text).replace(
+            /https:\/\/[^\s<"']+/g,
+            (url) =>
+              '<a href="' +
+              url +
+              '" target="_blank" rel="noreferrer">' +
+              url +
+              '</a>'
+          );
+          if (atEnd) log.scrollTop = log.scrollHeight;
+        }
+      }
+
+      async function cancelBeforeWrite() {
+        try {
+          await api('/api/cancel', {});
+        } catch (e) {
+          alert(e.message + (e.fix ? '\n' + e.fix : ''));
+        }
+      }
+
+      function finish(j) {
+        const r = j.result || {};
+        let h;
+        if (j.state === 'done') {
+          const restarting = state.mode === 'here' && r.restart !== false;
+          h =
+            '<h2 class="ok">' +
+            (state.mode !== 'here'
+              ? 'USB ready'
+              : restarting
+                ? 'Restarting into the installer'
+                : 'Nothing to install') +
+            '</h2><p>' +
+            esc(r.message) +
+            '</p>';
+          if (restarting && state.scan?.os === 'Windows')
+            h +=
+              '<div class="callout"><p><b>Windows restarts in about 15 seconds.</b> Save your work now. If Windows says apps are preventing the restart, choose <b>Restart anyway</b>.</p>' +
+              '<p><small>Nothing is erased yet. If the computer comes back to Windows instead of the installer, open this wizard again: it takes back the preparation and you can try again or make an install USB.</small></p></div>';
+          if (restarting)
+            h +=
+              nextSteps() +
+              '<p>your Fleet dashboard</p>';
+          if (state.mode === 'usb')
+            h +=
+              '<h2>Next</h2><ol><li>Plug the stick into the new computer and start it from the stick (usually F12, F11, Esc or Option at power-on).</li>' +
+              '<li>Choose the role you picked here in the installer menu, then press Enter. The menu waits for your choice; every entry erases the internal disk. A devbox asks for your SSH public key before erasing anything; paste your .pub file contents at that prompt.</li>' +
+              "<li>It erases the computer's internal disk and installs by itself. Remove the stick when it says so.</li></ol>";
+        } else {
+          const body = state.lastBody;
+          h =
+            '<h2 class="fail">' +
+            (j.state === 'cancelled' ? 'Cancelled' : 'It did not finish') +
+            '</h2>' +
+            trouble({
+              message: r.message,
+              fix: r.fix,
+              guidance: r.guidance,
+              log: r.log,
+              job: j,
+              retry: body ? () => review(body) : () => start(),
+            });
+          return show(h);
+        }
+        if (r.log) h += '<p><small>Log: ' + esc(r.log) + '</small></p>';
+        h += diagnostics(j);
+        h += '<button onclick="start()">Start over</button>';
+        show(h);
+      }
+      // Details for a finished or unconfirmed job that did not fail.
+      function diagnostics(j) {
+        const r = j?.result || {};
+        state.problem = null;
+        state.report = fallbackReport({
+          job: j,
+          message: r.message,
+          fix:
+            r.fix ||
+            'Check this node in Fleet. Do not repeat an erase while a disk operation is still running.',
+          log: r.log,
+        });
+        state.issueUrl = null;
+        loadDiagnostic();
+        return (
+          '<details><summary>Error details for support or an LLM</summary><textarea id="diagnostic-report" readonly rows="12"></textarea><p><button onclick="copyDiagnostic()">Copy diagnostic report</button>' +
+          '<button onclick="saveDiagnostic()">Save diagnostic report</button>' +
+          '<button onclick="reportIssue()">Report on GitHub</button></p><p id="diagnostic-status" role="status"></p></details>'
+        );
+      }
+      start(true);
+    </script>
+  </body>
+</html>

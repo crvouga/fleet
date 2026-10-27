@@ -1,0 +1,31 @@
+# Copy to a trusted private project and pin this workspace's reusable workflow SHA.
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    uses: OWNER/WORKSPACE/.github/workflows/runner-check.yml@REVIEWED_COMMIT_SHA
+    with:
+      nix_command: YOUR_PROJECT_CHECK
+      use_github_hosted: false # explicit hosted fallback; no automatic queue failover
+  # Alternative to the reusable job: direct label routing and a fleet-sized matrix.
+  shards:
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, nixos, ci]
+    strategy:
+      fail-fast: true
+      max-parallel: 4 # a 16-core 32 GiB node; reduce when other jobs share it
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: nix develop --command YOUR_SHARD_CHECK "$SHARD"
