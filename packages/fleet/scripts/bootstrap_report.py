@@ -98,7 +98,8 @@ class BootstrapReporter:
 def main(args):
     try:
         toplevel, role, token_file, message, *parent = args
-        metadata = json.loads((Path(toplevel) / "etc/fleet/bootstrap.json").read_text())
+        metadata_path = Path(toplevel) / "etc/fleet/bootstrap.json"
+        metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
         if metadata.get("approvalMode") == "local" and metadata.get("apiUrl") == "":
             return 0
         reporter = BootstrapReporter(toplevel, role, token_file)

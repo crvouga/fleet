@@ -10,7 +10,7 @@ body:
         - If you saved `fleet-diagnostic.txt`, attach it at the end of **Diagnostic report**.
         - If the report came from the installer screen after the restart, add a photo of that screen.
 
-        Maintainers and agents: start with [packages/fleet/docs/debugging.md](https://github.com/crvouga/workspace/blob/main/packages/fleet/docs/debugging.md). The **Revision** and **Version** lines name the source to read.
+        Maintainers and agents: start with [packages/fleet/docs/debugging.md](https://github.com/crvouga/fleet/blob/main/packages/fleet/docs/debugging.md). The **Revision** and **Version** lines name the source to read.
   - type: input
     id: step
     attributes:

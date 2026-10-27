@@ -125,6 +125,17 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
       bootstrap = bootstrapFor pkgs;
     };
     checks.${system} = lib.genAttrs roles.published (attr: toplevel attr) // {
+      deployment-overrides = let
+        configured = self.lib.mkFleet {
+          shared.fleetApi.url = "https://fleet.example.org";
+          shared.repo.pollSeconds = 60;
+        };
+        node = configured.nixosConfigurations.devbox.config;
+        valid = node.systemd.services.fleet-agent.environment.FLEET_API_URL == "https://fleet.example.org"
+          && node.systemd.timers.fleet-sync.timerConfig.OnUnitInactiveSec == "60s";
+      in pkgs.runCommand "fleet-deployment-overrides" { } (
+        if valid then "mkdir -p $out"
+        else "echo 'deployment overrides were not applied' >&2; exit 1");
       devbox-vm = import ./tests/devbox.nix testArgs;
       native-vm = import ./tests/native.nix testArgs;
       installer = self.packages.${system}.installer;

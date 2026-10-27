@@ -459,7 +459,8 @@ jobs:
       - nix
       - installer
       - release
-    runs-on: ubuntu-slim
+      - image
+    runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Check platform results
@@ -498,3 +499,15 @@ jobs:
           if [ "$RELEASE_REQUIRED" = true ]; then
             test "$(jq -r '.release.result' <<< "$RESULTS")" = success
           fi
+      - name: Verify API container validation
+        env:
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: test "$IMAGE_RESULT" = success
+  image:
+    name: API container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the independent API image
+        run: docker build --file packages/fleet-api/Dockerfile --tag fleet-api:ci .

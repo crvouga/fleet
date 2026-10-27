@@ -44,7 +44,7 @@ Build `packages/fleet-api/Dockerfile` with this repository root as context, or r
 
 Apply [schema.hcl](packages/fleet-api/schema.hcl) using your migration system before startup. Provision your own database, TLS, OIDC client, backups and secrets through your infrastructure tooling. Fleet does not create these resources. Insert the initial authorized email into `fleet.allowed_emails` through the database owner; first sign-in never grants access. Without OIDC the bearer-token node/admin API remains available, while browser login is disabled.
 
-Shared role-key enrollment through Vault/OpenBao is optional. Configure `FLEET_VAULT_ADDR` on installer clients and `FLEET_VAULT_ADDR` repository variable for the opt-in enrollment workflow. Configure its JWT trust to your exact repository, workflow and branch. An example wrapped-read policy is under `packages/fleet/examples/vault/`. The default installer can generate its own age key; shared encrypted role credentials require your own enrollment configuration. `FLEET_KEYS_OUT` controls private key output (default `~/.config/fleet/`, mode 0600). Never commit private keys or tokens.
+Shared role-key enrollment through Vault/OpenBao is optional. Configure `FLEET_VAULT_ADDR` on installer clients and `FLEET_VAULT_ADDR` repository variable for the opt-in enrollment workflow. Configure its JWT trust to your exact repository, workflow and branch. An example wrapped-read policy is under `packages/fleet/examples/vault/`. For a standalone node without shared role secrets, use `fleet-node devbox --no-enroll` after building your configured installer. The installer generates its own age key; shared encrypted role credentials require your own enrollment configuration. `FLEET_KEYS_OUT` controls private key output (default `~/.config/fleet/`, mode 0600). Never commit private keys or tokens.
 
 ## Develop
 
@@ -62,8 +62,8 @@ The `packages/` layout preserves imports and installation paths. Small supportin
 
 MIT. See [LICENSE](LICENSE). Third-party tools and Nix inputs retain their respective licenses.
 
-To keep deployment settings in a separate Nix flake, add this repository's
-`packages/fleet` flake as an input and call `fleet.lib.mkFleet` with
-`{ inherit self; shared = { repo = { url = "https://github.com/OWNER/DEPLOYMENT.git"; flakeDir = "PATH"; }; fleetApi.url = "https://fleet.example.org"; }; roles.ci = { github = /* your registration settings */; secretsFile = ./secrets/ci.yaml; }; }`.
-Overrides are merged recursively per role; the registry, modules and tools remain
-in Fleet. Pin the input and review lock updates before rollout.
+To keep deployment settings in a separate repository, start from
+[the deployment example](examples/deployment/flake.nix). It calls the public
+`fleet.lib.mkFleet` interface with operator-owned `shared` settings and optional
+`roles.<name>` overrides. Settings merge recursively. Generate and review your
+input lock before rollout; the role registry, modules and tools stay in Fleet.

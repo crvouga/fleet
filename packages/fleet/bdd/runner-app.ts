@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createSign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 export async function runnerConfig() {
@@ -22,7 +24,8 @@ async function privateKey(): Promise<string> {
   if (!ageKey) {
     const inputs = JSON.parse(
       await readFile(
-        '../infra/tofu/vault/fleet-age-keys.auto.tfvars.json',
+        process.env['FLEET_KEYS_OUT'] ??
+          join(homedir(), '.config/fleet/fleet-age-keys.auto.tfvars.json'),
         'utf8'
       )
     ) as {

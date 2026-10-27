@@ -70,7 +70,7 @@ The workflow is `.github/workflows/ci.yml`. It runs on GitHub-hosted `ubuntu-lat
 
 A rollback is a revert pull request. It uses the same checks and the same queue. Nodes build the reverted revision with upstream substitutes. systemd-boot keeps 8 generations. If SSH is gone, pick an older generation from the console. Nothing force-pushes `main`.
 
-The `main` ruleset (pull request, `Check`, `Fleet`, merge queue, no force-push) is declared in OpenTofu. This package does not apply it. Apply a reviewed plan from `packages/infra`.
+The `main` ruleset (pull request, `Check`, `Fleet`, merge queue, no force-push) is declared in OpenTofu. This package does not apply it. Configure repository policy through your own infrastructure tooling.
 
 Once a week, `.github/workflows/maintenance.yml` opens or updates one pull request that only changes `packages/fleet/flake.lock`. That pull request uses this same path. It does not push `main`.
 
