@@ -12,7 +12,7 @@
       slotMax = 4;
       highMemGiB = 2;
     };
-    github = settings.github // { organization = "mock-org"; appId = "123"; installationId = "456"; };
+    github = settings.github // { scope = "organization"; organization = "mock-org"; appId = "123"; installationId = "456"; };
   };
   mock = pkgs.callPackage ({ nodeRuntimes ? [] }: pkgs.runCommand "mock-github-runner" {} ''
     mkdir -p $out/bin

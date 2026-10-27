@@ -38,7 +38,7 @@ MOCK
       perRunnerGiB = 1;
       perRunnerCores = 1;
     };
-    github = settings.github // { organization = "mock-org"; appId = "123"; installationId = "456"; };
+    github = settings.github // { scope = "organization"; organization = "mock-org"; appId = "123"; installationId = "456"; };
     cache = settings.cache // { remote = settings.cache.remote // { enable = false; }; };
   };
 in pkgs.testers.runNixOSTest {

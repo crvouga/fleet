@@ -3,7 +3,11 @@
   # cattle.py writes to /run/fleet/slot-count for the live CPU and RAM.
   slots = settings.capacity.slotMax;
   tools = import ./fleet-tools.nix { inherit lib pkgs; };
-  ids = map (n: "slot-${toString n}") (lib.range 1 slots);
+  hasTarget = if settings.github.scope == "organization"
+    then settings.github.organization != ""
+    else settings.github.repositories != [ ];
+  # Templates have no credentials or runner targets. Do not fabricate a scope.
+  ids = lib.optionals hasTarget (map (n: "slot-${toString n}") (lib.range 1 slots));
   # The NixOS module applies `pkg.override { nodeRuntimes }`.
   # writeShellScriptBin has no override. callPackage supplies one, and the
   # real listener still comes from github-runner so its Node layout follows.

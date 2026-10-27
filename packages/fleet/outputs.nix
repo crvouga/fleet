@@ -129,10 +129,17 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
         configured = self.lib.mkFleet {
           shared.fleetApi.url = "https://fleet.example.org";
           shared.repo.pollSeconds = 60;
+          roles.ci = {
+            github = builtins.fromJSON (builtins.readFile ./settings/github.json);
+            secretsFile = null;
+          };
         };
         node = configured.nixosConfigurations.devbox.config;
+        template = configured.nixosConfigurations.ci.config;
         valid = node.systemd.services.fleet-agent.environment.FLEET_API_URL == "https://fleet.example.org"
-          && node.systemd.timers.fleet-sync.timerConfig.OnUnitInactiveSec == "60s";
+          && node.systemd.timers.fleet-sync.timerConfig.OnUnitInactiveSec == "60s"
+          && builtins.attrNames template.services.github-runners == [ ]
+          && (builtins.fromJSON template.environment.etc."fleet/bootstrap.json".text).installBlocked != [ ];
       in pkgs.runCommand "fleet-deployment-overrides" { } (
         if valid then "mkdir -p $out"
         else "echo 'deployment overrides were not applied' >&2; exit 1");
