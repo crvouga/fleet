@@ -130,7 +130,14 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
           shared.fleetApi.url = "https://fleet.example.org";
           shared.repo.pollSeconds = 60;
           roles.ci = {
-            github = builtins.fromJSON (builtins.readFile ./settings/github.json);
+            github = {
+              scope = "repository";
+              organization = "";
+              repositories = [ ];
+              runnerGroup = null;
+              appId = "";
+              installationId = "";
+            };
             secretsFile = null;
           };
         };
