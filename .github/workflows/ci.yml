@@ -1,0 +1,513 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request: {}
+  workflow_dispatch: {}
+  workflow_call: {}
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: ariga/setup-atlas@v0
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/browsers
+        with:
+          packages: packages/fleet-api/node_modules/@playwright/test
+      - run: bun run check
+    outputs:
+      fleet: ${{ needs.changes.outputs.fleet }}
+      nix: ${{ needs.changes.outputs.nix }}
+      installer: ${{ needs.changes.outputs.installer }}
+    needs: changes
+  nix:
+    name: Test Nix (${{ matrix.group }})
+    if: needs.changes.outputs.nix == 'true'
+    needs:
+      - changes
+      - coding_tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - roles
+          - runtime
+          - lifecycle
+          - image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: Reuse pinned Nix dependencies
+        if: matrix.group == 'roles' || matrix.group == 'image'
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: nix-store-v1-${{ runner.os }}-${{ runner.arch }}-13d8dd58-${{
+            hashFiles('packages/fleet/flake.lock') }}
+          save: ${{ matrix.group == 'roles' }}
+          gc-max-store-size-linux: 4G
+      - name: Download this workflow's coding runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: fleet-coding-tools
+          path: ${{ runner.temp }}/fleet-coding-tools
+      - name: Import and verify the exact coding runtime
+        working-directory: packages/fleet
+        run: >
+          set -euo pipefail
+
+          zstd --decompress --stdout
+          "$RUNNER_TEMP/fleet-coding-tools/fleet-coding-tools.nar.zst" |
+          nix-store --import > "$RUNNER_TEMP/fleet-coding-imported-paths"
+
+          # Import only from this workflow, then require the evaluated runtime
+
+          # to exist before the check budget starts. This cannot compile OMP.
+
+          nix build --no-write-lock-file --max-jobs 0 --out-link result-coding
+          .#coding-tools
+      - name: Lint workflows and shell scripts
+        if: matrix.group == 'roles'
+        run: nix develop ./packages/fleet --command bash packages/fleet/scripts/lint.sh
+      - name: Evaluate exact Nix derivations
+        working-directory: packages/fleet
+        env:
+          CHECK_GROUP: ${{ matrix.group }}
+        run: python3 scripts/ci-checks.py "$CHECK_GROUP" --plan .ci/nix-plan.json
+          --plan-only
+      - name: Cache successful VM derivations
+        if: matrix.group == 'runtime' || matrix.group == 'lifecycle'
+        id: vm_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: packages/fleet/.ci/nix-results.json
+          key: nix-vm-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{
+            hashFiles('packages/fleet/.ci/nix-plan.json') }}-${{ github.sha
+            }}-${{ github.run_attempt }}
+          restore-keys: >
+            nix-vm-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group
+            }}-${{ hashFiles('packages/fleet/.ci/nix-plan.json') }}-
+
+            nix-vm-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-
+      - name: Test all Nix checks
+        working-directory: packages/fleet
+        env:
+          CHECK_GROUP: ${{ matrix.group }}
+          FRESH_CHECKS: ${{ github.event_name == 'workflow_dispatch' }}
+        run: >
+          check_args=("$CHECK_GROUP" --plan .ci/nix-plan.json)
+
+          if [ "$CHECK_GROUP" = runtime ] || [ "$CHECK_GROUP" = lifecycle ];
+          then
+            check_args+=(--cache .ci/nix-results.json)
+          fi
+
+          if [ "$FRESH_CHECKS" = true ]; then check_args+=(--fresh); fi
+
+          timeout 12m python3 scripts/ci-checks.py "${check_args[@]}"
+      - name: Save successful VM derivations
+        if: always() && !cancelled() && (matrix.group == 'runtime' || matrix.group ==
+          'lifecycle') && steps.vm_cache.outputs.cache-primary-key != '' &&
+          hashFiles('packages/fleet/.ci/nix-results.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: packages/fleet/.ci/nix-results.json
+          key: ${{ steps.vm_cache.outputs.cache-primary-key }}
+      - name: Validate every role's boot material in the built ISO
+        if: matrix.group == 'image'
+        run: python3 packages/fleet/scripts/release-image.py --check
+          packages/fleet/result-iso/iso/fleet-installer.iso
+      - name: Upload fleet-installer
+        if: matrix.group == 'image' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-installer
+          path: packages/fleet/result-iso/iso/fleet-installer.iso
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+  changes:
+    name: Plan checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      fleet: ${{ steps.fleet_impact.outputs.fleet }}
+      nix: ${{ steps.fleet_impact.outputs.nix }}
+      installer: ${{ steps.fleet_impact.outputs.installer }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Find affected integrations
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'merge_group' &&
+            github.event.merge_group.base_sha || '' }}
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha
+            || '' }}
+          filters: |
+            fleet:
+              - packages/**
+              - .github/**
+              - scripts/**
+              - package.json
+              - bun.lock
+              - tsconfig*.json
+      - name: Check that the installer release is complete
+        id: release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          set -euo pipefail
+
+          assets=$(gh release view fleet-installer --json assets --jq
+          '.assets[].name') || assets=''
+
+          for asset in \
+            fleet-installer.iso.parts.json fleet-installer.iso.sha256 fleet-installer.readiness.json fleet-installer.iso.part-000 fleet-node.sh \
+            fleet-installer-windows-x64.exe \
+            fleet-installer-macos-arm64.zip fleet-installer-macos-x64.zip \
+            fleet-installer-linux-arm64.tar.gz fleet-installer-linux-x64.tar.gz; do
+            if ! grep -Fxq "$asset" <<< "$assets"; then
+              echo "Installer release is missing $asset; rebuilding and publishing."
+              echo 'missing=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo 'missing=false' >> "$GITHUB_OUTPUT"
+      - name: Select Fleet PR build lanes
+        id: fleet_impact
+        env:
+          FLEET_AFFECTED: ${{ steps.filter.outputs.fleet == 'true' ||
+            steps.release.outputs.missing == 'true' || github.event_name ==
+            'workflow_dispatch' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 packages/fleet/scripts/ci-impact.py
+  coding_tools:
+    name: Build Fleet coding tools
+    if: needs.changes.outputs.nix == 'true'
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: Cache the coding runtime closure
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        with:
+          primary-key: nix-coding-v1-${{ runner.os }}-${{ runner.arch }}-13d8dd58-${{
+            hashFiles('packages/fleet/flake.lock', 'packages/fleet/flake.nix',
+            'packages/fleet/modules/coding*.nix',
+            'packages/fleet/docs/coding-agent.md',
+            'packages/fleet/tests/coding*') }}
+          restore-prefixes-first-match: nix-coding-v1-${{ runner.os }}-${{ runner.arch }}-13d8dd58-
+          gc-max-store-size-linux: 4G
+      - name: Build the coding runtime and test its launcher
+        working-directory: packages/fleet
+        run: >
+          set -euo pipefail
+
+          nix build --no-write-lock-file --max-jobs 1 --cores 4 -L --out-link
+          result-coding .#coding-tools
+
+          nix build --no-write-lock-file --max-jobs 1 --cores 4 -L --no-link
+          .#checks.x86_64-linux.coding-launcher
+      - name: Export the complete coding runtime closure
+        working-directory: packages/fleet
+        run: >
+          set -euo pipefail
+
+          nix-store --query --requisites ./result-coding >
+          "$RUNNER_TEMP/fleet-coding-paths"
+
+          mapfile -t closure < "$RUNNER_TEMP/fleet-coding-paths"
+
+          [ "${#closure[@]}" -gt 0 ]
+
+          nix-store --export "${closure[@]}" | zstd -T0 -3 >
+          "$RUNNER_TEMP/fleet-coding-tools.nar.zst"
+      - name: Upload the coding runtime for this workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-coding-tools
+          path: ${{ runner.temp }}/fleet-coding-tools.nar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+  installer:
+    name: Build installer (${{ matrix.os }})
+    if: needs.changes.outputs.installer == 'true'
+    needs: changes
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/fleet/wizard/requirements-build.txt
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Cache Bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install only Fleet browser dependencies
+        run: bun install --frozen-lockfile --filter '@pkgs/fleet'
+      - name: Install Chromium
+        uses: ./.github/actions/browsers
+        with:
+          packages: packages/fleet/node_modules/@playwright/test
+      - name: Set up Nix
+        if: startsWith(matrix.os, 'ubuntu-')
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: Test and build the installer concurrently
+        working-directory: packages/fleet
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          PLAYWRIGHT_PATH: "@playwright/test"
+        run: |
+          python -m pip install -r wizard/requirements-build.txt
+          installer_args=(--version "$GITHUB_SHA")
+          if [ "$RUNNER_OS" = Linux ]; then installer_args+=(--native-nix); fi
+          python -B tests/installer.py "${installer_args[@]}"
+      - name: Select the packaged installer for browser acceptance
+        working-directory: packages/fleet
+        run: python bdd/packaged.py
+      - name: Gherkin acceptance against the packaged installer
+        working-directory: packages/fleet
+        env:
+          FLEET_BDD_EXPECT_VERSION: ${{ github.sha }}
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: bun run test:bdd:local
+      - name: Upload fleet-bdd-${{ matrix.os }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-bdd-${{ matrix.os }}
+          path: |
+            packages/fleet/dist/bdd-report/
+            packages/fleet/dist/bdd-results/
+            packages/fleet/dist/bdd-results.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Native Nix installer and Gherkin acceptance
+        if: startsWith(matrix.os, 'ubuntu-')
+        working-directory: packages/fleet
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          FLEET_BDD_EXPECT_VERSION: ${{ github.sha }}
+          FLEET_BDD_OUTPUT_DIR: dist/bdd-native-results
+          PLAYWRIGHT_HTML_OUTPUT_DIR: dist/bdd-native-report
+          PLAYWRIGHT_JSON_OUTPUT_FILE: dist/bdd-native-results.json
+        run: >
+          result-native/bin/fleet-installer --selftest
+
+          FLEET_BDD_WIZARD="$PWD/result-native/bin/fleet-installer" bun run
+          test:bdd:local
+      - name: Upload fleet-bdd-native-${{ matrix.os }}
+        if: always() && startsWith(matrix.os, 'ubuntu-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-bdd-native-${{ matrix.os }}
+          path: |
+            packages/fleet/dist/bdd-native-report/
+            packages/fleet/dist/bdd-native-results/
+            packages/fleet/dist/bdd-native-results.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload wizard-${{ matrix.os }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wizard-${{ matrix.os }}
+          path: packages/fleet/wizard/dist/*
+          if-no-files-found: error
+          retention-days: 14
+  release:
+    name: Release installer
+    if: vars.FLEET_PUBLISH_RELEASES == 'enabled' && (!cancelled() &&
+      needs.check.result == 'success' && needs.nix.result == 'success' &&
+      needs.installer.result == 'success' && needs.check.outputs.fleet == 'true'
+      && (github.event_name == 'merge_group' || (github.ref == 'refs/heads/main'
+      && github.event_name != 'pull_request')))
+    needs:
+      - check
+      - nix
+      - installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: Download fleet-installer
+        uses: actions/download-artifact@v4
+        with:
+          name: fleet-installer
+          path: installer-artifact
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wizard-*
+          path: wizard-artifacts
+          merge-multiple: true
+      - name: Publish the installer and the one-file node entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          set -euo pipefail
+
+          iso=$(find installer-artifact -type f -name 'fleet-installer.iso'
+          -print -quit)
+
+          test -n "$iso"
+
+          # The offline image contains every role and exceeds the 2 GiB asset
+
+          # limit. Clients assemble verified 1 GiB parts into one local ISO.
+
+          python3 packages/fleet/scripts/release-image.py "$iso" image-assets
+
+          cp packages/fleet/scripts/fleet-node.sh fleet-node.sh
+
+          if gh release view fleet-installer >/dev/null 2>&1; then
+            gh release upload fleet-installer image-assets/*.part-* --clobber
+          else
+            gh release create fleet-installer image-assets/*.part-* \
+              --title "Fleet installer" \
+              --notes "Current installer image and the one-file node entry. Replaced when Fleet merges. This release does not expire."
+          fi
+
+          # Publish the manifest after its parts; partial releases fail
+          verification.
+
+          gh release upload fleet-installer image-assets/*.json
+          image-assets/*.sha256 fleet-node.sh --clobber
+
+          # The wizard downloads: one per platform. Every one passed its
+          self-test in CI.
+
+          find wizard-artifacts -type f -exec ls -l {} +
+
+          count=$(find wizard-artifacts -type f | wc -l)
+
+          test "$count" -ge 5
+
+          # Windows is published only after Authenticode verification by
+
+          # fleet-windows-sign.yml; never reset its reputation with unsigned
+          bytes.
+
+          find wizard-artifacts -maxdepth 1 -type f ! -name '*.exe' -exec gh
+          release upload fleet-installer --clobber '{}' +
+  fleet:
+    name: Fleet
+    if: always()
+    needs:
+      - check
+      - nix
+      - installer
+      - release
+      - image
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check platform results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          FLEET: ${{ needs.check.outputs.fleet }}
+          NIX_REQUIRED: ${{ needs.check.outputs.nix }}
+          INSTALLER_REQUIRED: ${{ needs.check.outputs.installer }}
+          RELEASE_REQUIRED: ${{ vars.FLEET_PUBLISH_RELEASES == 'enabled' &&
+            (github.event_name == 'merge_group' || (github.ref ==
+            'refs/heads/main' && github.event_name != 'pull_request')) }}
+        run: >
+          set -euo pipefail
+
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$RESULTS"
+
+          test "$(jq -r '.check.result' <<< "$RESULTS")" = success
+
+          if [ "$FLEET" = false ]; then exit 0; fi
+
+          test "$FLEET" = true
+
+          for job in nix installer; do
+            if [ "$job" = nix ]; then required="$NIX_REQUIRED"; else required="$INSTALLER_REQUIRED"; fi
+            result=$(jq -r --arg job "$job" '.[$job].result' <<< "$RESULTS")
+            if [ "$required" = true ]; then
+              test "$result" = success
+            elif [ "$required" = false ] && [ "$RELEASE_REQUIRED" != true ]; then
+              test "$result" = success || test "$result" = skipped
+            else
+              echo "Missing or invalid Fleet lane selection: $job=$required" >&2
+              exit 1
+            fi
+          done
+
+          if [ "$RELEASE_REQUIRED" = true ]; then
+            test "$(jq -r '.release.result' <<< "$RESULTS")" = success
+          fi
+      - name: Verify API container validation
+        env:
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: test "$IMAGE_RESULT" = success
+  image:
+    name: API container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the independent API image
+        run: docker build --file packages/fleet-api/Dockerfile --tag fleet-api:ci .

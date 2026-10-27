@@ -1,0 +1,20 @@
+{
+  "name": "@pkgs/fleet",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "lint": "bash scripts/lint.sh && bun run lint:bdd",
+    "test": "python3 -B tests/run.py",
+    "check": "bun run lint && bun run test",
+    "check:nix": "nix flake check path:. --system x86_64-linux -L",
+    "test:bdd": "bddgen && playwright test",
+    "test:bdd:local": "bddgen && playwright test --project=local",
+    "test:bdd:live": "bddgen && playwright test --project=live",
+    "tc": "tsc --noEmit -p tsconfig.json",
+    "lint:bdd": "eslint bdd playwright.config.ts --max-warnings 0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "playwright-bdd": "9.2.1"
+  }
+}

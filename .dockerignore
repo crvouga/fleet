@@ -1,0 +1,11 @@
+.git
+.github
+**/node_modules
+**/dist
+**/.cache
+**/.ci
+**/__pycache__
+**/*.env
+**/.env
+**/.env.*
+**/result*

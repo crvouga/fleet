@@ -1,0 +1,108 @@
+:root {
+  color-scheme: light dark;
+  --relay-canvas: light-dark(#f8f9fa, #141517);
+  --relay-surface: light-dark(#ffffff, #242424);
+  --relay-text: light-dark(#25262b, #c9c9c9);
+  --relay-border: light-dark(#dee2e6, #424242);
+}
+:root[data-mantine-color-scheme='light'] {
+  color-scheme: light;
+}
+:root[data-mantine-color-scheme='dark'] {
+  color-scheme: dark;
+}
+body {
+  background: var(--relay-canvas);
+  color: var(--relay-text);
+}
+.mantine-AppShell-navbar {
+  background: var(--mantine-color-body);
+}
+.mantine-NavLink-root {
+  border-radius: var(--mantine-radius-md);
+}
+.mantine-Table-th {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 600;
+}
+.mantine-Drawer-title,
+.mantine-Modal-title {
+  font-weight: 650;
+}
+.mantine-Code-root {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.break-word {
+  overflow-wrap: anywhere;
+}
+/* Authentication failures remain useful when the JavaScript bundle fails. */
+body > main {
+  max-width: 540px;
+  margin: 12vh auto;
+  padding: 24px;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+  color: var(--relay-text);
+}
+body > main section {
+  padding: 24px;
+  border: 1px solid var(--relay-border);
+  border-radius: 12px;
+  background: var(--relay-surface);
+}
+body > main .button {
+  display: inline-block;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #4c6ef5;
+  color: white;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled, #4c6ef5);
+  outline-offset: 3px;
+}
+.skip-link {
+  position: fixed;
+  top: -100px;
+  left: 12px;
+  z-index: 1000;
+  padding: 12px 18px;
+  border-radius: 8px;
+  background: var(--mantine-primary-color-filled);
+  color: white;
+}
+.skip-link:focus {
+  top: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (max-width: 35.99em) {
+  .theme-trigger .mantine-Button-section {
+    margin: 0;
+  }
+  .theme-trigger .mantine-Button-label {
+    display: none;
+  }
+}
+
+/* Route headings announce navigation without looking like interactive controls. */
+main:focus,
+main h1:focus {
+  outline: none;
+}
+
+.theme-trigger {
+  flex-shrink: 0;
+}

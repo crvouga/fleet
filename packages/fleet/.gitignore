@@ -1,0 +1,11 @@
+result
+result-*
+__pycache__/
+*.pyc
+secrets/*.key
+secrets/*.pem
+secrets/*.plain.*
+secrets/extra-files/
+wizard/dist/
+wizard/build/
+wizard/_version.py

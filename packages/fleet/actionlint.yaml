@@ -1,0 +1,2 @@
+self-hosted-runner:
+  labels: [nixos, ci, macos-15-intel]

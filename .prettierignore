@@ -1,0 +1,8 @@
+node_modules
+dist
+bun.lock
+.git
+.cache
+.ci
+result*
+__pycache__

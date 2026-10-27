@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "installerDefault": "ci",
+  "roles": [
+    {
+      "name": "ci",
+      "state": "active",
+      "title": "CI runner",
+      "summary": "Runs GitHub Actions jobs for private repositories on ephemeral runner slots.",
+      "settings": "fleet.nix",
+      "secrets": "secrets/fleet.yaml",
+      "closures": [
+        {
+          "attr": "ci",
+          "host": "hosts/ci.nix",
+          "installer": true,
+          "published": true
+        },
+        {
+          "attr": "ci-gpu",
+          "host": "hosts/ci-gpu.nix",
+          "installer": false,
+          "published": true
+        }
+      ]
+    },
+    {
+      "name": "web",
+      "state": "retired",
+      "title": "Web server",
+      "summary": "Retired 2026-10-26: every application is hosted on Railway. Its Vault role token and age key stay until a reviewed vault plan removes them."
+    },
+    {
+      "name": "cache",
+      "state": "retired",
+      "title": "Attic binary cache",
+      "summary": "Retired 2026-10-26: nodes use the cloud cache at cache.example.com/nix. Its Vault role token and age key stay until a reviewed vault plan removes them."
+    },
+    {
+      "name": "netboot",
+      "state": "retired",
+      "title": "Network boot server",
+      "summary": "Retired 2026-10-26: it never served an installer that could finish. Reinstall with fleet-node on the machine. Its Vault role token and age key stay until a reviewed vault plan removes them."
+    },
+    {
+      "name": "devbox",
+      "state": "active",
+      "title": "Development box",
+      "summary": "One developer works on applications over SSH. No runner units or CI credentials.",
+      "settings": "devbox.nix",
+      "secrets": "secrets/devbox.yaml",
+      "closures": [
+        {
+          "attr": "devbox",
+          "host": "hosts/devbox.nix",
+          "installer": true,
+          "published": true
+        }
+      ]
+    }
+  ]
+}
