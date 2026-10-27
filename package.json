@@ -9,13 +9,14 @@
     "check": "bun run tc && bun run lint && bun run build && bun run test",
     "tc": "bun run --filter \"@pkgs/*\" tc",
     "lint": "bun run --filter \"@pkgs/*\" lint",
-    "test": "bun test ./scripts && bun run --cwd packages/fleet test && bun run --cwd packages/fleet-api test:unit",
+    "test": "bun test ./scripts && bun run test:support && bun run --cwd packages/fleet test && bun run --cwd packages/fleet-api test:unit",
     "build": "bun run --cwd packages/fleet-api build",
     "dev": "bun run --cwd packages/fleet-api dev",
     "dev:fixtures": "bun run --cwd packages/fleet-api dev:fixtures",
     "check:nix": "bun run --cwd packages/fleet check:nix",
     "roles:sync": "python3 packages/fleet/scripts/fleet_roles.py sync",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "test:support": "bun run --cwd packages/assert test && bun run --cwd packages/logger test && bun run --cwd packages/admin-ui test"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
