@@ -69,9 +69,12 @@ def check(toplevel, role, age_file, token_file, run=subprocess.run, api=check_ap
     blocked = metadata.get('installBlocked', metadata['blocked'])
     require(not blocked, 'FLEET_PLATFORM_NOT_READY: ' + '; '.join(blocked))
     token = Path(token_file).read_text().strip() if Path(token_file).is_file() else ''
-    require(re.fullmatch(r'[A-Za-z0-9._-]{8,512}', token),
+    local = metadata.get("approvalMode") == "local"
+    require(not local or metadata.get("apiUrl") == "",
+            "FLEET_APPROVAL_INVALID: local approval cannot name a remote API.")
+    require(local or re.fullmatch(r'[A-Za-z0-9._-]{8,512}', token),
             'FLEET_ENROLLMENT_MISSING: automatic Fleet approval requires an enrolled installer with an API role credential. Nothing was erased.')
-    require(Path(age_file).is_file(), 'FLEET_ROLE_KEY_MISSING: the enrolled role key is required before installation.')
+    require((local and metadata.get('secretsFile') is None) or Path(age_file).is_file(), 'FLEET_ROLE_KEY_MISSING: the enrolled role key is required before installation.')
     source = metadata.get('secretsFile')
     if metadata.get('updateMode') == 'local':
         try:
@@ -130,16 +133,22 @@ def check(toplevel, role, age_file, token_file, run=subprocess.run, api=check_ap
                     said = said[-1][:300] if said and said[-1].startswith('FLEET_') else ''
                     require(result.returncode == 0, (said + f' (target {target}). Nothing was erased.') if said else
                             'FLEET_GITHUB_REGISTRATION: GitHub rejected runner registration. Check the App installation and repository access before installing.')
-    api(metadata['apiUrl'], role, token)
+    if not local:
+        api(metadata['apiUrl'], role, token)
 
 
 if __name__ == '__main__':
     reporter = None
     try:
-        reporter = BootstrapReporter(sys.argv[1], sys.argv[2], sys.argv[4])
-        reporter.begin(check_api)
-        check(*sys.argv[1:], api=lambda *args: None)
-        reporter.report('FLEET_INSTALLING: preflight passed; awaiting installation and the first installed-system heartbeat.')
+        metadata = json.loads((Path(sys.argv[1]) / "etc/fleet/bootstrap.json").read_text())
+        if metadata.get("approvalMode") == "local" and metadata.get("apiUrl") == "":
+            check(*sys.argv[1:])
+        else:
+            reporter = BootstrapReporter(sys.argv[1], sys.argv[2], sys.argv[4])
+            reporter.begin(check_api)
+            check(*sys.argv[1:], api=lambda *args: None)
+        if reporter:
+            reporter.report('FLEET_INSTALLING: preflight passed; awaiting installation and the first installed-system heartbeat.')
     except (Retryable, ReportUnavailable) as error:
         if reporter:
             reporter.report(str(error), failed=True)

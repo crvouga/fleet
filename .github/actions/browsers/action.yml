@@ -1,0 +1,43 @@
+name: Prepare Chromium
+description: Reuse headless browser downloads and verify actual rendering before tests.
+inputs:
+  packages:
+    required: true
+    description: Space-separated installed Playwright package directories.
+runs:
+  using: composite
+  steps:
+    - name: Locate browser downloads
+      id: directory
+      shell: bash
+      env:
+        PLAYWRIGHT_PACKAGES: ${{ inputs.packages }}
+      run: |
+        node <<'JS'
+        const p = require('node:path'), o = require('node:os'), fs = require('node:fs'), crypto = require('node:crypto');
+        const e = process.env;
+        const versions = [...new Set(e.PLAYWRIGHT_PACKAGES.trim().split(/\s+/).map(directory =>
+          JSON.parse(fs.readFileSync(p.join(directory, 'package.json'), 'utf8')).version))].sort();
+        if (versions.some(version => typeof version !== 'string' || !version)) throw Error('Invalid Playwright version');
+        const hash = crypto.createHash('sha256').update(JSON.stringify(versions)).digest('hex');
+        const directory = e.PLAYWRIGHT_BROWSERS_PATH && e.PLAYWRIGHT_BROWSERS_PATH !== '0' ? p.resolve(e.PLAYWRIGHT_BROWSERS_PATH) :
+          process.platform === 'win32' ? p.join(e.LOCALAPPDATA || p.join(o.homedir(), 'AppData', 'Local'), 'ms-playwright') :
+          process.platform === 'darwin' ? p.join(o.homedir(), 'Library', 'Caches', 'ms-playwright') :
+          p.join(e.XDG_CACHE_HOME || p.join(o.homedir(), '.cache'), 'ms-playwright');
+        fs.appendFileSync(e.GITHUB_OUTPUT, `path=${directory}\nversions=${hash}\nplatform=${e.ImageOS || process.platform}\ncache=${e.PLAYWRIGHT_BROWSERS_PATH !== '0'}\n`);
+        JS
+    - name: Cache headless browser downloads
+      if: steps.directory.outputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.directory.outputs.path }}
+        key: playwright-shell-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.directory.outputs.platform }}-${{ steps.directory.outputs.versions }}
+        restore-keys: |
+          playwright-shell-v1-${{ runner.os }}-${{ runner.arch }}-
+    - name: Install and validate Chromium
+      shell: bash
+      env:
+        PLAYWRIGHT_PACKAGES: ${{ inputs.packages }}
+      run: |
+        read -r -a browser_packages <<< "$PLAYWRIGHT_PACKAGES"
+        bun scripts/ci/install-browsers.ts "${browser_packages[@]}"

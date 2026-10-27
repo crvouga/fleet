@@ -9,6 +9,9 @@ on:
 defaults:
   run:
     shell: bash
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -25,7 +28,9 @@ jobs:
           python-version: "3.12"
       - uses: ariga/setup-atlas@v0
       - run: bun install --frozen-lockfile
-      - run: bunx playwright install --with-deps chromium
+      - uses: ./.github/actions/browsers
+        with:
+          packages: packages/fleet-api/node_modules/@playwright/test
       - run: bun run check
     outputs:
       fleet: ${{ needs.changes.outputs.fleet }}

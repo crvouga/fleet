@@ -160,7 +160,8 @@ in {
   assertions = [
     { assertion = slots >= 1 && slots <= 64; message = "Fleet slots must be 1..64."; }
     { assertion = builtins.elem settings.github.scope [ "organization" "repository" ]; message = "Invalid GitHub scope."; }
-    { assertion = settings.github.scope != "repository" || builtins.length settings.github.repositories > 0;
+    { assertion = settings.github.scope != "repository" || builtins.length settings.github.repositories > 0
+        || (settings.github.appId == "" && settings.github.installationId == "" && settings.secretsFile == null);
       message = "Repository registration needs at least one owner/repo."; }
   ];
   environment.systemPackages = [ drain resume control ];

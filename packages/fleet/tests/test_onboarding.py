@@ -48,6 +48,27 @@ class OnboardingTests(unittest.TestCase):
         bootstrap.check(self.system, 'ci', self.key, self.token, run=run, api=api)
         return api
 
+    def test_local_mode_checks_closure_without_remote_credentials(self):
+        self.metadata.update(approvalMode="local", apiUrl="", secretsFile=None, requiredSecrets=[], github=None, updateMode="local")
+        self.write_metadata()
+        self.key.unlink()
+        self.token.unlink()
+        api = self.run_check(lambda *a, **kw: SimpleNamespace(returncode=0))
+        api.assert_not_called()
+
+    def test_local_mode_cannot_disable_a_configured_api(self):
+        self.metadata.update(approvalMode="local")
+        self.write_metadata()
+        with self.assertRaises(bootstrap.NotReady):
+            self.run_check(mock.Mock())
+
+    def test_managed_mode_still_requires_enrollment(self):
+        self.metadata.update(approvalMode="managed")
+        self.write_metadata()
+        self.token.unlink()
+        with self.assertRaises(bootstrap.NotReady):
+            self.run_check(mock.Mock())
+
     def test_integration_checks_precede_disk_operations_and_keep_secrets_out_of_arguments(self):
         calls = []
         def run(args, **kwargs):
