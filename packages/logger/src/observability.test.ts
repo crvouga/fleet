@@ -6,7 +6,7 @@ import { observeHttp } from './http';
 
 test('SQL and OAuth failures retain causes and source frames without raw error data', async () => {
   const original = Object.assign(
-    new Error('postgres://user:password@db/x?code=private'),
+    new Error('postgres://user:password@db/x?code=fixture-query-secret'),
     {
       name: 'PostgresError',
       code: 'ERR_POSTGRES_SERVER_ERROR',
@@ -24,7 +24,10 @@ test('SQL and OAuth failures retain causes and source frames without raw error d
     reason: 'database_connection_exhausted',
   });
   expect(JSON.stringify(details)).not.toContain('password');
-  expect(JSON.stringify(details)).not.toContain('private');
+  expect(JSON.stringify(details)).not.toContain('fixture-query-secret');
+  expect(JSON.stringify(details)).not.toContain(
+    'password and email must stay private'
+  );
   const oauth = Object.assign(new Error('token-body'), {
     cause: { error: 'invalid_client', error_description: 'client-secret' },
   });
