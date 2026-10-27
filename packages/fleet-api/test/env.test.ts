@@ -177,3 +177,20 @@ test('browser login accepts only a complete relay configuration and exact HTTPS/
     readServerEnv({ ...VALID, VAULT_ADDR: 'invalid-and-unused' })
   ).not.toHaveProperty('vaultAddr');
 });
+
+// OIDC issuer identifiers are exact strings: URL.href adds a slash to roots.
+test('browser login preserves root issuer identifiers with and without a slash', () => {
+  for (const issuer of [
+    'https://identity.example.org',
+    'https://identity.example.org/',
+  ]) {
+    expect(
+      readServerEnv({
+        ...VALID,
+        FLEET_OIDC_ISSUER: issuer,
+        FLEET_OIDC_CLIENT_ID: 'public-client',
+        FLEET_PUBLIC_ORIGIN: 'https://fleet.example.org',
+      }).relay?.issuer
+    ).toBe(issuer);
+  }
+});

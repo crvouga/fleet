@@ -41,7 +41,7 @@ export function readRelay(
     )
       throw new Error();
     return {
-      issuer: issuer.href,
+      issuer: source['FLEET_OIDC_ISSUER']!.trim(),
       origin: origin.origin,
       clientId: source['FLEET_OIDC_CLIENT_ID']!.trim(),
     };
