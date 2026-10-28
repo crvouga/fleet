@@ -62,6 +62,21 @@ class BootstrapReporter:
             registered = self.worker.register(self.identity)
         except agent.NetworkError:
             raise ReportUnavailable('FLEET_API_UNAVAILABLE: enrollment reporting is unavailable; retrying before disk changes.') from None
+        deadline = time.monotonic() + min(1800, max(0, int(os.environ.get('FLEET_APPROVAL_WAIT_SECONDS', '300'))))
+        while registered and self.worker.approval == 'pending':
+            if time.monotonic() >= deadline:
+                raise ApprovalRefused('FLEET_APPROVAL_REQUIRED: approve this node under Pending in the Fleet app, then retry. Nothing was erased.')
+            time.sleep(5)
+            try:
+                status, document = self.worker.api('GET', '/v1/enrollment/status', None,
+                    bearer=self.identity['id'] + '.' + self.worker.secret)
+                if status == 403:
+                    raise ApprovalRefused('FLEET_APPROVAL_REQUIRED: this node was rejected or retired in Fleet. Nothing was erased.')
+                if status != 200 or not isinstance(document, dict) or document.get('nodeId') != self.identity['id'] or document.get('role') != self.role:
+                    raise ReportUnavailable('FLEET_API_UNAVAILABLE: Fleet approval could not be verified. Nothing was erased.')
+                self.worker.approval = document.get('status')
+            except agent.NetworkError:
+                raise ReportUnavailable('FLEET_API_UNAVAILABLE: Fleet approval could not be checked. Nothing was erased.') from None
         if not registered:
             raise ReportUnavailable('FLEET_API_UNAVAILABLE: Fleet registration did not complete; retrying before disk changes.')
         if self.worker.approval != 'approved':

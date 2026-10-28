@@ -49,8 +49,9 @@ function revisionCounts(views: readonly NodeView[]): FleetSummary['revisions'] {
 /**
  * Counts for the overview and `GET /v1/summary`.
  *
- * - `byRole` counts approved nodes only: a pending machine does not serve its
- *   role yet. `online` counts those that are reporting on time.
+ * - `byRole` counts approved nodes by ASSIGNED role only: a pending machine
+ *   does not serve its role yet. `online` counts those reporting on time.
+ *   Approved nodes without a role count in `unassigned`.
  * - `runnerSlots` adds up nodes that are online or stale; an offline node's
  *   last report says nothing about capacity you can use now.
  * - `withFailedUnits` and `rolledBack` look at approved nodes, because their
@@ -59,15 +60,17 @@ function revisionCounts(views: readonly NodeView[]): FleetSummary['revisions'] {
 export function summarize(views: readonly NodeView[]): FleetSummary {
   const byStatus = emptyByStatus();
   const byRole = emptyByRole();
+  const unassigned = { total: 0, online: 0 };
   const runnerSlots = { total: 0, busy: 0 };
   let withFailedUnits = 0;
   let rolledBack = 0;
   for (const view of views) {
     byStatus[view.status] += 1;
     if (view.approval !== 'approved') continue;
-    byRole[view.role].total += 1;
+    const bucket = view.role === null ? unassigned : byRole[view.role];
+    bucket.total += 1;
     const facts = readFacts(view);
-    if (view.status === 'online') byRole[view.role].online += 1;
+    if (view.status === 'online') bucket.online += 1;
     if (facts.failedUnits.length > 0) withFailedUnits += 1;
     if (facts.rolledBack) rolledBack += 1;
     if (
@@ -82,6 +85,7 @@ export function summarize(views: readonly NodeView[]): FleetSummary {
     total: views.length,
     byStatus,
     byRole,
+    unassigned,
     revisions: revisionCounts(views),
     runnerSlots,
     withFailedUnits,

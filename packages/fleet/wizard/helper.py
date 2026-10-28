@@ -202,7 +202,6 @@ def write_usb(request, progress):
 
 def install_here(request, progress):
     from server import lookup_token_http
-    decide.NET.setdefault("probe", lambda: imaging.probe(decide.installer_urls()[0]))
     decide.NET.setdefault("lookup", lookup_token_http)
     os_name = decide.current_os()
     role = str(request.get("role") or "")
@@ -213,6 +212,9 @@ def install_here(request, progress):
     token = request.get("token") or None
     decide.invariant(token is None or TOKEN_RE.fullmatch(str(token)) is not None, "the enrollment token is malformed")
     iso, sha = verified_iso(request, progress)
+    # The unprivileged wizard already downloaded this checksum-verified image.
+    # Elevation must not require an inherited source URL or a second download.
+    decide.NET['probe'] = lambda: (None, iso.stat().st_size)
     decide.check_installer_readiness(iso, role)
     directory = decide.state_dir()
     chosen = decide.choose_disk(os_name, "install")

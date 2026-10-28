@@ -12,7 +12,10 @@ import { postWebhook } from './webhook';
 export interface JobDeps {
   readonly store: Store;
   readonly now: () => Date;
-  readonly fetch: typeof fetch;
+  readonly fetch: (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ) => Promise<Response>;
   readonly log: Logger;
 }
 
@@ -46,7 +49,7 @@ async function announce(
   });
   if (webhookUrl === undefined || webhookUrl === null) return;
   await postWebhook(deps, webhookUrl, {
-    text: `${label} (${node.role}) is offline: no report for ${silent} seconds`,
+    text: `${label} (${node.role ?? 'unassigned'}) is offline: no report for ${silent} seconds`,
     kind: 'offline',
     node: { id: node.id, label, role: node.role, hostname: node.hostname },
     lastSeenAt: node.lastSeenAt?.toISOString() ?? null,

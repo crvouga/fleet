@@ -5,7 +5,6 @@ import { litestreamConfig } from '../src/start';
 
 const valid = {
   FLEET_ADMIN_TOKEN: 'a'.repeat(32),
-  FLEET_GITHUB_REPO: 'example/fleet',
   FLEET_S3_BUCKET: 'my-bucket',
   AWS_ACCESS_KEY_ID: 'key',
   AWS_SECRET_ACCESS_KEY: 'secret-$literal',
@@ -54,9 +53,9 @@ describe('single-node configuration', () => {
       ['AWS_SECRET_ACCESS_KEY', 'secret\nline'],
     ];
     for (const [key, value] of cases) {
-      expect(() => readControllerEnv({ ...valid, [key as string]: value })).toThrow(
-        key
-      );
+      expect(() =>
+        readControllerEnv({ ...valid, [key as string]: value })
+      ).toThrow(key);
     }
   });
   test('S3-compatible configuration preserves literal paths and excludes credentials', () => {

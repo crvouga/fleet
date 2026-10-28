@@ -4,11 +4,10 @@ import { sha256Hex } from '../../src/auth/hash';
 import { FleetBrowserAuth } from '../../src/auth/browser-auth';
 import { FleetAdminAuth } from '../../src/auth/admin-auth';
 import { SqliteAccessStore } from '../../src/db/access-store';
-import type { RelayClient } from '../../src/auth/relay-client';
+import type { IdentityProvider } from '../../src/auth/browser-contract';
 import { mountUi } from '../../src/routes/ui';
 import { createTestDeps } from '../../src/testing/test-deps';
 import { databaseAvailable, useDatabase } from '../support/database';
-import { silent } from '../support/controller';
 
 const config = {
   origin: 'https://fleet.example.test',
@@ -23,19 +22,19 @@ const jar = (response: Response) =>
     .join('; ');
 
 describe.skipIf(!databaseAvailable)(
-  'relay browser authorization with real persistent storage',
+  'provider browser authorization with real persistent storage',
   () => {
     const database = useDatabase();
     function world(
       email = 'operator@example.test',
       verified = true,
-      existing?: RelayClient
+      existing?: IdentityProvider
     ) {
       const access = new SqliteAccessStore(database().sql);
       const calls: { state: string; nonce: string; verifier: string }[] = [];
       let exchanges = 0;
       let fail = false;
-      const client: RelayClient = {
+      const client: IdentityProvider = {
         async authorize(state, nonce, verifier) {
           calls.push({ state, nonce, verifier });
           return `https://auth.example.test/authorize?state=${state}`;
@@ -46,13 +45,18 @@ describe.skipIf(!databaseAvailable)(
           expect(calls).toContainEqual({ state, nonce, verifier });
           return {
             iss: config.issuer,
-            sub: 'stable-google-subject',
+            sub: 'stable-user-subject',
             email,
             email_verified: verified,
           };
         },
       };
-      const browser = new FleetBrowserAuth(access, config, existing ?? client);
+      const browser = new FleetBrowserAuth(
+        access,
+        config,
+        existing ?? client,
+        () => new Date()
+      );
       const app = new Hono();
       const deps = createTestDeps();
       mountUi(app, {
@@ -60,9 +64,6 @@ describe.skipIf(!databaseAvailable)(
         browserAuth: browser,
         auth: new FleetAdminAuth({
           env: deps.env,
-          now: deps.now,
-          fetch,
-          log: silent,
           browser,
           publicOrigin: config.origin,
         }),
@@ -108,7 +109,7 @@ describe.skipIf(!databaseAvailable)(
         },
       };
     }
-    test('empty allowlist denies the first Google user and still offers working sign-out', async () => {
+    test('empty allowlist denies the first user and still offers working sign-out', async () => {
       const w = world('new@example.test');
       const signed = await w.complete(await w.start());
       expect(signed.headers.get('location')).toBe('/not-allowed');
@@ -179,7 +180,7 @@ describe.skipIf(!databaseAvailable)(
       );
       expect(w.exchanges()).toBe(2);
     });
-    test('unverified Google emails and unavailable upstream fail securely', async () => {
+    test('unverified provider emails and unavailable upstream fail securely', async () => {
       const w = world('unverified@example.test', false);
       await w.access.allow('unverified@example.test', 'database-owner');
       expect(
@@ -214,17 +215,22 @@ describe.skipIf(!databaseAvailable)(
         (await fresh.request('/', cookie)).headers.get('location')
       ).toStartWith('/login');
     });
-    test('session tokens cannot be copied between Fleet origins, relay issuers or clients', async () => {
+    test('session tokens cannot be copied between Fleet origins, provider issuers or clients', async () => {
       const w = world('isolation@example.test');
       await w.access.allow('isolation@example.test', 'database-owner');
       const cookie = jar(await w.complete(await w.start()));
       const token = cookie.split('=').at(-1)!;
       for (const changed of [
         { ...config, clientId: 'another-client' },
-        { ...config, issuer: 'https://another-relay.test/realms/other' },
+        { ...config, issuer: 'https://another-provider.test/realms/other' },
         { ...config, origin: 'https://another-fleet.test' },
       ]) {
-        const other = new FleetBrowserAuth(w.access, changed);
+        const other = new FleetBrowserAuth(
+          w.access,
+          changed,
+          w.client,
+          () => new Date()
+        );
         const probe = new Hono();
         probe.get('/', async (c) => c.json(await other.identity(c)));
         const copied = `fleet_${sha256Hex(changed.origin).slice(0, 16)}_session=${token}`;

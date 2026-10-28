@@ -16,7 +16,22 @@ spec = importlib.util.spec_from_file_location("fleet_roles", SCRIPT)
 roles = importlib.util.module_from_spec(spec)
 sys.modules["fleet_roles"] = roles  # dataclasses resolve their module by name
 spec.loader.exec_module(roles)
-DOCUMENT = json.loads((PACKAGE / "roles.json").read_text())
+LEGACY_DOCUMENT = json.loads((PACKAGE / "roles.json").read_text())
+
+
+def current(document):
+    """The version 2 form of a version 1 registry: no installer choice at all."""
+    document = copy.deepcopy(document)
+    if document["version"] == 1:
+        document["version"] = 2
+        del document["installerDefault"]
+        for role in document["roles"]:
+            for closure in role.get("closures", []):
+                del closure["installer"]
+    return document
+
+
+DOCUMENT = current(LEGACY_DOCUMENT)
 
 
 def changed(edit):
@@ -34,21 +49,33 @@ class RegistryTests(unittest.TestCase):
         registry = roles.load()
         self.assertEqual(registry.view("active"), ("ci", "devbox"))
         self.assertEqual(registry.view("known"), ("ci", "web", "cache", "netboot", "devbox"))
-        self.assertEqual(registry.view("installer"), ("ci", "devbox"))
+        self.assertEqual(registry.view("closures"), ("ci", "ci-gpu", "devbox"))
         self.assertEqual(registry.view("published"), ("ci", "ci-gpu", "devbox"))
-        self.assertEqual(registry.installer_default, "ci")
         self.assertEqual([closure.attr for closure in registry.role("ci").closures], ["ci", "ci-gpu"])
+        with self.assertRaises(roles.RegistryError):
+            registry.view("installer")
+
+    def test_version_1_and_version_2_describe_the_same_roles(self):
+        # Deployed nodes check the fetched roles.json with the parser they run,
+        # so version 1 stays readable until every node runs this parser.
+        legacy = roles.parse(copy.deepcopy(LEGACY_DOCUMENT))
+        modern = roles.parse(copy.deepcopy(DOCUMENT))
+        self.assertEqual(legacy, modern)
+        with self.assertRaises(roles.RegistryError) as caught:
+            roles.parse(changed(lambda d: d.update(installerDefault="ci")))
+        self.assertIn("top level has exactly", str(caught.exception))
 
     def test_the_repository_has_no_stale_copy_and_no_orphaned_role_file(self):
         result = subprocess.run([sys.executable, "-B", str(SCRIPT), "check"], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_each_rule_refuses_a_broken_registry_and_names_it(self):
-        def retire_default(document):
-            ci = role_in(document, "ci")
-            for key in ("settings", "secrets", "closures"):
-                del ci[key]
-            ci["state"] = "retired"
+        def retire_all(document):
+            for name in ("ci", "devbox"):
+                role = role_in(document, name)
+                for key in ("settings", "secrets", "closures"):
+                    del role[key]
+                role["state"] = "retired"
 
         cases = {
             "names repeat": lambda d: d["roles"].append(copy.deepcopy(role_in(d, "web"))),
@@ -56,25 +83,26 @@ class RegistryTests(unittest.TestCase):
             "(retired) has exactly": lambda d: role_in(d, "web").update(settings="web.nix"),
             "(active) has exactly": lambda d: role_in(d, "devbox").pop("closures"),
             "the first closure is devbox itself": lambda d: role_in(d, "devbox")["closures"][0].update(
-                attr="devbox-gpu", host="hosts/devbox-gpu.nix", installer=False),
+                attr="devbox-gpu", host="hosts/devbox-gpu.nix"),
             "must use host hosts/ci-gpu.nix": lambda d: role_in(d, "ci")["closures"][1].update(host="hosts/ci.nix"),
             "must be ci or ci-<capability>": lambda d: role_in(d, "ci")["closures"][1].update(
                 attr="gpu", host="hosts/gpu.nix"),
-            "only the closure ci itself can be on the installer": lambda d: role_in(d, "ci")["closures"][1].update(
-                installer=True),
-            "must be on the installer and published": lambda d: role_in(d, "devbox")["closures"][0].update(
+            "each closure has exactly": lambda d: role_in(d, "ci")["closures"][1].update(installer=True),
+            "its first closure must be published": lambda d: role_in(d, "devbox")["closures"][0].update(
                 published=False),
-            "installerDefault": retire_default,
+            "at least one role is active": retire_all,
             "secrets is secrets/<name>.yaml": lambda d: role_in(d, "ci").update(secrets="../fleet.yaml"),
             "settings is a .nix file": lambda d: role_in(d, "ci").update(settings="hosts/../../x.nix"),
             "two active roles share a secrets file": lambda d: role_in(d, "devbox").update(
                 secrets="secrets/fleet.yaml"),
             "top level has exactly": lambda d: d.update(extra=True),
-            "version must be": lambda d: d.update(version=2),
+            "version must be": lambda d: d.update(version=3),
             "shadows a flake output": lambda d: d["roles"].append({
                 "name": "node", "state": "active", "title": "Node", "summary": "A test role.",
                 "settings": "node.nix", "secrets": "secrets/node.yaml",
-                "closures": [{"attr": "node", "host": "hosts/node.nix", "installer": True, "published": True}]}),
+                "closures": [{"attr": "node", "host": "hosts/node.nix", "published": True}]}),
+            "is the role-less closure every machine installs": lambda d: d["roles"].append({
+                "name": "base", "state": "retired", "title": "Base", "summary": "A test role."}),
         }
         for message, edit in cases.items():
             with self.subTest(message), self.assertRaises(roles.RegistryError) as caught:
@@ -96,10 +124,18 @@ class PlacementTests(unittest.TestCase):
         self.assertIsNone(roles.placement(registry, "ci", "ci-gpu"))
         self.assertIsNone(roles.placement(registry, "devbox", "devbox"))
 
+    def test_the_base_closure_always_exists_and_only_as_itself(self):
+        registry = roles.load()
+        self.assertIsNone(roles.placement(registry, "base", "base"))
+        self.assertTrue(roles.placement(registry, "ci", "base").startswith("FLEET_TARGET_INVALID"))
+        self.assertTrue(roles.placement(registry, "base", "ci").startswith("FLEET_TARGET_INVALID"))
+
     def test_retired_removed_and_missing_closures_say_what_to_do(self):
         registry = roles.load()
         self.assertTrue(roles.placement(registry, "web", "web").startswith("FLEET_ROLE_RETIRED: roles.json retired role web"))
-        self.assertIn("as one of: ci, devbox", roles.placement(registry, "web", "web"))
+        # Roles are assigned by the controller; nothing says to reinstall.
+        self.assertIn("Assign this node one of: ci, devbox, or no role", roles.placement(registry, "web", "web"))
+        self.assertNotIn("Reinstall", roles.placement(registry, "ci", "ci-tpu"))
         self.assertTrue(roles.placement(registry, "ci", "ci-tpu").startswith("FLEET_CLOSURE_REMOVED"))
         self.assertTrue(roles.placement(registry, "kiosk", "kiosk").startswith("FLEET_ROLE_REMOVED"))
 
@@ -108,6 +144,16 @@ class PlacementTests(unittest.TestCase):
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, roles.PLACEMENT_EXIT_GONE)
         self.assertEqual(len(result.stdout.strip().splitlines()), 1)
+
+    def test_secrets_names_the_file_a_target_role_decrypts(self):
+        registry = roles.load()
+        self.assertEqual(roles.secrets_file(registry, "ci"), "secrets/fleet.yaml")
+        self.assertEqual(roles.secrets_file(registry, "devbox"), "secrets/devbox.yaml")
+        self.assertIsNone(roles.secrets_file(registry, "base"))
+        self.assertIsNone(roles.secrets_file(registry, "web"))
+        result = subprocess.run([sys.executable, "-I", str(SCRIPT), "secrets", str(PACKAGE / "roles.json"), "ci"],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual((result.returncode, result.stdout), (0, "secrets/fleet.yaml\n"))
 
 
 class CopyTests(unittest.TestCase):
@@ -124,7 +170,7 @@ class CopyTests(unittest.TestCase):
 
     def test_sync_rewrites_every_stale_copy_once_and_check_then_passes(self):
         registry = roles.parse(changed(lambda d: role_in(d, "web").update(state="retired")))
-        bigger = roles.Registry(registry.installer_default, registry.roles + (
+        bigger = roles.Registry(registry.roles + (
             roles.Role("kiosk", "retired", "Kiosk", "A test role.", None, None, ()),))
         self.assertEqual(roles.stale_copies(roles.load(), self.root), [])
         stale = roles.stale_copies(bigger, self.root)
@@ -132,10 +178,15 @@ class CopyTests(unittest.TestCase):
         rewritten = roles.sync(bigger, self.root)
         self.assertEqual(roles.stale_copies(bigger, self.root), [])
         self.assertEqual(roles.sync(bigger, self.root), [])
-        self.assertIn("packages/fleet-controller/src/db/schema.sql", rewritten)
-        self.assertIn("'kiosk'", (self.root / "packages/fleet-controller/src/db/schema.sql").read_text())
+        self.assertIn("packages/fleet-controller/src/types.ts", rewritten)
+        self.assertIn("'kiosk'", (self.root / "packages/fleet-controller/src/types.ts").read_text())
         # An active-only copy does not learn a retired role.
-        self.assertNotIn("kiosk", (self.root / "packages/fleet/scripts/decide.py").read_text())
+        self.assertNotIn("kiosk", (self.root / "packages/fleet/scripts/agent.py").read_text())
+
+    def test_no_installer_keeps_a_role_list(self):
+        # The installer installs base only; roles are assigned afterwards.
+        self.assertFalse([entry.path for entry in roles.COPIES
+                          if "install" in entry.path or "decide" in entry.path or "bootstrap" in entry.path])
 
     def test_a_copy_whose_line_was_edited_away_fails_loudly(self):
         path = self.root / "packages/fleet/scripts/agent.py"
@@ -146,21 +197,6 @@ class CopyTests(unittest.TestCase):
 
 
 class ConsumerTests(unittest.TestCase):
-    def test_python_consumers_hold_the_registry_view(self):
-        sys.path.insert(0, str(PACKAGE / "scripts"))
-        sys.path.insert(0, str(PACKAGE / "wizard"))
-        try:
-            import decide
-            import server
-        finally:
-            sys.path.remove(str(PACKAGE / "wizard"))
-            sys.path.remove(str(PACKAGE / "scripts"))
-        registry = roles.load()
-        self.assertEqual(decide.ROLES, registry.view("active"))
-        self.assertEqual(decide.ROLE_CHOICES, "ci or devbox")
-        # The wizard describes every role it offers, and nothing else.
-        self.assertEqual(set(server.ROLE_INFO), set(registry.view("active")))
-
     def test_retired_role_files_are_gone_and_active_role_files_exist(self):
         self.assertEqual(roles.file_problems(roles.load()), [])
         registry = roles.parse(changed(lambda d: None))
@@ -171,6 +207,8 @@ class ConsumerTests(unittest.TestCase):
             problems = roles.file_problems(registry, package)
         self.assertIn("retired role web still has web.nix; delete it", problems)
         self.assertIn("role ci needs fleet.nix", problems)
+        self.assertIn("the base closure needs base.nix", problems)
+        self.assertIn("the base closure needs hosts/base.nix", problems)
 
 
 if __name__ == "__main__":

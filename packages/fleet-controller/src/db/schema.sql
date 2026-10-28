@@ -1,8 +1,11 @@
--- Fleet SQLite schema version 1. Applied transactionally at startup.
+-- Fleet SQLite schema version 2 for a new database. Applied transactionally at startup.
+-- An existing version 1 database is upgraded by migrations/002-desired-state.sql instead.
+-- Roles are validated in code: nodes.role is the assigned role (nullable),
+-- observed_role is what the node reports it runs.
 
 CREATE TABLE nodes (
   id TEXT NOT NULL,
-  role TEXT NOT NULL,
+  role TEXT,
   hostname TEXT NOT NULL,
   approval TEXT NOT NULL DEFAULT 'pending',
   secret_hash TEXT NOT NULL,
@@ -12,7 +15,12 @@ CREATE TABLE nodes (
   facts TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(facts)),
   revision TEXT,
   agent_version TEXT,
-  config_revision TEXT,
+  applied_revision TEXT,
+  observed_role TEXT,
+  observed_closure TEXT,
+  age_recipient TEXT,
+  hardware TEXT CHECK (hardware IS NULL OR (json_valid(hardware) AND json_type(hardware) = 'object')),
+  reconcile TEXT CHECK (reconcile IS NULL OR (json_valid(reconcile) AND json_type(reconcile) = 'object')),
   heartbeat_interval_seconds INTEGER NOT NULL DEFAULT 60,
   remote_addr TEXT,
   enrolled_via TEXT NOT NULL DEFAULT 'hello',
@@ -24,9 +32,8 @@ CREATE TABLE nodes (
   offline_notified_at TEXT,
   PRIMARY KEY (id),
   CONSTRAINT nodes_id_is_sha256 CHECK (length(id) = 64 AND id NOT GLOB '*[^0-9a-f]*'),
-  CONSTRAINT nodes_role_known CHECK (role IN ('ci', 'web', 'cache', 'netboot', 'devbox')),
   CONSTRAINT nodes_approval_known CHECK (approval IN ('pending', 'approved', 'rejected', 'retired')),
-  CONSTRAINT nodes_enrolled_via_known CHECK (enrolled_via IN ('role-token', 'hello', 'dashboard')),
+  CONSTRAINT nodes_enrolled_via_known CHECK (enrolled_via IN ('enrollment-token', 'hello', 'dashboard')),
   CONSTRAINT nodes_interval_sane CHECK (heartbeat_interval_seconds BETWEEN 5 AND 3600)
 ) STRICT;
 

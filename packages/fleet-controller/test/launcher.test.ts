@@ -39,7 +39,6 @@ async function launch(
     env: {
       PATH: process.env['PATH'] ?? '',
       FLEET_ADMIN_TOKEN: 'a'.repeat(32),
-      FLEET_GITHUB_REPO: 'example/fleet',
       AWS_ACCESS_KEY_ID: 'private-key-id',
       AWS_SECRET_ACCESS_KEY: 'private-secret',
       FLEET_S3_BUCKET: 'test-bucket',

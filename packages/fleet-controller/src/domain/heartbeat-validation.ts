@@ -1,5 +1,17 @@
-import type { HeartbeatBody, NodeEventInput, Role, Severity } from '../types';
-import { isRole } from '../types';
+import type {
+  HeartbeatBody,
+  NodeEventInput,
+  ObservedRole,
+  Severity,
+} from '../types';
+import { isObservedRole } from '../types';
+import {
+  readAgeRecipient,
+  readClosure,
+  readDesiredRevision,
+  readHardware,
+  readReconcile,
+} from './desired-validation';
 import { readEventExtras, readRecovery } from './recovery-validation';
 import { readTelemetry } from './telemetry-validation';
 
@@ -184,27 +196,22 @@ function readAgent(problems: Problems, value: unknown): HeartbeatBody['agent'] {
       max: 32,
       pattern: TOKEN,
     }),
-    configRevision: readString(
-      problems,
-      'agent.configRevision',
-      raw['configRevision'],
-      {
-        max: 64,
-        pattern: TOKEN,
-      }
-    ),
+    desiredRevision: readDesiredRevision(problems, raw['desiredRevision']),
   };
 }
 
+/** `role` and `closure` are observed: what the node runs, never what it should. */
 function readIdentity(problems: Problems, raw: Record<string, unknown>) {
   const role = raw['role'];
-  if (!isRole(role)) problems.list.push('role must be one of the known roles');
+  if (!isObservedRole(role))
+    problems.list.push('role must be base or one of the known roles');
   return {
     nodeId: requireString(problems, 'nodeId', raw['nodeId'], {
       max: 64,
       pattern: NODE_ID,
     }),
-    role: (isRole(role) ? role : 'ci') as Role,
+    role: (isObservedRole(role) ? role : 'base') as ObservedRole,
+    closure: readClosure(problems, raw['closure']),
     hostname: requireString(problems, 'hostname', raw['hostname'], {
       max: 63,
       pattern: HOSTNAME,
@@ -235,6 +242,25 @@ function readLists(problems: Problems, raw: Record<string, unknown>) {
   };
 }
 
+function readReadiness(
+  problems: Problems,
+  value: unknown
+): Pick<HeartbeatBody, 'readiness'> {
+  if (value === undefined) return {};
+  const issues = readStringList(
+    problems,
+    'readiness.issues',
+    readObject(problems, 'readiness', value)['issues'],
+    { maxItems: 12, max: 500 }
+  );
+  return { readiness: { issues } };
+}
+
+/** The protocol version a body claims, so an old agent gets a precise refusal. */
+export function protocolVersionOf(input: unknown): unknown {
+  return isRecord(input) ? input['v'] : undefined;
+}
+
 /**
  * Strict where it matters: types, ranges and sizes. Unknown keys are ignored
  * and never stored, so a newer agent does not break an older controller.
@@ -243,12 +269,15 @@ export function validateHeartbeat(input: unknown): HeartbeatResult {
   if (!isRecord(input))
     return { ok: false, errors: ['body must be a JSON object'] };
   const problems: Problems = { list: [] };
-  if (input['v'] !== 1) problems.list.push('v must be 1');
+  if (input['v'] !== 2) problems.list.push('v must be 2');
   const telemetry = readTelemetry(problems, input['telemetry']);
   const recovery = readRecovery(problems, input['recovery']);
   const value: HeartbeatBody = {
-    v: 1,
+    v: 2,
     ...readIdentity(problems, input),
+    ...readHardware(problems, input['hardware']),
+    ...readAgeRecipient(problems, input['ageRecipient']),
+    ...readReconcile(problems, input['reconcile']),
     ...readLists(problems, input),
     revision: readString(problems, 'revision', input['revision'], {
       max: 64,
@@ -275,18 +304,7 @@ export function validateHeartbeat(input: unknown): HeartbeatResult {
     events: readEvents(problems, input['events']),
     ...(telemetry ? { telemetry } : {}),
     ...(recovery ? { recovery } : {}),
-    ...(input['readiness'] === undefined
-      ? {}
-      : {
-          readiness: {
-            issues: readStringList(
-              problems,
-              'readiness.issues',
-              readObject(problems, 'readiness', input['readiness'])['issues'],
-              { maxItems: 12, max: 500 }
-            ),
-          },
-        }),
+    ...readReadiness(problems, input['readiness']),
   };
   return problems.list.length > 0
     ? { ok: false, errors: problems.list }

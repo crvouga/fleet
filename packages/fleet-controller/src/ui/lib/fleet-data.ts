@@ -1,6 +1,6 @@
 import { resolveConfig, type FleetConfig } from '../../config/schema';
 import type { AppDeps } from '../../deps';
-import { DEFAULT_OFFLINE_AFTER_SECONDS, viewOf } from '../../domain/status';
+import { viewOf } from '../../domain/node-view';
 import { summarize } from '../../domain/summary';
 import type { FleetSummary, NodeView } from '../../types';
 import { readFacts, type NodeFacts } from './facts';
@@ -36,14 +36,15 @@ export function isBehind(view: NodeView, latest: string | null): boolean {
   );
 }
 
+/** Fleet, the ASSIGNED role (none when unassigned), then the node. */
 export function effectiveFor(
-  view: NodeView,
+  node: Pick<NodeView, 'id' | 'role'>,
   documents: ScopeDocuments
 ): FleetConfig {
   return resolveConfig({
     fleet: documents.get('fleet') ?? {},
-    role: documents.get(`role:${view.role}`) ?? {},
-    node: documents.get(`node:${view.id}`) ?? {},
+    role: node.role === null ? {} : (documents.get(`role:${node.role}`) ?? {}),
+    node: documents.get(`node:${node.id}`) ?? {},
   });
 }
 
@@ -74,18 +75,9 @@ export async function loadFleet(deps: AppDeps): Promise<FleetData> {
   const documents: ScopeDocuments = new Map(
     settings.map((row) => [row.scope, row.value as FleetConfig])
   );
-  const views = rows.map((row) => {
-    const config = resolveConfig({
-      fleet: documents.get('fleet') ?? {},
-      role: documents.get(`role:${row.role}`) ?? {},
-      node: documents.get(`node:${row.id}`) ?? {},
-    });
-    return viewOf(
-      row,
-      now,
-      config.alerts?.offlineAfterSeconds ?? DEFAULT_OFFLINE_AFTER_SECONDS
-    );
-  });
+  const views = rows.map((row) =>
+    viewOf(row, now, effectiveFor(row, documents))
+  );
   const summary = summarize(views);
   return {
     now,

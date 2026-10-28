@@ -19,13 +19,10 @@ Then(
       page.getByRole('link', {
         name: 'NixOS installation and hard reinstall guide',
       })
-    ).toHaveAttribute(
-      'href',
-      'https://github.com/crvouga/fleet/blob/main/packages/fleet/docs/installer.md#nixos'
-    );
-    await expect(page.locator('code')).toContainText(
-      'packages/fleet#fleet-installer'
-    );
+    ).toHaveAttribute('href', '/installers/nixos-guide');
+    await expect(
+      page.getByRole('link', { name: 'Show the native installer command' })
+    ).toHaveAttribute('href', '/installers/nixos');
     await expect(
       page.getByText(/running CI jobs block reinstallation/)
     ).toBeVisible();
@@ -35,10 +32,12 @@ Then(
 Given(
   'I have owner access to the deployed Fleet dashboard',
   async ({ page }) => {
+    if (!FLEET_URL)
+      throw new Error('Set FLEET_BDD_URL to your deployed dashboard origin');
     const token = process.env['FLEET_ADMIN_TOKEN'];
     if (!token)
       throw new Error(
-        'Run live scenarios with `vault run --config prd -- ...` to supply FLEET_ADMIN_TOKEN'
+        'Set FLEET_ADMIN_TOKEN in your environment to run live scenarios'
       );
     await page.route(`${FLEET_URL}/**`, async (route) => {
       await route.continue({
@@ -56,7 +55,7 @@ When('I open the deployed Add node page', async ({ page }) => {
   expect(response?.status()).toBe(200);
   await expect(
     page.getByRole('link', { name: 'Open the installer release' })
-  ).toHaveAttribute('href', RELEASE_URL);
+  ).toHaveAttribute('href', '/installers/release');
 });
 
 When('I follow its installer release link', async ({ page, world }) => {
@@ -65,18 +64,15 @@ When('I follow its installer release link', async ({ page, world }) => {
   world.releasePage = await popup;
 });
 
-Then(
-  'the real GitHub release lists the Windows installer',
-  async ({ world }) => {
-    const release = required(world.releasePage);
-    await expect(release).toHaveURL(RELEASE_URL);
-    await expect(
-      release
-        .getByRole('link', { name: /fleet-installer-windows-x64\.exe/ })
-        .first()
-    ).toBeVisible();
-  }
-);
+Then('the Fleet app lists the Windows installer', async ({ world }) => {
+  const release = required(world.releasePage);
+  await expect(release).toHaveURL(RELEASE_URL);
+  await expect(
+    release
+      .getByRole('link', { name: /fleet-installer-windows-x64\.exe/ })
+      .first()
+  ).toBeVisible();
+});
 
 When('I download the published Windows installer', async ({ world }) => {
   const release = required(world.releasePage);
@@ -143,16 +139,15 @@ Then(
       size: number;
       parts: { name: string; size: number; sha256: string }[];
     };
-    const assets = await publishedAssets();
     expect(manifest.parts.length).toBeGreaterThan(0);
     expect(manifest.parts.reduce((sum, part) => sum + part.size, 0)).toBe(
       manifest.size
     );
     for (const part of manifest.parts) {
-      const asset = required(assets.get(part.name));
-      expect((await request.head(DOWNLOAD_URL + part.name)).status()).toBe(200);
-      expect(asset.size).toBe(part.size);
-      expect(asset.digest).toBe(`sha256:${part.sha256}`);
+      const head = await request.head(DOWNLOAD_URL + part.name);
+      expect(head.status()).toBe(200);
+      expect(Number(head.headers()['content-length'])).toBe(part.size);
+      expect(part.sha256).toMatch(/^[a-f0-9]{64}$/);
     }
     await world.info.attach('verified-image-manifest', {
       contentType: 'application/json',

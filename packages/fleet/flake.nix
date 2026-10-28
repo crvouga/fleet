@@ -1,5 +1,5 @@
 {
-  description = "NixOS configurations for physical machines we run ourselves";
+  description = "Reusable NixOS configurations for operator-owned physical fleets";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     disko.url = "github:nix-community/disko";

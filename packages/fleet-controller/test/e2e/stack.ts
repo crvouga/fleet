@@ -53,7 +53,6 @@ function serverEnv(
     FLEET_ADMIN_TOKEN: secrets.admin,
     FLEET_SESSION_SECRET: secrets.session,
     FLEET_ROLE_TOKEN_HASHES: JSON.stringify({ ci: sha256(roleToken) }),
-    FLEET_GITHUB_REPO: 'crvouga/fleet',
   };
   return env;
 }

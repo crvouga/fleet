@@ -2,6 +2,9 @@ import { defineConfig } from '@playwright/test';
 import { defineBddConfig } from 'playwright-bdd';
 
 const live = process.env['FLEET_DOWNLOAD_LIVE'] === '1';
+const liveUrl = process.env['FLEET_BDD_URL'];
+if (live && !liveUrl)
+  throw new Error('Set FLEET_BDD_URL to your deployed dashboard origin');
 const port = process.env['FLEET_DOWNLOAD_TEST_PORT'] ?? '39219';
 
 export default defineConfig({
@@ -29,7 +32,7 @@ export default defineConfig({
     ['json', { outputFile: 'dist/download-bdd-results.json' }],
   ],
   use: {
-    baseURL: live ? 'https://fleet.example.com' : `http://127.0.0.1:${port}`,
+    baseURL: live ? liveUrl : `http://127.0.0.1:${port}`,
     trace: live ? 'off' : 'retain-on-failure',
     screenshot: 'only-on-failure',
   },

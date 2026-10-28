@@ -1,4 +1,3 @@
-import type { Logger } from '@pkgs/logger';
 import type { Context } from 'hono';
 
 import type { AdminAuth, AppEnv } from '../deps';
@@ -11,9 +10,6 @@ export const TOKEN_ACTOR = 'admin-token';
 
 export interface AdminAuthOptions {
   readonly env: Pick<AppEnv, 'adminToken'>;
-  readonly now: () => Date;
-  readonly fetch: typeof fetch;
-  readonly log: Logger;
   readonly browser?: BrowserAuth;
   readonly publicOrigin?: string;
 }

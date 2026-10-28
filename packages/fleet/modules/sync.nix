@@ -25,7 +25,7 @@ in {
       exec ${pkgs.bash}/bin/bash ${../scripts/fleet-sync.sh} "$@"
     '')
   ];
-  environment.etc."fleet/git-known-hosts".source = ./github-known-hosts;
+  environment.etc."fleet/git-known-hosts".text = settings.repo.sshKnownHosts or "";
   environment.etc."fleet/sync.env".text = ''
     ROLE=${lib.escapeShellArg settings.role}
     FLAKE_ATTR=${lib.escapeShellArg settings.flakeAttr}

@@ -42,7 +42,7 @@ ACTIONS = (
     (r"FLEET_SECRET_MISSING|FLEET_ROLE_SECRETS",
      f"{OWNER} re-encrypts this role's secrets for this node's age key (shown below), or reinstalls the node with a fresh approval."),
     (r"FLEET_GITHUB_KEY",
-     f"{OWNER} checks the GitHub App ID in settings/github.json and the App private key in the vault OpenTofu root."),
+     f"{OWNER} checks the GitHub App ID in settings/github.json and the App private key in the operator-managed encrypted role secrets."),
     (r"FLEET_GITHUB_SCOPE",
      f"{OWNER} checks the GitHub App installation: its repository access and its runner permission."),
     (r"FLEET_GITHUB_UNCONFIGURED|FLEET_GITHUB_SCOPE_INVALID",

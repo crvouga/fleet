@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Pull this role's nixosConfiguration from origin/main and switch to it.
-# The system must already be in the binary cache. This script never builds.
-# A kernel, initrd, or module change drains first, then waits, then reboots.
-# A cache miss, a failed build lookup, or a failed drain leaves the running
-# generation in place. The timer retries.
-# After a switch, the node must still reach GitHub and the binary cache and
-# the sync unit must still load. A failed check restores the previous
-# generation and does not reboot.
+# Converge this node to its assigned closure (ARCHITECTURE.md).
+# The target is /nix/fleet-state/target (written by fleet-agent from the
+# controller's desired state, or by fleet-target in local mode); without it,
+# the running image's own ROLE/FLAKE_ATTR. Fetch origin/main, refuse a target
+# the fetched roles.json does not define or whose secrets this node cannot
+# decrypt, build it with bounded local jobs and switch to it.
+# A kernel, initrd, module or role change drains first, then waits, then
+# reboots. A failed build, a failed drain or a refused target leaves the
+# running generation in place. The timer retries.
+# After a switch, the node must still reach the binary cache and the sync unit
+# must still load. A failed check restores the previous generation and does
+# not reboot. Every run ends by writing /run/fleet/reconcile.json, which the
+# agent reports as the node's convergence phase.
 set -euo pipefail
 
 env_file=${SYNC_ENV:-/etc/fleet/sync.env}
@@ -20,13 +25,127 @@ source "$env_file"
 : "${FLAKE_DIR:?}"
 : "${DELAY_MAX:?}"
 
+role_pattern='^[a-z][a-z0-9]{0,15}$'
+attr_pattern='^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4}$'
+
+# ---- convergence verdict (/run/fleet/reconcile.json) -------------------------
+# Written on every exit. phase is converged, progressing or blocked; issues are
+# public sentences that tell a person what blocks convergence.
+reconcile_path=${RECONCILE:-/run/fleet/reconcile.json}
+reconcile_phase=""
+reconcile_issues=()
+record_success=1
+set_phase() {
+  reconcile_phase=$1
+  shift
+  reconcile_issues=("$@")
+}
+write_reconcile() {
+  local phase=$1
+  shift
+  "${PYTHON:-python3}" - "$reconcile_path" "$phase" "${ROLE:-}" "${FLAKE_ATTR:-}" "${revision:-}" "$@" <<'RECONCILE' \
+    || echo 'sync: could not write the convergence verdict' >&2
+import json, os, sys, tempfile, time
+path, phase, role, closure, revision, *issues = sys.argv[1:]
+issues = [" ".join(issue.split()) for issue in issues]
+issues = [issue if len(issue) <= 500 else issue[:497] + "..." for issue in issues if issue][:8]
+record = {"phase": phase, "issues": issues, "role": role or None, "closure": closure or None,
+          "revision": revision or None, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+folder = os.path.dirname(path) or "."
+os.makedirs(folder, mode=0o755, exist_ok=True)
+fd, temporary = tempfile.mkstemp(dir=folder, prefix=".reconcile-")
+with os.fdopen(fd, "w") as stream:
+    json.dump(record, stream)
+os.chmod(temporary, 0o644)
+os.replace(temporary, path)
+RECONCILE
+}
+# The verdict for an exit that did not name one: a failure blocks with its
+# reason; anything else is still on its way.
+finish_reconcile() {
+  local status=$1 phase=$reconcile_phase
+  local issues=(${reconcile_issues[@]+"${reconcile_issues[@]}"})
+  if [ -z "$phase" ]; then
+    if [ "$status" -ne 0 ]; then
+      phase=blocked
+      local reason=${failure_reason:-the update failed}
+      case "$reason" in
+        FLEET_*) issues=("$reason") ;;
+        *) issues=("FLEET_UPDATE_FAILED: $reason. The running system is unchanged; the next poll retries.") ;;
+      esac
+    else
+      phase=progressing
+    fi
+  fi
+  write_reconcile "$phase" ${issues[@]+"${issues[@]}"}
+}
+trap 'finish_reconcile $?' EXIT
+
+# ---- what this node runs and what it should run -------------------------------
+# The running system's own identity: node.conf of /etc, else its sync.env.
+running_role=$ROLE
+running_attr=$FLAKE_ATTR
+node_conf=${NODE_CONF:-/etc/fleet/node.conf}
+if [ -r "$node_conf" ]; then
+  while IFS='=' read -r name value; do
+    case "$name" in
+      role) [[ "$value" =~ $role_pattern ]] && running_role=$value ;;
+      flake_attr) [[ "$value" =~ $attr_pattern ]] && running_attr=$value ;;
+    esac
+  done < "$node_conf"
+fi
+# The assigned target. It is data: a role name and a flake attribute, checked
+# here by shape and below against the fetched roles.json. A malformed file is
+# ignored, never half used.
+target_file=${TARGET:-/nix/fleet-state/target}
+read_target() {
+  local line role="" closure="" count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    count=$((count + 1))
+    if [ "$count" -gt 4 ]; then
+      echo 'it has more than two settings'
+      return 1
+    fi
+    case "$line" in
+      role=*) role=${line#role=} ;;
+      closure=*) closure=${line#closure=} ;;
+      "") ;;
+      *) echo 'it holds a line that is neither role= nor closure='; return 1 ;;
+    esac
+  done < "$target_file"
+  if ! [[ "$role" =~ $role_pattern ]]; then
+    echo 'its role is not a lowercase role name or base'
+    return 1
+  fi
+  if ! [[ "$closure" =~ $attr_pattern ]]; then
+    echo 'its closure is not a flake attribute name'
+    return 1
+  fi
+  printf '%s %s\n' "$role" "$closure"
+}
+if [ -e "$target_file" ]; then
+  if parsed=$(read_target 2>/dev/null); then
+    ROLE=${parsed% *}
+    FLAKE_ATTR=${parsed#* }
+  else
+    echo "sync: ignoring $target_file because ${parsed:-it cannot be read}; using this image's role $ROLE ($FLAKE_ATTR)" >&2
+  fi
+fi
+role_change=0
+if [ "$ROLE" != "$running_role" ]; then
+  role_change=1
+  echo "sync: assigned role $ROLE ($FLAKE_ATTR) differs from the running role $running_role ($running_attr)" >&2
+fi
+
 if [[ "$REPO_URL" == *TODO* ]]; then
   echo 'sync: repository URL is not configured; the running system is unchanged' >&2
+  set_phase blocked 'FLEET_REPOSITORY_UNCONFIGURED: the Git source for automatic updates is not configured; the running system is unchanged.'
   exit 0
 fi
 
 if [ "$BRANCH" != "main" ]; then
   echo 'sync: BRANCH must be main' >&2
+  set_phase blocked 'FLEET_UPDATE_FAILED: the update branch must be main.'
   exit 1
 fi
 
@@ -44,6 +163,7 @@ conf() {
 
 if [ "$(conf sync.paused false)" = true ]; then
   echo 'sync: paused by the fleet configuration (sync.paused); the running system is unchanged' >&2
+  set_phase blocked 'FLEET_UPDATES_PAUSED: automatic updates are paused in Fleet settings (sync.paused); the node does not converge until they are resumed.'
   exit 0
 fi
 
@@ -136,10 +256,11 @@ cleanup() {
     cp "$report_path" "$state_dir/health-failure"
     echo "FLEET-FAIL sync: $failure_reason (exit $status); the running generation was kept" >&2
   fi
-  if [ "$status" -eq 0 ]; then
+  if [ "$status" -eq 0 ] && [ "$record_success" -eq 1 ]; then
     printf '%s\n' "${revision:-unknown}" > "$state_dir/last-success"
     rm -f "$state_dir/pending-generation"
   fi
+  finish_reconcile "$status"
   exit "$status"
 }
 trap cleanup EXIT
@@ -390,7 +511,6 @@ PY
     fi
   fi
   # guard runs this in a conditional, where set -e does not apply.
-  "$curl_bin" -fsS --max-time 20 -o /dev/null https://github.com || return 1
   "$curl_bin" -fsS --max-time 20 -o /dev/null "${target_cache%/}/nix-cache-info" || return 1
 }
 

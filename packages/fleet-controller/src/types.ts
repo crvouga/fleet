@@ -9,12 +9,15 @@ export type { Telemetry } from './telemetry';
  * Roles come from packages/fleet/roles.json; `fleet_roles.py sync` rewrites the
  * two lists below. ROLES is every role in the registry, so node rows and
  * settings of a retired role stay valid until a reviewed change deletes it.
- * ACTIVE_ROLES are the roles a new machine may enroll as.
+ * ACTIVE_ROLES are the roles the controller may assign. CLOSURES are the
+ * buildable closures of the active roles in registry order: a role's own
+ * closure, or <role>-<capability> variants chosen by hardware.
  */
 export const ROLES = ['ci', 'web', 'cache', 'netboot', 'devbox'] as const;
 export type Role = (typeof ROLES)[number];
 export const ACTIVE_ROLES = ['ci', 'devbox'] as const satisfies readonly Role[];
 export type ActiveRole = (typeof ACTIVE_ROLES)[number];
+export const CLOSURES = ['ci', 'ci-gpu', 'devbox'] as const;
 
 /** What a person decided about a machine. */
 export type Approval = 'pending' | 'approved' | 'rejected' | 'retired';
@@ -24,7 +27,25 @@ export type NodeStatus =
   'online' | 'stale' | 'offline' | 'pending' | 'rejected' | 'retired';
 
 export type Severity = 'info' | 'warn' | 'error';
-export type EnrolledVia = 'role-token' | 'hello' | 'dashboard';
+export type EnrolledVia = 'enrollment-token' | 'hello' | 'dashboard';
+
+/** What a node runs: a registry role, or the role-less base system. */
+export type ObservedRole = Role | 'base';
+
+/** Hardware facts a closure may require. Unknown reported values are dropped. */
+export const CAPABILITIES = ['gpu'] as const;
+export type Capability = (typeof CAPABILITIES)[number];
+
+/** The node's own view of its reconcile loop (fleet-sync). */
+export type ReconcilePhase = 'converged' | 'progressing' | 'blocked';
+export interface ReconcileReport {
+  readonly phase: ReconcilePhase;
+  /** Up to 8 public strings that tell a person what blocks convergence. */
+  readonly issues: readonly string[];
+}
+
+/** Computed, never stored: observed against desired. */
+export type Convergence = ReconcilePhase | 'unknown';
 
 /** One thing a node says happened since its last report. */
 export interface NodeEventInput {
@@ -67,12 +88,19 @@ export interface RecoveryFacts {
   readonly outbox: number;
 }
 
-/** POST /v1/heartbeat body. Every field a node cannot know is null. */
+/** POST /v1/heartbeat body (protocol v2). Every field a node cannot know is null. */
 export interface HeartbeatBody {
-  readonly v: 1;
+  readonly v: 2;
   readonly nodeId: string;
-  readonly role: Role;
+  /** Observed: the role of the running closure. Never changes the assignment. */
+  readonly role: ObservedRole;
+  /** Observed: the flake attribute of the running closure. */
+  readonly closure: string;
   readonly hostname: string;
+  readonly hardware?: { readonly capabilities: readonly Capability[] };
+  /** The node's own age public key (`age1…`). Never a private key. */
+  readonly ageRecipient?: string;
+  readonly reconcile?: ReconcileReport;
   readonly capabilities: readonly string[];
   readonly revision: string | null;
   readonly bootId: string | null;
@@ -104,8 +132,8 @@ export interface HeartbeatBody {
   readonly runners: { readonly slots: number; readonly busy: number } | null;
   readonly agent: {
     readonly version: string;
-    /** The revision of the configuration this node has applied, if any. */
-    readonly configRevision: string | null;
+    /** The desired document revision this node last accepted and applied. */
+    readonly desiredRevision: string | null;
   };
   readonly events: readonly NodeEventInput[];
   readonly recovery?: RecoveryFacts;
@@ -113,7 +141,14 @@ export interface HeartbeatBody {
 
 export interface NodeRow {
   readonly id: string;
-  readonly role: Role;
+  /** Assigned by a person or an enrollment token; null when unassigned. Heartbeats never change it. */
+  readonly role: Role | null;
+  /** Reported by the node; null until it reported protocol v2. */
+  readonly observedRole: ObservedRole | null;
+  readonly observedClosure: string | null;
+  readonly ageRecipient: string | null;
+  readonly hardware: { readonly capabilities: readonly Capability[] } | null;
+  readonly reconcile: ReconcileReport | null;
   readonly hostname: string;
   readonly approval: Approval;
   readonly displayName: string | null;
@@ -122,7 +157,8 @@ export interface NodeRow {
   readonly facts: Readonly<Record<string, unknown>>;
   readonly revision: string | null;
   readonly agentVersion: string | null;
-  readonly configRevision: string | null;
+  /** The desired revision the node reports it applied (`agent.desiredRevision`). */
+  readonly appliedRevision: string | null;
   readonly heartbeatIntervalSeconds: number;
   readonly remoteAddr: string | null;
   readonly enrolledVia: EnrolledVia;
@@ -142,6 +178,12 @@ export interface NodeView extends NodeRow {
   /** Display name when a person set one, else the hostname. */
   readonly label: string;
   readonly ageSeconds: number | null;
+  readonly hardwareCapabilities: readonly Capability[];
+  /** What the controller currently wants this node to run; null keeps the running system. */
+  readonly desiredClosure: string | null;
+  readonly desiredRevision: string;
+  readonly convergence: Convergence;
+  readonly reconcileIssues: readonly string[];
 }
 
 export interface HeartbeatPoint {
@@ -197,6 +239,8 @@ export interface FleetSummary {
   readonly byRole: Readonly<
     Record<Role, { readonly total: number; readonly online: number }>
   >;
+  /** Approved nodes without an assigned role. */
+  readonly unassigned: { readonly total: number; readonly online: number };
   /** Revisions of the nodes that are not retired, most common first. */
   readonly revisions: readonly {
     readonly revision: string;
@@ -210,6 +254,17 @@ export interface FleetSummary {
 export function isRole(value: unknown): value is Role {
   return (
     typeof value === 'string' && (ROLES as readonly string[]).includes(value)
+  );
+}
+
+export function isObservedRole(value: unknown): value is ObservedRole {
+  return value === 'base' || isRole(value);
+}
+
+export function isCapability(value: unknown): value is Capability {
+  return (
+    typeof value === 'string' &&
+    (CAPABILITIES as readonly string[]).includes(value)
   );
 }
 

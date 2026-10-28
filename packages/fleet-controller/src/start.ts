@@ -102,7 +102,8 @@ async function initialize(storage: StorageConfig): Promise<void> {
 async function replicate(
   binary: string,
   storage: StorageConfig,
-  log: Logger
+  log: Logger,
+  workerCommand?: string
 ): Promise<void> {
   const temporary = mkdtempSync(join(tmpdir(), 'fleet-litestream-'));
   const config = join(temporary, 'litestream.yml');
@@ -136,7 +137,9 @@ async function replicate(
         'Initial Litestream replication failed. Verify S3 List/Get/Put/Delete permissions for the configured bucket/prefix, endpoint, region and credentials. Retain the local database and retry after fixing the error above. Increase FLEET_STARTUP_TIMEOUT_SECONDS if a slow initial sync exceeded its deadline. The Fleet controller did not start listening.'
       );
     }
-    const worker = `"${process.execPath}" "${join(import.meta.dir, 'controller.ts')}"`;
+    const worker =
+      workerCommand ??
+      `"${process.execPath}" "${join(import.meta.dir, 'controller.ts')}"`;
     const code = await run(
       binary,
       ['replicate', ...common, '-exec', worker],
@@ -155,7 +158,10 @@ async function replicate(
   }
 }
 
-export async function start(checkOnly = false): Promise<void> {
+export async function start(
+  checkOnly = false,
+  workerCommand?: string
+): Promise<void> {
   const log = createLogger({ name: 'fleet-controller', level: 'info' });
   try {
     const env = readControllerEnv();
@@ -166,7 +172,7 @@ export async function start(checkOnly = false): Promise<void> {
       );
       return;
     }
-    await replicate(binary, env.storage, log);
+    await replicate(binary, env.storage, log, workerCommand);
   } catch (error) {
     const known =
       error instanceof ConfigurationError || error instanceof StartupError;

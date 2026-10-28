@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
-import { viewOf } from '../../src/domain/status';
+import { viewOf } from '../../src/domain/node-view';
 import { summarize } from '../../src/domain/summary';
 import { nodeRow, type NodeOptions } from '../../src/testing/fixtures';
 import { FIXED_NOW } from '../../src/testing/test-deps';
 
-const view = (options: NodeOptions) => viewOf(nodeRow(options), FIXED_NOW, 300);
+const OFFLINE_300 = { alerts: { offlineAfterSeconds: 300 } };
+const view = (options: NodeOptions) =>
+  viewOf(nodeRow(options), FIXED_NOW, OFFLINE_300);
 const ago = (s: number) => new Date(FIXED_NOW.getTime() - s * 1000);
 
 describe('summarize', () => {
@@ -122,7 +124,7 @@ describe('summarize', () => {
       ...nodeRow({ short: 'e001', lastSeenAt: ago(1) }),
       facts: { runners: 'nope', failedUnits: 7 },
     };
-    const summary = summarize([viewOf(row, FIXED_NOW, 300)]);
+    const summary = summarize([viewOf(row, FIXED_NOW, OFFLINE_300)]);
     expect(summary.runnerSlots).toEqual({ total: 0, busy: 0 });
     expect(summary.withFailedUnits).toBe(0);
   });

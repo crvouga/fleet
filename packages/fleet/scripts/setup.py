@@ -5,8 +5,7 @@
 
 Creates what a new node cannot make for itself, and nothing a node can:
 
-  1. one age key per role (private halves go to the vault OpenTofu root's
-     ignored tfvars file, public halves to .sops.yaml)
+  1. one age key per role (private halves go to your local private key file, public halves to .sops.yaml)
   2. the GitHub App that registers runners, from a manifest, so the only click is
      "Create GitHub App" and then "Install"
   3. secrets/fleet.yaml, the App's private key encrypted to the ci role's key
@@ -37,7 +36,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PACKAGE = HERE.parent
-REPO = os.environ.get("FLEET_GITHUB_REPO", "crvouga/fleet")
+REPO = os.environ.get("FLEET_GITHUB_REPO", "")
 OWNER = REPO.split("/")[0]
 
 
@@ -270,6 +269,8 @@ def parse(argv):
 
 
 def main(argv):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", REPO):
+        raise SystemExit("Set FLEET_GITHUB_REPO=owner/repository to your Fleet deployment repository before setup.")
     package = Path(os.environ.get("FLEET_PACKAGE") or PACKAGE)
     state = Path(os.environ.get("FLEET_SETUP_STATE") or Path.home() / ".fleet" / "setup-github-app.json")
     wait = int(os.environ.get("FLEET_SETUP_WAIT") or 900)

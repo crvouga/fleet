@@ -23,6 +23,7 @@ import {
   sortNodes,
   SORT_KEYS,
   STATUS_FILTERS,
+  UNASSIGNED,
 } from '../ui/lib/nodes-query';
 import {
   formatDuration,
@@ -121,7 +122,7 @@ function NodeFilters({ path }: { path: string }) {
       />
       <Select
         label="Role"
-        data={['all', ...ROLES]}
+        data={['all', ...ROLES, UNASSIGNED]}
         value={initial.get('role') ?? 'all'}
         onChange={(value) => filter('role', value === 'all' ? null : value)}
         allowDeselect={false}
@@ -212,8 +213,8 @@ function NodeRow({ entry, now }: { entry: FleetEntry; now: Date }) {
         </Stack>
       </Table.Td>
       <Table.Td>
-        <Badge variant="light" color="gray">
-          {view.role}
+        <Badge variant={view.role ? 'light' : 'outline'} color="gray">
+          {view.role ?? UNASSIGNED}
         </Badge>
       </Table.Td>
       <Table.Td>

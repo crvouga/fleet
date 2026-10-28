@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Boot the USB image, or a handoff from the wizard, and this installs the role
-# from the kernel command line. Windows, Linux, or an empty disk are the same:
-# the internal disk is wiped. The netboot ramdisk has no manifest and leaves the
+# Boot the USB image, or a handoff from the wizard, and this installs the Fleet
+# base system. Windows, Linux, or an empty disk are the same: the internal disk
+# is wiped. The role is assigned in Fleet afterwards. The netboot ramdisk has no manifest and leaves the
 # disk alone.
 #
 # The person at the console always has a screen that says what is happening and
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ] && [ "${FLEET_ALLOW_UNPRIVILEGED:-}" != 1 ]; then
-  exec sudo -n --preserve-env=FLEET_AUTO,FLEET_ROLE,FLEET_CMDLINE,FLEET_KEY_DIR,FLEET_MANIFEST,FLEET_SKIP_REBOOT,FLEET_INSTALL,FLEET_LIVE,FLEET_LIVE_STATE -- "$0" "$@"
+  exec sudo -n --preserve-env=FLEET_AUTO,FLEET_CMDLINE,FLEET_KEY_DIR,FLEET_MANIFEST,FLEET_SKIP_REBOOT,FLEET_INSTALL,FLEET_LIVE,FLEET_LIVE_STATE -- "$0" "$@"
 fi
 
 manifest=${FLEET_MANIFEST:-/iso/fleet-install-manifest}

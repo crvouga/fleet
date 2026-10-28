@@ -6,7 +6,6 @@ source "${SYNC_ENV:-/etc/fleet/sync.env}"
 curl_bin=${FLEET_CURL:-curl}
 systemctl=${FLEET_SYSTEMCTL:-systemctl}
 healthy=1
-"$curl_bin" -fsS --max-time 15 -o /dev/null https://github.com || healthy=0
 if [ -n "${CACHE_URL:-}" ]; then
   "$curl_bin" -fsS --max-time 15 -o /dev/null "${CACHE_URL%/}/nix-cache-info" || healthy=0
 else

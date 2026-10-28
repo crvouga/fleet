@@ -146,6 +146,9 @@ class SetupFlowTest(unittest.TestCase):
             """))
         for tool in (keygen, sops):
             tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+        repo_patch = mock.patch.multiple(setup, REPO="crvouga/fleet", OWNER="crvouga")
+        repo_patch.start()
+        self.addCleanup(repo_patch.stop)
         self.env = {
             "FLEET_PACKAGE": str(self.package), "FLEET_SETUP_STATE": str(self.state), "FLEET_GITHUB_API": self.github.url,
             "FLEET_GITHUB_WEB": self.github.url, "FLEET_AGE_KEYGEN": str(keygen), "FLEET_KEYS_OUT": str(self.root / "keys.json"),

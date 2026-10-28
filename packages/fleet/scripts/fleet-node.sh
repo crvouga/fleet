@@ -95,7 +95,8 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 # }
 # # The release asset does not expire. The Fleet workflow's fleet-installer
 # # artifact still lasts 14 days; this program does not download that copy.
-# RELEASE_ISO = "https://github.com/crvouga/fleet/releases/download/fleet-installer/fleet-installer.iso"
+# REPO = os.environ.get("FLEET_BUG_REPORT_REPO") or os.environ.get("FLEET_GITHUB_REPO") or "crvouga/fleet"
+# RELEASE_ISO = ""
 # DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9._/:-]+$")
 # WINDOWS_RE = re.compile(r"^\\\\\.\\PHYSICALDRIVE[0-9]+$")
 # TB = 1000 ** 4
@@ -780,7 +781,9 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #
 #
 # def installer_urls():
-#     iso = os.environ.get("FLEET_INSTALLER_URL") or RELEASE_ISO
+#     controller = os.environ.get("FLEET_CONTROLLER_URL", "").rstrip("/")
+#     iso = os.environ.get("FLEET_INSTALLER_URL") or (controller + "/installers/assets/fleet-installer.iso" if controller else RELEASE_ISO)
+#     invariant(bool(iso), "the Fleet installer source is not configured", "Set FLEET_CONTROLLER_URL to your Fleet app or FLEET_INSTALLER_URL to your published image.")
 #     checksum = os.environ.get("FLEET_INSTALLER_SHA256_URL") or (iso + ".sha256")
 #     return iso, checksum
 #
@@ -2669,7 +2672,7 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #
 #
 # VAULT_DEFAULT = ""
-# GUIDE_URL = "https://raw.githubusercontent.com/crvouga/fleet/main/packages/fleet/docs/agent-install.md"
+# GUIDE_URL = "Run fleet-node.sh guide for the embedded runbook (docs/agent-install.md)."
 # X86 = ("x86_64", "amd64", "x64")
 # GIB = 1024 ** 3
 # MARK = {"ok": "ok  ", "info": "info", "warn": "WARN", "fail": "FAIL"}
@@ -2880,10 +2883,10 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #         if token:
 #             found.append(NET.get("lookup", lookup_token)(token, role))
 #         elif auto_enroll:
-#             found.append(finding("enrollment", "info", "the repository owner will be asked to approve this node on GitHub before anything is erased"))
+#             found.append(finding("enrollment", "info", "the Fleet owner approves this node in the app before anything is erased"))
 #         else:
-#             found.append(finding("enrollment", "warn", "no enrollment token; this node would generate a key no other node shares",
-#                                  f"Mint one with `just enroll {role or '<role>'}` and rerun with its line, unless this role has no encrypted secrets yet."))
+#             found.append(finding("enrollment", "info", "the live installer registers directly with Fleet and waits for app approval",
+#                                  "If this role uses shared encrypted secrets, supply its operator-owned role key before installation."))
 #     return found
 #
 #
@@ -2935,7 +2938,7 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #             return fail(error, 2)
 #     directory = state_dir()
 #     chosen = choose_disk(os_name, "install")
-#     found = preflight(os_name, role, "install", token, directory, auto_enroll=enroll_enabled() and role is not None,
+#     found = preflight(os_name, role, "install", token, directory,
 #                       disk_path=chosen["path"] if chosen["ok"] else None, iso_path=directory / "fleet-installer.iso")
 #     if chosen["ok"]:
 #         found.append(finding("disk", "ok", chosen["plain"]))
@@ -3023,120 +3026,9 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #
 # ENROLL_RE = re.compile(r"^[A-Za-z0-9._-]{8,512}$")
 #
-# # ---- Self-service enrollment ---------------------------------------------------
-# # A new node has no credential for Vault, and the installer release is public, so
-# # a node cannot simply ask for its role key. The person who owns the repository
-# # approves the node instead: the node shows a prefilled GitHub issue, the owner
-# # submits it, and the `Fleet enroll` workflow (which logs in to Vault with its
-# # GitHub OIDC identity, never a stored secret) asks Vault for a single-use
-# # response-wrapped token and posts it as a comment sealed to the node's one-time
-# # public key. Only the node holds the matching private key, and the node alone
-# # can unwrap the token. Anyone else reading the comment sees ciphertext.
-#
-# REPO = os.environ.get("FLEET_GITHUB_REPO", "crvouga/fleet")
-# ENROLL_WAIT = 15 * 60
-# ENROLL_POLL = 15
-# FIELD_ROLE = "fleet-enroll-role: "
-# FIELD_KEY = "fleet-enroll-key: "
-# P25519 = 2 ** 255 - 19
-# BASE_POINT = (9).to_bytes(32, "little")
-#
-#
-# def x25519(scalar, point):
-#     """RFC 7748 X25519, in plain Python so the one downloaded file needs no
-#     package. Checked against the RFC's test vectors in tests/test_enroll.py."""
-#     invariant(len(scalar) == 32 and len(point) == 32, "x25519 needs 32-byte inputs", scalar=len(scalar), point=len(point))
-#     k = bytearray(scalar)
-#     k[0] &= 248
-#     k[31] &= 127
-#     k[31] |= 64
-#     k = int.from_bytes(k, "little")
-#     x1 = int.from_bytes(point, "little") & ((1 << 255) - 1)
-#     x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
-#     for t in reversed(range(255)):
-#         bit = (k >> t) & 1
-#         swap ^= bit
-#         if swap:
-#             x2, x3, z2, z3 = x3, x2, z3, z2
-#         swap = bit
-#         a, b = (x2 + z2) % P25519, (x2 - z2) % P25519
-#         aa, bb = a * a % P25519, b * b % P25519
-#         e = (aa - bb) % P25519
-#         c, d = (x3 + z3) % P25519, (x3 - z3) % P25519
-#         da, cb = d * a % P25519, c * b % P25519
-#         x3 = (da + cb) ** 2 % P25519
-#         z3 = x1 * (da - cb) ** 2 % P25519
-#         x2 = aa * bb % P25519
-#         z2 = e * (aa + 121665 * e) % P25519
-#     if swap:
-#         x2, x3, z2, z3 = x3, x2, z3, z2
-#     return (x2 * pow(z2, P25519 - 2, P25519) % P25519).to_bytes(32, "little")
-#
-#
-# def _hkdf(secret, salt, info, length):
-#     prk = hmac.new(salt, secret, hashlib.sha256).digest()
-#     out, block, counter = b"", b"", 1
-#     while len(out) < length:
-#         block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
-#         out += block
-#         counter += 1
-#     return out[:length]
-#
-#
-# def _stream(key, length):
-#     out = bytearray()
-#     counter = 0
-#     while len(out) < length:
-#         out += hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha256).digest()
-#         counter += 1
-#     return bytes(out[:length])
-#
-#
-# def _b64(raw):
-#     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-#
-#
-# def _unb64(text):
-#     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-#
-#
-# def new_keypair():
-#     private = os.urandom(32)
-#     return private, x25519(private, BASE_POINT)
-#
-#
-# def seal(plaintext, recipient_public):
-#     """Encrypt to one public key: ephemeral X25519, HKDF-SHA256, an HMAC-SHA256
-#     keystream, and an HMAC-SHA256 tag over the ciphertext (encrypt-then-MAC)."""
-#     ephemeral = os.urandom(32)
-#     ephemeral_public = x25519(ephemeral, BASE_POINT)
-#     shared = x25519(ephemeral, recipient_public)
-#     invariant(shared != bytes(32), "the recipient public key is a low-order point")
-#     keys = _hkdf(shared, ephemeral_public + recipient_public, b"fleet-seal-v1", 64)
-#     cipher = bytes(a ^ b for a, b in zip(plaintext, _stream(keys[:32], len(plaintext))))
-#     tag = hmac.new(keys[32:], ephemeral_public + cipher, hashlib.sha256).digest()
-#     return _b64(ephemeral_public + cipher + tag)
-#
-#
-# def open_sealed(blob, private):
-#     """Returns the plaintext, or None when the blob is not for this key or was altered."""
-#     try:
-#         raw = _unb64(blob.strip())
-#     except ValueError:
-#         return None
-#     if len(raw) < 64:
-#         return None
-#     ephemeral_public, cipher, tag = raw[:32], raw[32:-32], raw[-32:]
-#     shared = x25519(private, ephemeral_public)
-#     if shared == bytes(32):
-#         return None
-#     public = x25519(private, BASE_POINT)
-#     keys = _hkdf(shared, ephemeral_public + public, b"fleet-seal-v1", 64)
-#     want = hmac.new(keys[32:], ephemeral_public + cipher, hashlib.sha256).digest()
-#     if not hmac.compare_digest(tag, want):
-#         return None
-#     return bytes(a ^ b for a, b in zip(cipher, _stream(keys[:32], len(cipher))))
-#
+# # ---- Optional GitHub bug reports -----------------------------------------------
+# # Node approval uses the Fleet controller protocol; these links are diagnostics only.
+# ENROLL_RE = re.compile(r"^[A-Za-z0-9._-]{8,512}$")
 #
 # # Every installer surface (the wizard, this program, the live installer screen)
 # # reports problems on one GitHub issue form. Its field ids are fixed by
@@ -3181,118 +3073,6 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #              f"Log: {LOG['path'] or 'none'} (attach it to the issue; it is redacted)"]
 #     title = "Fleet installer: " + (first if len(first) <= 90 else first[:87] + "...")
 #     return "Report: " + issue_form_url_within(title, f"fleet-node.sh {command}", "\n".join(facts), limit=2000)
-#
-#
-# def enroll_issue_url(role, public):
-#     body = (
-#         f"Approve a new fleet {role} node. Submit this issue as it is.\n\n"
-#         f"{FIELD_ROLE}{role}\n{FIELD_KEY}{_b64(public)}\n"
-#     )
-#     query = urllib.parse.urlencode({"title": f"fleet-enroll {role}", "body": body}, quote_via=urllib.parse.quote)
-#     return f"https://github.com/{REPO}/issues/new?{query}"
-#
-#
-# def parse_enroll_request(title, body):
-#     """(role, public key bytes) from an enrollment issue, or raises Invariant."""
-#     fields = {}
-#     for line in str(body or "").splitlines():
-#         for name in (FIELD_ROLE, FIELD_KEY):
-#             if line.startswith(name):
-#                 fields[name] = line[len(name):].strip()
-#     role = fields.get(FIELD_ROLE, "")
-#     invariant(role in ROLES, "the enrollment request names an unknown role", "Run the installer again.", role=role)
-#     invariant(str(title or "").strip() == f"fleet-enroll {role}", "the issue title does not match its role", title=title, role=role)
-#     try:
-#         public = _unb64(fields.get(FIELD_KEY, ""))
-#     except ValueError:
-#         public = b""
-#     invariant(len(public) == 32, "the enrollment request holds no valid public key", "Run the installer again.")
-#     return role, public
-#
-#
-# def _github(path, etag=None):
-#     base = os.environ.get("FLEET_GITHUB_API", "https://api.github.com").rstrip("/")
-#     headers = {"Accept": "application/vnd.github+json", "User-Agent": "fleet-node", "X-GitHub-Api-Version": "2022-11-28"}
-#     token = os.environ.get("FLEET_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
-#     if token:
-#         headers["Authorization"] = "Bearer " + token
-#     if etag:
-#         headers["If-None-Match"] = etag
-#     try:
-#         with urllib.request.urlopen(urllib.request.Request(base + path, headers=headers), timeout=20) as reply:
-#             return reply.status, json.loads(reply.read().decode("utf-8", "replace")), reply.headers.get("ETag")
-#     except urllib.error.HTTPError as exc:
-#         return exc.code, None, etag
-#     except (urllib.error.URLError, OSError, ValueError):
-#         return 0, None, etag
-#
-#
-# def await_approval(role, private, public, wait=ENROLL_WAIT, interval=ENROLL_POLL, sleep=time.sleep, notify=None, cancel=None):
-#     """Poll the public issue until the workflow answers. Returns (token, error)."""
-#     marker = FIELD_KEY + _b64(public)
-#     issue, etags = None, {}
-#     deadline = time.monotonic() + wait
-#     while True:
-#         if issue is None:
-#             path = f"/repos/{REPO}/issues?state=all&sort=created&direction=desc&per_page=30"
-#             code, data, etags["issues"] = _github(path, etags.get("issues"))
-#             if code == 200:
-#                 for item in data:
-#                     if "pull_request" not in item and marker in str(item.get("body") or ""):
-#                         issue = item["number"]
-#                         if notify:
-#                             notify("The request was received. Waiting for the approval workflow.")
-#                         break
-#         if issue is not None:
-#             code, data, etags["comments"] = _github(f"/repos/{REPO}/issues/{issue}/comments?per_page=50", etags.get("comments"))
-#             for comment in (data or []) if code == 200 else []:
-#                 if (comment.get("user") or {}).get("login") != "github-actions[bot]":
-#                     continue
-#                 for line in str(comment.get("body") or "").splitlines():
-#                     if line.startswith("fleet-error: "):
-#                         return None, line[len("fleet-error: "):].strip()
-#                     if line.startswith("fleet-sealed: "):
-#                         plain = open_sealed(line[len("fleet-sealed: "):], private)
-#                         if plain is None:
-#                             continue
-#                         try:
-#                             answer = json.loads(plain.decode("utf-8"))
-#                         except ValueError:
-#                             continue
-#                         if answer.get("role") == role and ENROLL_RE.fullmatch(str(answer.get("token") or "")):
-#                             return answer["token"], None
-#         if cancel and cancel():
-#             return None, "cancelled"
-#         if time.monotonic() >= deadline:
-#             return None, "nobody approved this node in time"
-#         sleep(interval)
-#
-#
-# def self_enroll(role, notify=None, wait=None, cancel=None):
-#     """Ask the owner to approve this node. Returns (token, error). Nothing is
-#     erased here; a refusal or a timeout leaves every disk as it was."""
-#     say_it = notify or say
-#     private, public = new_keypair()
-#     url = enroll_issue_url(role, public)
-#     say_it("Approve this node: press 'Submit new issue' on the GitHub page that opens, signed in as the repository owner.")
-#     say_it("If no page opened, open this address on any computer: " + url)
-#     if not os.environ.get("FLEET_NO_BROWSER"):
-#         try:
-#             webbrowser.open(url)
-#         except webbrowser.Error:
-#             pass
-#     seconds = wait if wait is not None else int(os.environ.get("FLEET_ENROLL_WAIT") or ENROLL_WAIT)
-#     interval = int(os.environ.get("FLEET_ENROLL_POLL") or ENROLL_POLL)
-#     token, error = await_approval(role, private, public, seconds, interval, notify=notify, cancel=cancel)
-#     if token:
-#         say_it("Approved. The enrollment token arrived sealed and was opened on this machine.")
-#     return token, error
-#
-#
-# def enroll_enabled():
-#     return not flag(os.environ.get("FLEET_NO_ENROLL"))
-#
-#
 #
 #
 # def validate_ssh_key(value):
@@ -3388,7 +3168,7 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #         return fail(chosen["next"], chosen.get("code", 2))
 #     # Every check that does not need a person runs before anyone is asked to
 #     # confirm, so a doomed install never gets as far as the prompt.
-#     found = preflight(os_name, role, action, token, directory, auto_enroll=action == "install" and enroll_enabled(), disk_path=chosen["path"],
+#     found = preflight(os_name, role, action, token, directory,  disk_path=chosen["path"],
 #                       iso_path=directory / "fleet-installer.iso")
 #     show_findings(found)
 #     problems = [item for item in found if item["status"] == "fail"]
@@ -3437,15 +3217,6 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #     fetched = fetch_installer(iso)
 #     if fetched != 0:
 #         return fetched
-#     # Wi-Fi downloads can outlive a wrapping-token lease. Request approval only
-#     # after the complete image has been verified, and recheck the disk afterward.
-#     if action == "install" and not token and enroll_enabled() and (reinstall or not installed_for(role, directory)):
-#         token, error = self_enroll(role)
-#         if error:
-#             return fail(f"Next: this node was not approved ({error}). Nothing was written. Run this program again, or add --no-enroll to install without the role's shared key.", 2)
-#         verdict = NET.get("lookup", lookup_token)(token, role)
-#         if verdict["status"] == "fail":
-#             return fail(f"Next: the approval token cannot be used ({verdict['detail']}). Nothing was written. Run this program again to be approved again.", 2)
 #     fresh = choose_disk(os_name, action)
 #     invariant(fresh.get("ok") and fresh.get("disk_id") == chosen["disk_id"],
 #               "the disk changed while the installer was downloading or waiting for approval",
@@ -3707,8 +3478,7 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #   flash             write the installer to a USB disk
 #   guide             print the runbook an agent follows
 #
-# Flags: --yes (take the confirmation as typed), --token-file PATH, --no-enroll (skip the GitHub approval
-# and let the node make its own key), --json (doctor), --plan (print the exact steps and sizes, change nothing).
+# Flags: --yes (take the confirmation as typed), --token-file PATH, --no-enroll (legacy compatibility; app approval still applies), --json (doctor), --plan (print the exact steps and sizes, change nothing).
 # --reinstall deliberately erases an existing installation of the same role; disk checks and confirmation still apply.
 # Every run writes a log; its path is printed when something fails.
 # Agent runbook: """ + GUIDE_URL
@@ -4662,7 +4432,7 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 # __GUIDE_MD__
 # # Add or remove a fleet node (agent runbook)
 #
-# You are an agent on a machine that should join (or leave) the fleet. Do the work yourself. The person should only have to say yes once, to the disk that will be erased. Everything here runs on this machine; you need no checkout, no Nix, and no second computer.
+# You are an agent on a machine that should join (or leave) the fleet. Do the work yourself. The person should only have to say yes once, to the disk that will be erased. The installer runs on this machine without a checkout or Nix. For managed enrollment, the Fleet owner must be able to access the app while the live installer waits for approval.
 #
 # Rules that never bend:
 #
@@ -4676,7 +4446,8 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 # 1. Get the program. It is one file.
 #
 #    ```sh
-#    curl -fsSL -o fleet-node.sh https://github.com/crvouga/fleet/releases/download/fleet-installer/fleet-node.sh
+#    export FLEET_CONTROLLER_URL=https://fleet.example.org  # operator-supplied app origin
+#    curl -fsSL -o fleet-node.sh "$FLEET_CONTROLLER_URL/installers/assets/fleet-node.sh"
 #    ```
 #
 #    Windows PowerShell: `curl.exe -fsSL -o fleet-node.sh <same url>`, then use `bash fleet-node.sh`. Python 3 is the only requirement. If it is missing, install Python 3 with the system package manager and continue.
@@ -4688,19 +4459,19 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 # 3. Check, read-only. Run it with `sudo` on Linux and macOS.
 #
 #    ```sh
-#    sudo bash fleet-node.sh doctor ROLE --json
+#    sudo env FLEET_CONTROLLER_URL="$FLEET_CONTROLLER_URL" bash fleet-node.sh doctor ROLE --json
 #    ```
 #
 #    It writes nothing. In the JSON, `ok` is true only when nothing stands in the way. For every check with `status` `fail`, `fix` says what to do. Do the fixes you can do yourself (install a package, rerun with `sudo`), then run `doctor` again. A fix that needs the person (a firmware setting, more RAM, a different computer) goes to them as one sentence. `warn` entries do not block; tell the person about them.
 #
-# 4. Enrollment. A node of a role that has encrypted secrets needs that role's key. By default the install asks the repository owner to approve the node: it prints a link (and tries to open it) to a prefilled GitHub issue, and waits up to 15 minutes before anything is erased. You cannot press that button; show the person the link, say "press Submit new issue while signed in as the repository owner", and keep the command running. If the person pasted a line containing `FLEET_ENROLL_TOKEN=...` or gave you a token instead, write the token alone into a file readable only by root (for example `install -m 600 /dev/null tok && printf %s "$TOKEN" > tok`), pass `--token-file tok` from here on, and delete the file afterward; `doctor` checks it without spending it and refuses one made for a different role. If the approval workflow answers with `fleet-error:`, show the person that sentence. Only if the person says the node does not need the role's shared secrets, add `--no-enroll`.
+# 4. Enrollment stays in the Fleet app. After restart, the live installer registers its hardware identity and private credential directly with the controller configured in the image. Ask the Fleet owner to review this computer under **Pending** and approve it. Disk erasure remains blocked until approval; rejection or timeout leaves the disk untouched. No GitHub account, issue, workflow or shared role token is required. If the role has encrypted shared secrets, provide that role's private age identity on a `FLEET-KEY` volume, or use an explicitly supplied wrapped role-secret token via a private `--token-file`. Keep role-secret transfer separate from app approval. `--no-enroll` is a legacy compatibility flag and does not bypass live app approval.
 #
 # 5. Ask. Tell the person, in plain words: the role, `erases` from the JSON (the exact disk, which loses everything on it including Windows or any other OS), that the machine will reboot into the installer and this session will end, and any `warn` entries. Get an explicit yes.
 #
 # 6. Install.
 #
 #    ```sh
-#    sudo bash fleet-node.sh ROLE --yes --token-file tok
+#    sudo env FLEET_CONTROLLER_URL="$FLEET_CONTROLLER_URL" bash fleet-node.sh ROLE --yes --token-file tok
 #    ```
 #
 #    It repeats every check and refuses on its own if the disk changed or anything is wrong; nothing is erased in that case. When it prints `FLEET-WIPE role=ROLE` the machine is rebooting into the installer. On Windows the install first shrinks `C:` and writes the installer into the freed space (`doctor` and `bash fleet-node.sh ROLE --plan` print the exact steps and sizes and change nothing; docs/windows.md has the recovery steps); it needs an elevated shell, UEFI/GPT, and Secure Boot off (`doctor` says so and what to run), and it restores everything if a step fails. The installer erases that disk, installs the role, and reboots into the node. This takes several minutes with no further input. The hostname is `<role>-<4 hex>` and is set from the hardware.
@@ -4725,5 +4496,5 @@ sed -n '/^# __WIFI_CAPTURE_PY__$/,/^# __WIFI_CAPTURE_END__$/p' "$0" | sed '1d;$d
 #
 # Exit code 0 means done. 2 means a precondition failed and nothing was written. 70 is a bug in the program.
 #
-# Source and design notes: `packages/fleet` in https://github.com/crvouga/fleet (`AGENTS.md`, `docs/runbook.md`).
+# Source and design notes: `packages/fleet/AGENTS.md` and `packages/fleet/docs/runbook.md` in this application checkout.
 # __GUIDE_END__

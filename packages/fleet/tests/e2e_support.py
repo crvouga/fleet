@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import secrets
-import select
+import queue
 import shutil
 import signal
 import subprocess
@@ -153,25 +153,31 @@ class Stack:
         self.info = self._wait_for_ready()
 
     def _wait_for_ready(self):
+        # TextIOWrapper may read ahead several lines from one pipe write. A
+        # subsequent select() sees an empty OS pipe even though readline() has
+        # buffered readiness. One reader thread owns the stream throughout.
+        lines = queue.Queue()
+        threading.Thread(target=self._drain, args=(lines,), daemon=True).start()
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([self.process.stdout], [], [], 1)
-            if ready:
-                line = self.process.stdout.readline()
-                if not line:
-                    break
-                self.output.append(line)
-                if line.startswith('{"controllerUrl"'):
-                    threading.Thread(target=self._drain, daemon=True).start()
-                    return json.loads(line)
-            elif self.process.poll() is not None:
+            try:
+                line = lines.get(timeout=1)
+            except queue.Empty:
+                continue
+            if line is None:
                 break
+            if line.startswith('{"controllerUrl"'):
+                return json.loads(line)
         self.stop()
         raise RuntimeError("the fleet controller stack did not start:\n" + "".join(self.output)[-3000:])
 
-    def _drain(self):
-        for line in self.process.stdout:
-            self.output.append(line)
+    def _drain(self, lines):
+        try:
+            for line in self.process.stdout:
+                self.output.append(line)
+                lines.put(line)
+        finally:
+            lines.put(None)
 
     def stop(self):
         if self.process.poll() is None:

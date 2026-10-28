@@ -23,7 +23,7 @@ Base URL: `https://fleet.example.com`. All bodies are JSON (`Content-Type: appli
 - **Node id** is the lowercase sha256 hex (64 chars) of the machine's stable hardware material, exactly the digest whose first four hex digits are the node's hostname suffix (`ci-a3f9` -> id starts `a3f9`). It is `/run/fleet/node` field `machine_id`.
 - The controller stores `sha256(node secret)` only. A node secret is 32 random bytes, hex encoded (64 chars).
 - `FLEET_ROLE_TOKEN_HASHES` is a JSON object `{ "ci": "<sha256 hex>", ... }`. The controller compares `sha256(presented role token)` to the hash for the node's claimed role with a constant-time comparison.
-- Browser authentication is Google through the shared auth relay only: OIDC code + S256 PKCE, state, nonce and signature/issuer/audience/expiry verification. The verified email must appear in `fleet.allowed_emails`. Fleet uses an opaque, database-backed session, rechecks access on authorized requests and invalidates it on sign-out. Vault only stores application secrets.
+- Browser authentication uses the deployment-injected standard OIDC provider directly: OIDC code + S256 PKCE, state, nonce and signature/issuer/audience/expiry verification. The verified email must appear in `fleet.allowed_emails`. Fleet uses an opaque, database-backed session, rechecks access on authorized requests and invalidates it on sign-out. The initial allowlist is operator-managed. Authentication adapters and their HTTP transport are injected at controller composition; no shared relay or provider-specific account is required.
 - `/not-allowed` shows a denied signed-in account and permits same-origin sign-out without requiring allowlist access. `/access` manages allowed emails for existing allowed administrators, auditing changes and protecting the final allowed address. Initial access is populated by the explicit owner CLI command. See README for storage and exact callback configuration.
 
 ## Node endpoints
@@ -172,7 +172,7 @@ State-changing browser requests also require a same-origin `Origin` header (CSRF
 
 ## Dashboard (cookie session)
 
-`GET /login` (Google sign-in), `GET /auth/login`, `GET /auth/callback`, `GET /not-allowed`, `POST /logout`, `GET /access` and `POST /access` (allowed administrators only); `POST /login` returns 410 and never creates a session; `GET /` fleet overview; `GET /nodes`, `GET /nodes/:id`; `GET /pending`; `GET /events`; `GET /settings`, `GET /settings/:scope`, `POST /settings/:scope`; `GET /ui/fleet` (an HTML fragment of the overview for auto refresh).
+`GET /login` (configured OIDC sign-in), `GET /auth/login`, `GET /auth/callback`, `GET /not-allowed`, `POST /logout`, `GET /access` and `POST /access` (allowed administrators only); `POST /login` returns 410 and never creates a session; `GET /` fleet overview; `GET /nodes`, `GET /nodes/:id`; `GET /pending`; `GET /events`; `GET /settings`, `GET /settings/:scope`, `POST /settings/:scope`; `GET /ui/fleet` (an HTML fragment of the overview for auto refresh).
 
 ## Background work (inside the controller process)
 

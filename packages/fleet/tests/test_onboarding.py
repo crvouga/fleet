@@ -168,6 +168,36 @@ class OnboardingTests(unittest.TestCase):
         if os.name != 'nt':
             self.assertEqual(reporter.paths.secret.stat().st_mode & 0o777, 0o600)
 
+    def test_pending_node_without_role_token_waits_for_explicit_app_approval(self):
+        self.token.unlink(missing_ok=True)
+        calls = []
+        def http(method, url, headers, body, timeout):
+            payload = json.loads(body) if body else None
+            calls.append((url, payload))
+            if url.endswith('/register'):
+                return 200, b'{"status":"pending"}'
+            if url.endswith('/enrollment/status'):
+                return 200, json.dumps({'status': 'approved', 'nodeId': 'a' * 64, 'role': 'ci'}).encode()
+            return 200, b'{"ok":true}'
+        reporter = BootstrapReporter(self.system, 'ci', self.token,
+            identity={'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'}, http=http)
+        with mock.patch('bootstrap_report.time.sleep'):
+            reporter.begin(mock.Mock())
+        self.assertTrue(reporter.started)
+        self.assertNotIn('roleToken', calls[0][1])
+        self.assertTrue(calls[1][0].endswith('/enrollment/status'))
+        self.assertEqual(reporter.paths.secret.read_text().strip(), calls[0][1]['secret'])
+
+    def test_pending_approval_timeout_never_authorizes_installation(self):
+        self.token.unlink(missing_ok=True)
+        reporter = BootstrapReporter(self.system, 'ci', self.token,
+            identity={'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'},
+            http=lambda *args: (200, b'{"status":"pending"}'))
+        with mock.patch.dict(os.environ, {'FLEET_APPROVAL_WAIT_SECONDS': '0'}):
+            with self.assertRaisesRegex(ApprovalRefused, 'Pending'):
+                reporter.begin(mock.Mock())
+        self.assertFalse(reporter.started)
+
     def test_rejected_identity_is_refused_before_installation(self):
         reporter = BootstrapReporter(self.system, 'ci', self.token,
             identity={'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'},

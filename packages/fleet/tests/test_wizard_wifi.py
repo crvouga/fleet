@@ -45,7 +45,7 @@ class WifiTransferTests(unittest.TestCase):
                     wifi.main(["ready"])
                 connect.assert_not_called()
 
-    def test_slow_download_finishes_before_enrollment_and_disk_is_rechecked_afterward(self):
+    def test_disk_is_rechecked_after_a_slow_download_without_github_approval(self):
         events = []
         disks = [{"path": "/dev/fleet-test", "type": "disk", "tran": "nvme", "size": 10**12, "internal": True, "whole": True,
                   "model": "Fixture", "serial": "fixture", "rm": False, "hotplug": False}]
@@ -56,9 +56,6 @@ class WifiTransferTests(unittest.TestCase):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(b"verified image")
             return 0
-        def approve(role):
-            events.append("approval")
-            return "hvs.fixture-token", None
         def choose(*args):
             events.append("disk")
             return chosen
@@ -68,14 +65,13 @@ class WifiTransferTests(unittest.TestCase):
                 mock.patch.object(decide, "choose_disk", side_effect=choose), \
                 mock.patch.object(decide, "preflight", return_value=[]), \
                 mock.patch.object(decide, "enroll_token", return_value=(["ci"], None, None)), \
-                mock.patch.object(decide, "enroll_enabled", return_value=True), \
                 mock.patch.object(decide, "installed_for", return_value=False), \
                 mock.patch.object(decide, "fetch_installer", side_effect=fetch), \
-                mock.patch.object(decide, "self_enroll", side_effect=approve), \
                 mock.patch.object(decide, "perform_install", return_value=0), \
                 mock.patch.dict(decide.NET, {"lookup": lambda *args: {"status": "ok"}}):
             self.assertEqual(decide.cmd_install(["ci", "--yes"], "install"), 0)
-        self.assertLess(events.index("download"), events.index("approval"))
+        self.assertNotIn("approval", events)
+        self.assertLess(events.index("download"), len(events) - 1)
         self.assertEqual(events[-1], "disk")
 
     @unittest.skipIf(os.name == "nt", "The live initramfs runs Linux shell commands")

@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""The whole fleet, end to end, with the real programs at every step.
+"""Real installer, live agent, controller and dashboard with disposable storage.
 
-  installer      scripts/fleet-node.sh (download, checks, the GitHub approval,
-                 the one boot into the installer) and scripts/fleet-install.sh
-                 (unwrap the key, install the node's credentials)
-  approval       scripts/enroll.py, the code the `Fleet enroll` workflow runs
-  fleet node     scripts/agent.py, reading a node's /proc, /run/fleet, /etc/fleet
-  fleet server   the real fleet controller worker with a throwaway SQLite database initialized by the API
-  dashboard      the pages and the JSON API, over HTTP
-
-Only the outside world is faked: GitHub's issues API, Vault, the release host,
-the disk listing and kexec. Needs bun and curl. Without
-them the test skips, unless FLEET_E2E_REQUIRED=1 (CI sets it), when it fails.
+GitHub is a negative-control fake: normal enrollment never contacts it.
+An explicit optional wrapped role-secret fixture exercises credential transfer;
+node approval is performed by the controller protocol, independently of issues.
+Physical disks and boot commands are replaced by disposable fixtures.
 """
 
 import hashlib
@@ -143,31 +136,6 @@ class FullChainTest(unittest.TestCase):
         self.assertEqual(status, 200, document)
         return next((n for n in document["nodes"] if n["id"] == node_id), None)
 
-    def enroll_as_owner(self, link):
-        """What the owner's click and the `Fleet enroll` workflow do: scripts/enroll.py with the real script."""
-        q = query(link)
-        result = self.root / f"result-{secrets.token_hex(3)}.txt"
-        done = subprocess.run(
-            [sys.executable, str(SCRIPTS / "enroll.py")],
-            env={
-                **os.environ,
-                "VAULT_ADDR": self.vault.url,
-                "ACTIONS_ID_TOKEN_REQUEST_URL": self.vault.url + "/oidc?x=1",
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ISSUE_TITLE": q["title"][0],
-                "ISSUE_BODY": q["body"][0],
-                "RESULT_FILE": str(result),
-            },
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        self.assertEqual(done.returncode, 0, done.stderr)
-        line = result.read_text().strip()
-        self.assertTrue(line.startswith("fleet-sealed: "), line)
-        self.assertNotIn(AGE_KEY, done.stdout + done.stderr + line)
-        number = self.github.open_issue(q["title"][0], q["body"][0])
-        self.github.comment(number, line)
 
     def run_node_installer(self, label):
         """fleet-node.sh ci --yes, on a Linux machine whose only outside contacts are the fakes."""
@@ -194,22 +162,16 @@ class FullChainTest(unittest.TestCase):
             "FLEET_CONFIRM_TIMEOUT": "10",
         }
         env.pop("FLEET_NO_ENROLL", None)
+        token = 'hvs.wrapped-ci-explicit'
+        self.vault.wrapped[token] = ('ci', self.vault.documents['ci'])
+        env['FLEET_ENROLL_TOKEN'] = token
         process = subprocess.Popen(
             ["bash", str(SCRIPTS / "fleet-node.sh"), "ci", "--yes"],
             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=work,
         )
-        lines = []
-        link = None
-        for line in process.stdout:
-            lines.append(line)
-            if "issues/new?" in line:
-                link = line[line.index("https://"):].strip()
-                break
-        self.assertIsNotNone(link, "the installer never showed the approval link:\n" + "".join(lines))
-        self.assertFalse((work / "kexec.log").exists(), "nothing may boot before the owner approves")
-        self.enroll_as_owner(link)
-        rest, _ = process.communicate(timeout=120)
-        output = "".join(lines) + rest
+        output, _ = process.communicate(timeout=120)
+        self.assertEqual(self.github.requests, [])
+        self.assertNotIn('issues/new?', output)
         self.assertEqual(process.returncode, 0, output)
         self.assertIn("FLEET-WIPE role=ci", output)
         self.assertNotIn(AGE_KEY, output)
@@ -253,7 +215,7 @@ class FullChainTest(unittest.TestCase):
     def test_01_download_to_dashboard(self):
         """Download the installer, get approved, install, boot, report, and show up on the dashboard."""
         command_line = self.run_node_installer("a")
-        self.assertRegex(command_line, r"fleet\.enroll=hvs\.wrapped-ci-\d+")
+        self.assertRegex(command_line, r"fleet\.enroll=hvs\.wrapped-ci-explicit")
         self.assertIn("fleet.role=ci", command_line)
         self.assertIn(f"fleet.vault={self.vault.url}", command_line)
         self.assertTrue(command_line.endswith("fleet.role=ci"))

@@ -7,6 +7,7 @@ through the operating system's own permission prompt.
 """
 import datetime
 import hmac
+import html
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -106,7 +108,7 @@ class Job:
         self.role = None
         self.step = None
         self.changed = False  # the privileged helper may have changed this computer
-        self.approval = None  # {"url", "deadline"} while GitHub approval is awaited
+        self.approval = None  # {"url", "deadline"} reserved for controller approval status
         self.scratch = None  # the folder shared with the helper, once there is one
         self.cancel = threading.Event()
         self.lock = threading.Lock()
@@ -170,14 +172,28 @@ class Wizard:
         self.plan = None
         self.job = Job()
         self.lock = threading.Lock()
-        self.approved = {}  # role -> enrollment token approved in this session, reused by a retry
+        self.source = None
         decide.NET["probe"] = self.probe_installer
         decide.NET["lookup"] = lookup_token_http
 
     # ---- facts -------------------------------------------------------------
 
+    def installer_urls(self):
+        return (self.source, self.source + '.sha256') if self.source else installer_urls()
+
+    def set_source(self, origin):
+        decide.invariant(self.job.snapshot()['state'] in ('idle', 'done', 'failed', 'cancelled'), 'An installation is already running.')
+        parsed = urllib.parse.urlsplit(str(origin).strip())
+        valid = parsed.scheme == 'https' or (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost', '::1'))
+        decide.invariant(valid and parsed.hostname and not parsed.username and not parsed.password
+                         and parsed.path in ('', '/') and not parsed.query and not parsed.fragment,
+                         'Enter your Fleet app HTTPS origin.', 'Use an origin such as https://fleet.example.org; loopback HTTP is allowed for local testing.')
+        self.source = str(origin).strip().rstrip('/') + '/installers/assets/fleet-installer.iso'
+        self.plan = None
+        return {'configured': True}
+
     def probe_installer(self):
-        return imaging.probe(installer_urls()[0])
+        return imaging.probe(self.installer_urls()[0])
 
     def disks(self):
         try:
@@ -208,9 +224,15 @@ class Wizard:
     def scan(self):
         disks, disk_error = self.disks()
         internal = decide.plan_disks(disks, "install") if not disk_error else {"ok": False, "next": disk_error}
-        error, size = imaging.probe(installer_urls()[0])
+        source_required = False
+        try:
+            error, size = imaging.probe(self.installer_urls()[0])
+        except decide.Invariant:
+            source_required = True
+            error, size = 'Enter your Fleet app address to select an installer source.', None
         node = decide.read_kv(os.environ.get("FLEET_NODE_CONF", "/etc/fleet/node.conf"))
         return {
+            "source_required": source_required,
             "version": VERSION,
             "os": OS_LABEL.get(self.os_name, self.os_name),
             "arch": decide.machine_arch(),
@@ -255,7 +277,7 @@ class Wizard:
             decide.invariant(len(choices) == 1, "the USB disk is not present uniquely", "Unplug other identical sticks, press Rescan, and choose it again.", disk_id=body.get("disk_id"))
             chosen = choices[0]
             findings = decide.preflight(self.os_name, None, "media", None, directory, need_root=False)
-            error, size = imaging.probe(installer_urls()[0])
+            error, size = imaging.probe(self.installer_urls()[0])
             if not chosen["size"] or size and chosen["size"] < imaging.padded(size):
                 findings.append(decide.finding("usb-size", "fail", f"the USB disk holds {chosen['size'] // 10**9} GB, the installer needs {size // 10**9 + 1} GB",
                                                "Use a larger USB disk."))
@@ -270,7 +292,7 @@ class Wizard:
             blockers = self.here_blockers(disks, internal)
             decide.invariant(not blockers, "this computer cannot install itself", " ".join(blockers))
             findings = decide.preflight(self.os_name, role, "install", token, directory, need_root=False, ssh_key=ssh_key,
-                                        auto_enroll=decide.enroll_enabled(), disk_path=internal["path"],
+                                        disk_path=internal["path"],
                                         iso_path=imaging.cache_dir(self.os_name) / "fleet-installer.iso")
             findings = preparation.review_findings(self.os_name, findings)
             erase, disk_id, target = internal["plain"], internal["disk_id"], internal["path"]
@@ -326,7 +348,7 @@ class Wizard:
 
     def run_job(self, job, plan):
         try:
-            iso_url, sum_url = installer_urls()
+            iso_url, sum_url = self.installer_urls()
             job.note("Looking up the installer checksum", step="checksum")
             def release():
                 checksum = imaging.fetch_checksum(sum_url)
@@ -351,9 +373,6 @@ class Wizard:
             if plan["mode"] == "here":
                 job.note("Checking the installer for this role", step="readiness")
                 decide.check_installer_readiness(target, plan["role"])
-            if plan["mode"] == "here" and not plan["token"] and decide.enroll_enabled():
-                job.note("Waiting for GitHub approval", step="enroll")
-                plan = self.enroll(job, plan)
             job.move("working")
             self.run_helper(job, plan, target, sha)
         except imaging.Cancelled:
@@ -366,42 +385,6 @@ class Wizard:
             decide.log(traceback.format_exc(), "ERROR")
             self.fail(job, f"{type(exc).__name__}: {exc}", "Read the log, then run the wizard again.",
                       details={"error": diagnostics.exception_details(exc)})
-
-    def enroll(self, job, plan):
-        """Ask the repository owner to approve this node on GitHub. Nothing has
-        been erased, so a refusal or a timeout ends the job cleanly."""
-        lookup = decide.NET.get("lookup", lookup_token_http)
-        earlier = self.approved.get(plan["role"])
-        if earlier is not None:
-            # A retry after a failure that did not use the token: no second GitHub approval.
-            if lookup(earlier, plan["role"])["status"] != "fail":
-                job.note("Using the approval GitHub gave earlier in this session.")
-                return {**plan, "token": earlier}
-            self.approved.pop(plan["role"], None)
-        deadline = time.time() + int(os.environ.get("FLEET_ENROLL_WAIT") or decide.ENROLL_WAIT)
-
-        def notify(message, *args, **kwargs):
-            # The approval address becomes a link with a countdown on the page.
-            found = re.search(r"https://github\.com/\S+", str(message))
-            with job.lock:
-                if found and "open this address" in str(message):
-                    job.approval = {"url": found.group(0), "deadline": deadline, "received": False}
-                elif job.approval and "request was received" in str(message):
-                    job.approval["received"] = True
-            job.note(message, *args, **kwargs)
-        try:
-            token, error = decide.self_enroll(plan["role"], notify=notify, cancel=job.cancel.is_set)
-        finally:
-            with job.lock:
-                job.approval = None
-        if error == "cancelled":
-            raise imaging.Cancelled()
-        decide.invariant(token is not None, f"this computer was not approved ({error})",
-                         "Run the wizard again and press 'Submit new issue' on the GitHub page, or paste an enrollment token.")
-        verdict = lookup(token, plan["role"])
-        decide.invariant(verdict["status"] != "fail", f"the approval token is not usable ({verdict['detail']})", verdict["fix"])
-        self.approved[plan["role"]] = token
-        return {**plan, "token": token}
 
     def cancel(self):
         """Cancel the download, or withdraw the request while the permission prompt is still
@@ -495,7 +478,6 @@ class Wizard:
                 return job.move("cancelled", {**result, "guidance": CANCELLED_GUIDANCE})
             if result["ok"]:
                 decide.invariant(process.returncode == 0, "the helper reported success but exited with an error", code=process.returncode)
-                self.approved.pop(job.role, None)  # used; never offer it again
                 job.move("done", result)
             else:
                 self.fail(job, result.get("message", ""), result.get("fix", ""), result.get("log"), details=result)
@@ -613,7 +595,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": refusal})
         try:
             if method == "GET" and path == "/":
-                return self.reply(200, resource("index.html").read_bytes(), "text/html; charset=utf-8")
+                return self.reply(200, resource("index.html").read_bytes().replace(b"__FLEET_REPOSITORY__", html.escape(decide.REPO, quote=True).encode()), "text/html; charset=utf-8")
             if method == "GET" and path in ("/admin.css", "/theme.js"):
                 name, kind = ("admin.css", "text/css; charset=utf-8") if path == "/admin.css" else ("theme.js", "text/javascript; charset=utf-8")
                 return self.reply(200, resource(name).read_bytes(), kind)
@@ -621,6 +603,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, self.wizard.scan())
             if method == "GET" and path == "/api/job":
                 return self.reply(200, self.wizard.job.snapshot())
+            if method == "POST" and path == "/api/source":
+                return self.reply(200, self.wizard.set_source(self.body().get("origin", "")))
             if method == "POST" and path == "/api/plan":
                 return self.reply(200, self.wizard.make_plan(self.body()))
             if method == "POST" and path == "/api/run":

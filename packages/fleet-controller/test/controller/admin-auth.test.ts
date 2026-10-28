@@ -94,24 +94,36 @@ describeController('admin authentication', (ctx) => {
       await access.createSession(
         sha256Hex(token),
         {
-          issuer: 'https://relay.example/realms/test',
-          subject: 'google-user',
+          issuer: 'https://provider.example/realms/test',
+          subject: 'pool-user',
           email: 'chris@example.test',
         },
         new Date(Date.now() + 43200000),
         sha256Hex(
           JSON.stringify([
-            'https://relay.example/realms/test',
+            'https://provider.example/realms/test',
             'fleet',
             'http://localhost',
           ])
         )
       );
-      const browser = new FleetBrowserAuth(access, {
-        origin: 'http://localhost',
-        issuer: 'https://relay.example/realms/test',
-        clientId: 'fleet',
-      });
+      const browser = new FleetBrowserAuth(
+        access,
+        {
+          origin: 'http://localhost',
+          issuer: 'https://provider.example/realms/test',
+          clientId: 'fleet',
+        },
+        {
+          async authorize() {
+            throw new Error('Provider not used by this session test');
+          },
+          async exchange() {
+            throw new Error('Provider not used by this session test');
+          },
+        },
+        () => new Date()
+      );
       const h = ctx().harness({ browser });
       const cookie = `fleet_${sha256Hex('http://localhost').slice(0, 16)}_session=${token}`;
       return { h, cookie };

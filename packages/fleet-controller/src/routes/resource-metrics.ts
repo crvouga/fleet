@@ -114,7 +114,11 @@ function networkMetrics(
 function nodeMetrics(view: NodeView, now: Date): string[] {
   const facts = readFacts(view);
   const sample = facts.telemetry;
-  const labels = { node: view.hostname, node_id: view.id, role: view.role };
+  const labels = {
+    node: view.hostname,
+    node_id: view.id,
+    role: view.role ?? 'unassigned',
+  };
   const online = view.status === 'online';
   const fresh =
     online &&

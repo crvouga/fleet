@@ -30,6 +30,7 @@ import { NodeReadiness } from './node-readiness';
 import { NodeRecovery } from './node-recovery';
 import { NodeTelemetry } from './node-telemetry';
 import { NodeEdit, NodeManage } from './node-edit';
+import { NodeDesiredState } from './node-desired';
 import { EventFeed } from './events';
 export function NodeDetail({
   state,
@@ -60,7 +61,7 @@ export function NodeDetail({
       </Anchor>
       <PageHeading
         title={entry.view.label}
-        description={`${entry.view.hostname} · ${entry.view.role} · #${entry.view.shortId}`}
+        description={`${entry.view.hostname} · ${entry.view.role ?? 'unassigned'} · #${entry.view.shortId}`}
         action={
           <Group>
             <Status status={entry.view.status} />
@@ -71,6 +72,7 @@ export function NodeDetail({
         }
       />
       <NodeNotices entry={entry} />
+      <NodeDesiredState entry={entry} reload={reload} />
       <NodeReadiness entry={entry} />
       <NodeRecovery
         entry={entry}
@@ -96,7 +98,7 @@ export function NodeDetail({
 function NodeFacts({ entry }: { entry: FleetEntry }) {
   const { view, facts } = entry;
   const items = [
-    ['Role', view.role],
+    ['Role', view.role ?? 'unassigned'],
     ['Kernel', facts.kernel],
     ['Architecture', facts.arch],
     ['CPU', `${facts.cpuCores ?? '?'} cores · ${facts.cpuModel ?? 'Unknown'}`],
@@ -104,7 +106,6 @@ function NodeFacts({ entry }: { entry: FleetEntry }) {
     ['Uptime', formatDuration(facts.uptimeSeconds)],
     ['Agent', view.agentVersion],
     ['Revision', shortRevision(view.revision)],
-    ['Config revision', view.configRevision],
     ['First seen', view.firstSeenAt.toLocaleString()],
     ['Last seen', view.lastSeenAt?.toLocaleString()],
     ['Enrolled via', view.enrolledVia],

@@ -40,6 +40,8 @@ def check_api(url, role, token):
     require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and
             not parsed.password and not parsed.query and not parsed.fragment,
             'FLEET_API_UNCONFIGURED: the image needs an HTTPS Fleet controller address.')
+    if not token:
+        return  # Registration and explicit app approval authorize this node.
     request = urllib.request.Request(url.rstrip('/') + '/v1/enrollment/check',
         data=json.dumps({'role': role, 'roleToken': token}).encode(),
         headers={'Content-Type': 'application/json'}, method='POST')
@@ -72,9 +74,9 @@ def check(toplevel, role, age_file, token_file, run=subprocess.run, api=check_ap
     local = metadata.get("approvalMode") == "local"
     require(not local or metadata.get("apiUrl") == "",
             "FLEET_APPROVAL_INVALID: local approval cannot name a remote controller.")
-    require(local or re.fullmatch(r'[A-Za-z0-9._-]{8,512}', token),
+    require(not token or re.fullmatch(r'[A-Za-z0-9._-]{8,512}', token),
             'FLEET_ENROLLMENT_MISSING: automatic Fleet approval requires an enrolled installer with an controller role credential. Nothing was erased.')
-    require((local and metadata.get('secretsFile') is None) or Path(age_file).is_file(), 'FLEET_ROLE_KEY_MISSING: the enrolled role key is required before installation.')
+    require(metadata.get('secretsFile') is None or Path(age_file).is_file(), 'FLEET_ROLE_KEY_MISSING: the enrolled role key is required before installation.')
     source = metadata.get('secretsFile')
     if metadata.get('updateMode') == 'local':
         try:

@@ -1,3 +1,5 @@
+import { desiredFor } from '../domain/desired-state';
+import { effectiveConfig } from '../domain/effective-config';
 import type { HeartbeatPoint, Role } from '../types';
 import {
   heartbeatBody,
@@ -21,7 +23,8 @@ const DAY = 24 * HOUR;
 
 interface Spec {
   readonly short: string;
-  readonly role: Role;
+  /** The assigned role; null for a machine nobody assigned yet. */
+  readonly role: Role | null;
   /** Minutes since the last report; null for never. */
   readonly seenMinutes: number | null;
   readonly options?: Partial<NodeOptions>;
@@ -54,6 +57,8 @@ const SPECS: readonly Spec[] = [
     options: { labels: ['high-mem', 'rack-2'], displayName: 'Build 1' },
     body: {
       revision: LATEST,
+      reconcile: { phase: 'converged', issues: [] },
+      ageRecipient: 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
       capabilities: ['high-mem'],
       cpu: { cores: 32, model: 'AMD Ryzen 9 9955HX' },
       memory: { totalMiB: 128 * GIB, availableMiB: 62 * GIB },
@@ -72,6 +77,10 @@ const SPECS: readonly Spec[] = [
     options: { labels: ['gpu', 'rack-2'] },
     body: {
       revision: LATEST,
+      closure: 'ci-gpu',
+      hardware: { capabilities: ['gpu'] },
+      reconcile: { phase: 'converged', issues: [] },
+      ageRecipient: 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppppp',
       capabilities: ['gpu'],
       cpu: { cores: 16, model: 'AMD Ryzen 7 7840U' },
       memory: { totalMiB: 64 * GIB, availableMiB: 21 * GIB },
@@ -89,6 +98,7 @@ const SPECS: readonly Spec[] = [
     seenMinutes: 4,
     body: {
       revision: OLD,
+      reconcile: { phase: 'progressing', issues: [] },
       cpu: { cores: 12, model: 'Intel Core i7-12700' },
       memory: { totalMiB: 32 * GIB, availableMiB: 9 * GIB },
       load1: 7.9,
@@ -237,11 +247,19 @@ const SPECS: readonly Spec[] = [
     role: 'devbox',
     seenMinutes: 2,
     options: {
-      displayName: "Chris's desktop",
+      displayName: 'Developer desktop',
       labels: ['gpu', 'windows-dualboot'],
     },
     body: {
       revision: OLD,
+      hardware: { capabilities: ['gpu'] },
+      ageRecipient: 'age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
+      reconcile: {
+        phase: 'blocked',
+        issues: [
+          'FLEET_SECRETS_RECIPIENT_MISSING: age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz is not a recipient of secrets/devbox.yaml at 7a1b3c4',
+        ],
+      },
       capabilities: ['gpu'],
       cpu: { cores: 24, model: 'AMD Ryzen 9 7950X' },
       memory: { totalMiB: 96 * GIB, availableMiB: 51 * GIB },
@@ -253,12 +271,31 @@ const SPECS: readonly Spec[] = [
     wave: { load: 3, mem: 45, disk: 58 },
   },
   {
+    short: '0b5e',
+    role: null,
+    seenMinutes: 1,
+    options: { labels: ['spare'] },
+    body: {
+      revision: LATEST,
+      hardware: { capabilities: [] },
+      reconcile: { phase: 'converged', issues: [] },
+      ageRecipient: 'age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+      cpu: { cores: 8, model: 'Intel Core i5-1240P' },
+      memory: { totalMiB: 32 * GIB, availableMiB: 29 * GIB },
+      load1: 0.1,
+      uptimeSeconds: 3 * 3600,
+    },
+    history: 6,
+    wave: { load: 0.2, mem: 10, disk: 15 },
+  },
+  {
     short: 'f001',
-    role: 'ci',
+    role: null,
     seenMinutes: 12,
     options: { approval: 'pending', enrolledVia: 'hello' },
     body: {
       revision: LATEST,
+      hardware: { capabilities: ['gpu'] },
       cpu: { cores: 16, model: 'AMD Ryzen 7 7840U' },
       memory: { totalMiB: 64 * GIB, availableMiB: 60 * GIB },
       load1: 0.2,
@@ -268,7 +305,7 @@ const SPECS: readonly Spec[] = [
   },
   {
     short: 'f002',
-    role: 'web',
+    role: null,
     seenMinutes: 55,
     options: { approval: 'pending', enrolledVia: 'hello' },
     body: {
@@ -347,7 +384,7 @@ function seedNodes(store: MemoryStore, now: Date): void {
       ...(spec.body === undefined ? {} : { body: spec.body }),
     });
     store.seedNode(
-      { ...row, agentVersion: '1', configRevision: 'a1b2c3d4e5f60718' },
+      { ...row, agentVersion: '2', appliedRevision: 'a1b2c3d4e5f60718' },
       history(spec, index * 1.7, now)
     );
   });
@@ -401,18 +438,18 @@ const EVENT_SPECS: readonly EventSpec[] = [
   ['a3f9', 'Build 1', 'boot', 'info', 'node started', 6 * 1440],
   [
     'f001',
-    'ci-f001',
+    'node-f001',
     'registered',
     'info',
-    'ci-f001 registered as pending',
+    'node-f001 registered as pending',
     12,
   ],
   [
     'f002',
-    'web-f002',
+    'node-f002',
     'registered',
     'info',
-    'web-f002 registered as pending',
+    'node-f002 registered as pending',
     55,
   ],
   [
@@ -420,7 +457,7 @@ const EVENT_SPECS: readonly EventSpec[] = [
     'devbox-dead',
     'retired',
     'info',
-    'chris marked devbox-dead retired',
+    'operator marked devbox-dead retired',
     6 * 1440,
   ],
   ['7f10', 'cache-7f10', 'disk', 'warn', 'Nix store is 79% full', 1440],
@@ -442,7 +479,7 @@ const EVENT_SPECS: readonly EventSpec[] = [
   ],
   ...Array.from({ length: 30 }, (_, i): EventSpec => [
     '9b9b',
-    "Chris's desktop",
+    'Developer desktop',
     'sync',
     'info',
     `Applied update ${i + 1}`,
@@ -476,7 +513,7 @@ function seedSettings(
     await store.putSettings(scope, value, actor);
   };
   void (async () => {
-    await put('fleet', { heartbeat: { intervalSeconds: 60 } }, 'chris', 9);
+    await put('fleet', { heartbeat: { intervalSeconds: 60 } }, 'operator', 9);
     await put(
       'fleet',
       {
@@ -488,7 +525,7 @@ function seedSettings(
             'https://hooks.slack.example.com/services/T000/B000/hunter2',
         },
       },
-      'chris',
+      'operator',
       4
     );
     await put(
@@ -497,11 +534,11 @@ function seedSettings(
         capacity: { slotMax: 8 },
         runners: {
           enabled: true,
-          repositories: ['crvouga/fleet', 'crvouga/portfolio'],
+          repositories: ['example/fleet', 'example/application'],
           extraLabels: ['team-infra'],
         },
       },
-      'chris',
+      'operator',
       2
     );
     await put(
@@ -510,7 +547,7 @@ function seedSettings(
         capacity: { slotMax: 8, perRunnerGiB: 8 },
         runners: {
           enabled: true,
-          repositories: ['crvouga/fleet', 'crvouga/portfolio'],
+          repositories: ['example/fleet', 'example/application'],
           extraLabels: ['team-infra'],
         },
       },
@@ -520,11 +557,22 @@ function seedSettings(
     await put(
       `node:${nodeId('a3f9')}`,
       { capacity: { slotMax: 6 }, reboot: { enabled: false } },
-      'chris',
+      'operator',
       0.5
     );
     setClock(now);
+    await acknowledgeConverged(store);
   })();
+}
+
+/** Nodes that say they converged acknowledged the desired document they were sent. */
+async function acknowledgeConverged(store: MemoryStore): Promise<void> {
+  const settings = await store.listSettings();
+  for (const row of await store.listNodes()) {
+    if (row.reconcile?.phase !== 'converged') continue;
+    const desired = desiredFor(row, effectiveConfig(settings, row));
+    store.updateSeeded(row.id, { appliedRevision: desired.revision });
+  }
 }
 
 /** About 14 nodes, 24 h of history, events and settings: enough to judge the design. */

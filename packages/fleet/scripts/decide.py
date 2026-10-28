@@ -5,10 +5,8 @@ The downloadable entry is this program. It does not clone a repository,
 install Nix, or call GitHub's expiring Actions artifact API. Disk writes,
 reboots, and runner calls go through replaceable commands.
 """
-import base64
 import datetime
 import hashlib
-import hmac
 import json
 import os
 import platform
@@ -27,15 +25,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import webbrowser
 from pathlib import Path
 
-# The active roles in roles.json. This file is bundled into fleet-node.sh and
-# runs with no checkout, so it keeps a copy: scripts/fleet_roles.py sync
-# rewrites the next line and its check fails while the copy is stale.
-ROLES = ("ci", "devbox")
-# The roles as prose for prompts: "ci or devbox", "a, b, or c".
-ROLE_CHOICES = ROLES[0] if len(ROLES) == 1 else ", ".join(ROLES[:-1]) + ("," if len(ROLES) > 2 else "") + " or " + ROLES[-1]
+# The installer has no role: every machine installs the role-less base system
+# and the Fleet controller assigns its role afterwards (ARCHITECTURE.md). Removal
+# still reads the role the node runs from /etc/fleet/node.conf.
+ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9]{0,15}$")
 # Only this role registers GitHub runners, so only it withdraws them on removal.
 RUNNER_ROLE = "ci"
 TRAN_RANK = {"nvme": 0, "sata": 1, "ata": 1, "sas": 2, "scsi": 2, "virtio": 3}
@@ -50,7 +45,8 @@ BUS_NAME = {
 }
 # The release asset does not expire. The Fleet workflow's fleet-installer
 # artifact still lasts 14 days; this program does not download that copy.
-RELEASE_ISO = "https://github.com/crvouga/fleet/releases/download/fleet-installer/fleet-installer.iso"
+REPO = os.environ.get("FLEET_BUG_REPORT_REPO") or os.environ.get("FLEET_GITHUB_REPO") or "crvouga/fleet"
+RELEASE_ISO = ""
 DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9._/:-]+$")
 WINDOWS_RE = re.compile(r"^\\\\\.\\PHYSICALDRIVE[0-9]+$")
 TB = 1000 ** 4
@@ -509,7 +505,7 @@ def plan_disks(disks, action):
         if "hotplug" in reasons:
             message = "Next: the only disk is hotplug. Use the fixed internal disk and run this program again. Nothing was written."
         elif "removable" in reasons or "usb" in reasons:
-            message = "Next: this program will not install a role onto a USB or removable disk. Connect the internal disk and run this program again. Nothing was written."
+            message = "Next: this program will not install a node onto a USB or removable disk. Connect the internal disk and run this program again. Nothing was written."
         elif "external" in reasons:
             message = "Next: no fixed internal disk was found. Connect that disk and run this program again. Nothing was written."
         else:
@@ -523,20 +519,17 @@ def plan_disks(disks, action):
     return {"ok": False, "next": message, "code": 2}
 
 
-def role_error(role):
-    if role == "ci-gpu":
-        return f"Next: ci-gpu is not on the shared installer. Choose {ROLE_CHOICES}. Nothing was written."
-    if role not in ROLES:
-        return f"Next: the role must be {ROLE_CHOICES}. Nothing was written."
-    return None
+# A role on the command line is from an older runbook. Roles are assigned in the
+# Fleet app after approval; the installer never takes one.
+ROLE_ARGUMENT = "Next: the installer no longer takes a role. Run `fleet-node.sh install`, approve the computer in the Fleet app, then assign its role there. Nothing was written."
 
 
-def confirm(role, plain, answer, timed_out):
+def confirm(label, plain, answer, timed_out):
     if timed_out:
         return "Next: no answer arrived in time. Nothing was written. Run this program again and stay at the keyboard."
     if answer.strip() == "":
         return "Next: the confirmation was empty. Nothing was written. Run this program again and type the line this program shows."
-    expected = f"{role}: {plain}"
+    expected = f"{label}: {plain}"
     if answer.strip() != expected:
         return "Next: the confirmation did not match. Nothing was written. Run this program again and type the line exactly."
     return None
@@ -562,7 +555,7 @@ def removal_plan(busy, credential, withdrawn, role):
         }
     if withdrawn:
         return {"action": "noop", "code": 0, "stop_job": False, "power_off": True, "next": ""}
-    if role in ROLES and role != RUNNER_ROLE:
+    if role and role != RUNNER_ROLE:
         return {"action": "retire", "code": 0, "stop_job": False, "power_off": True, "next": ""}
     if not credential:
         return {
@@ -655,7 +648,7 @@ def write_text(path, text):
     invariant(path.read_text(encoding="utf-8") == text, "a state file does not read back as written", file=str(path))
 
 
-MARKER_STATUS = {"installed": ("role", "status"), "withdrawn": ("status",)}
+MARKER_STATUS = {"installed": ("status",), "withdrawn": ("status",)}
 
 
 def checked_marker(directory, name):
@@ -670,23 +663,18 @@ def checked_marker(directory, name):
     invariant(marker.get("status") == name, f"state marker {name} is malformed", fix, file=str(path), found=marker)
     for key in MARKER_STATUS[name]:
         invariant(key in marker, f"state marker {name} lacks {key}", fix, file=str(path), found=marker)
-    if name == "withdrawn" and marker.get("role") == "unknown":
-        # Older `fleet-remove` runs wrote this when node.conf named no role. The marker only
-        # says the runner is withdrawn; an unknown role is no corruption, so it is not refused.
-        log(f"state marker {name} names role=unknown (written by an older version); reading it without a role", "WARN")
-        marker = {key: value for key, value in marker.items() if key != "role"}
     if "role" in marker:
-        invariant(marker["role"] in ROLES, f"state marker {name} names an unknown role", fix, file=str(path), role=marker["role"])
+        # Markers written by older installers name a role. The installer no longer
+        # decides one, so the field is informational and never refused.
+        log(f"state marker {name} names role={marker['role']} (written by an older version); ignoring it")
+        marker = {key: value for key, value in marker.items() if key != "role"}
     return marker
 
 
-def installed_for(role, directory):
-    invariant(role in ROLES, "installed_for was asked about a role that does not exist", role=role)
-    marker = checked_marker(directory, "installed")
-    # A withdrawn runner can be recovered by a full reinstall, including back
-    # into CI after a failed boot handoff. Its old marker is not a healthy node.
-    withdrawn = checked_marker(directory, "withdrawn")
-    return bool(marker) and marker["role"] == role and not withdrawn
+def installed(directory):
+    """Whether this machine already finished a Fleet installation. A withdrawn
+    node can be reinstalled to rejoin; its old marker is not a healthy node."""
+    return bool(checked_marker(directory, "installed")) and not checked_marker(directory, "withdrawn")
 
 
 def _read_line_timed(seconds):
@@ -735,7 +723,9 @@ def read_answer(timeout):
 
 
 def installer_urls():
-    iso = os.environ.get("FLEET_INSTALLER_URL") or RELEASE_ISO
+    controller = os.environ.get("FLEET_CONTROLLER_URL", "").rstrip("/")
+    iso = os.environ.get("FLEET_INSTALLER_URL") or (controller + "/installers/assets/fleet-installer.iso" if controller else RELEASE_ISO)
+    invariant(bool(iso), "the Fleet installer source is not configured", "Set FLEET_CONTROLLER_URL to your Fleet app or FLEET_INSTALLER_URL to your published image.")
     checksum = os.environ.get("FLEET_INSTALLER_SHA256_URL") or (iso + ".sha256")
     return iso, checksum
 
@@ -1074,16 +1064,16 @@ def _boot_blocks(text):
     return blocks
 
 
-def _choose_block(blocks, role):
-    want = f"fleet.role={role}"
-    matches = [block for block in blocks if want in block.get("append", "").split()]
-    if not matches:
-        raise ValueError(f"no {role} boot entry")
-    preferred = "boot" if role == "ci" else f"boot-{role}"
-    for block in matches:
-        if block.get("label") == preferred:
+def _choose_block(blocks):
+    """The image's own default entry. The installer image has one entry that
+    installs base; an older image also listed role entries (fleet.role=), and
+    its first entry is still a valid installer that the live system handles."""
+    if not blocks:
+        raise ValueError("no installer boot entry")
+    for block in blocks:
+        if block.get("label") == "boot":
             return block
-    return sorted(matches, key=lambda block: (len(block.get("label", "")), block.get("label", "")))[0]
+    return blocks[0]
 
 
 def iso_filesystem(path):
@@ -1104,13 +1094,13 @@ def iso_filesystem(path):
     return completed.stdout.strip().splitlines()[0].strip().lower()
 
 
-def extract_boot(iso_path, role):
-    """Pull the role's kernel and initrd out of the installer ISO."""
+def extract_boot(iso_path):
+    """Pull the installer's kernel and initrd out of the installer ISO."""
     iso_path = Path(iso_path)
     with iso_path.open("rb") as handle:
         files = _iso_index(handle)
         config = _iso_bytes(handle, files, "isolinux/isolinux.cfg").decode("utf-8", "replace")
-        block = _choose_block(_boot_blocks(config), role)
+        block = _choose_block(_boot_blocks(config))
         kernel = _iso_bytes(handle, files, block["linux"])
         initrd = _iso_bytes(handle, files, block["initrd"])
     directory = iso_path.parent / "boot-files"
@@ -1123,7 +1113,9 @@ def extract_boot(iso_path, role):
     return str(kernel_path), str(initrd_path), block.get("append", "")
 
 
-def _boot_command(append, role, iso_path, token=None, vault=None, ssh_key=None, findiso=True, origin=None, wifi=None):
+def _boot_command(append, iso_path, findiso=True, origin=None, wifi=None):
+    """The live installer's kernel command line. It never carries a credential:
+    an enrollment token travels in the private handoff initrd instead."""
     tokens = append.split()
     if any(any(char.isspace() for char in token) for token in tokens):
         raise ValueError("boot command is not one line")
@@ -1133,15 +1125,9 @@ def _boot_command(append, role, iso_path, token=None, vault=None, ssh_key=None, 
         if iso_abs == "" or any(char.isspace() for char in iso_abs):
             raise ValueError("installer path is not a single word")
         extras.append(f"findiso={iso_abs}")
-    role_token = f"fleet.role={role}"
-    if vault and any(char.isspace() for char in vault):
-        raise ValueError("vault address is not a single word")
-    kept = [t for t in tokens if t not in extras and t != role_token and not t.startswith(
-        ("fleet.enroll=", "fleet.vault=", "fleet.ssh=", "fleet.from=", "fleet.wifi=", "fleet.attempt=", "fleet.wizard=", "findiso="))]
-    enroll = [f"fleet.enroll={token}"] if token else []
-    where = [f"fleet.vault={vault}"] if token and vault else []
-    invariant(role in ROLES, "refusing to build a boot command for an unknown role", role=role)
-    access = ["fleet.ssh=" + base64.urlsafe_b64encode(validate_ssh_key(ssh_key).encode()).decode()] if ssh_key else []
+    # An older image's entry may name a role; the installer ignores it, so drop it.
+    kept = [t for t in tokens if t not in extras and not t.startswith(
+        ("fleet.role=", "fleet.enroll=", "fleet.vault=", "fleet.ssh=", "fleet.from=", "fleet.wifi=", "fleet.attempt=", "fleet.wizard=", "findiso="))]
     # The live installer's screens name the system it returns to (scripts/live_console.py).
     invariant(origin in (None, "windows", "linux"), "refusing an unknown handoff origin", origin=origin)
     came = [f"fleet.from={origin}"] if origin else []
@@ -1153,11 +1139,9 @@ def _boot_command(append, role, iso_path, token=None, vault=None, ssh_key=None, 
     # Whether Wi-Fi settings rode along (never the settings themselves). The live
     # installer tells "none were sent" from "sent but lost" on its screen and report.
     carried = [] if wifi is None else ["fleet.wifi=" + ("sent" if wifi else "none")]
-    command = " ".join([*kept, *extras, *enroll, *where, *access, *came, *tags, *carried, role_token])
-    invariant(len(command.encode()) < 4096, "the installer boot command is too long", "Use an Ed25519 public key.", bytes=len(command.encode()))
-    # The installer reads the LAST fleet.role=, so ours must be last.
-    invariant(command.endswith(role_token) and command.rsplit("fleet.role=", 1)[1] == role,
-              "the boot command must end with the chosen fleet.role=", command=command)
+    command = " ".join([*kept, *extras, *came, *tags, *carried])
+    invariant(len(command.encode()) < 4096, "the installer boot command is too long", bytes=len(command.encode()))
+    invariant("fleet.role=" not in command and "fleet.enroll=" not in command, "the boot command must not choose a role or carry a credential", command=command)
     invariant("\n" not in command and "\r" not in command, "the boot command spans lines", command=command)
     return command
 
@@ -1181,7 +1165,17 @@ def wifi_profile(os_name, supplied=None):
         invariant(False, str(exc), "Enter the Wi-Fi settings in the wizard before installing. Nothing was erased.")
 
 
-def stage_reboot(os_name, role, iso, token=None, vault=None, wifi=None):
+def handoff_initrd(wifi=None, token=None):
+    """The private supplemental initramfs for the live installer, or b"" when
+    nothing rides along. It holds the Wi-Fi profile and the enrollment token;
+    neither is ever put on the kernel command line."""
+    if wifi is None and not token:
+        return b""
+    invariant(token is None or ENROLL_RE.fullmatch(token) is not None, "refusing to hand off a malformed enrollment token")
+    return wifi_module().initrd(wifi, token)
+
+
+def stage_reboot(os_name, iso, token=None, wifi=None):
     """Load the ISO's own kernel. The shell initrd finds the file and copies it to RAM."""
     tool = os_boot_tool(os_name)
     flash = "Next: this computer cannot reboot into the installer. Nothing was written. Plug in one USB disk and run this program again with the word flash."
@@ -1192,8 +1186,8 @@ def stage_reboot(os_name, role, iso, token=None, vault=None, wifi=None):
         say(flash)
         return 1
     try:
-        kernel, initrd, append = extract_boot(iso, role)
-        cmdline = _boot_command(append, role, iso, token, vault, devbox_key() if role == "devbox" else None, origin="linux", wifi=wifi is not None)
+        kernel, initrd, append = extract_boot(iso)
+        cmdline = _boot_command(append, iso, origin="linux", wifi=wifi is not None)
     except (OSError, ValueError):
         say("Next: the installer image could not be read. Nothing was written. Plug in one USB disk and run this program again with the word flash.")
         return 1
@@ -1201,9 +1195,10 @@ def stage_reboot(os_name, role, iso, token=None, vault=None, wifi=None):
         invariant(os.path.isfile(staged_file) and os.path.getsize(staged_file) > 0, "a file the installer needs is missing or empty before reboot", file=str(staged_file))
     private_initrd = None
     try:
-        if wifi is not None:
-            private_initrd = Path(initrd).with_name("initrd-wifi")
-            wifi_module().write_private(private_initrd, Path(initrd).read_bytes() + wifi_module().initrd(wifi))
+        extra = handoff_initrd(wifi, token)
+        if extra:
+            private_initrd = Path(initrd).with_name("initrd-handoff")
+            wifi_module().write_private(private_initrd, Path(initrd).read_bytes() + extra)
             initrd = str(private_initrd)
         load = run_logged([tool, "--load", kernel, f"--initrd={initrd}", f"--command-line={cmdline}"])
         if load.returncode != 0:
@@ -1212,7 +1207,7 @@ def stage_reboot(os_name, role, iso, token=None, vault=None, wifi=None):
         log("rebooting into the installer")
         execute = run_logged([tool, "-e"])
         if execute.returncode != 0:
-            # The loaded kernel carries the enrollment token; a later kexec reboot must not use it.
+            # The loaded initrd carries the private handoff; a later kexec reboot must not use it.
             run_logged([tool, "-u"])
             say(flash)
             return execute.returncode or 1
@@ -1225,8 +1220,8 @@ def stage_reboot(os_name, role, iso, token=None, vault=None, wifi=None):
 # ---- Windows: convert this computer in place -------------------------------------
 # Windows cannot kexec. Instead the installer image is written raw into a new
 # partition carved out of C:, GRUB (taken from that same image) is placed on the
-# EFI system partition with a config that boots the image's own kernel for the
-# chosen role, and the firmware is told to boot it once. On reboot the installer
+# EFI system partition with a config that boots the image's own kernel, and the
+# firmware is told to boot it once. On reboot the installer
 # erases the whole disk (Windows, the new partition and all) and installs NixOS.
 # Everything before the reboot can be undone, and is, if a step fails.
 
@@ -1655,7 +1650,7 @@ def windows_findings(iso_size, disk_path=None, strict=True, iso_path=None):
     return found
 
 
-def windows_plan_lines(facts, iso_size, role):
+def windows_plan_lines(facts, iso_size):
     """What conversion would do on this machine, in order, with the sizes. Changes nothing."""
     size = iso_size or ESTIMATED_ISO
     need, part = windows_need(size), padded_size(size)
@@ -1665,9 +1660,9 @@ def windows_plan_lines(facts, iso_size, role):
     return [
         f"1. Shrink {letter}: from {total / 1024 ** 3:.1f} GiB to {(total - need) / 1024 ** 3:.1f} GiB (gives up {need / MIB:.0f} MiB: the {size / 1024 ** 3:.2f} GiB installer plus {WINDOWS_MARGIN // MIB} MiB spare). Files on {letter}: are not touched.",
         f"2. Create a {part / MIB:.0f} MiB partition of type Linux data on disk {disk} and write the installer image into it, then read it back and compare it byte for byte.",
-        f"3. Mount the EFI system partition (partition {esp if esp is not None else '?'} of disk {disk}) on a spare drive letter and copy GRUB to {BOOT_LOADER_FIRMWARE_PATH} and a config to \\EFI\\BOOT\\grub.cfg ({role} installer).",
+        f"3. Mount the EFI system partition (partition {esp if esp is not None else '?'} of disk {disk}) on a spare drive letter and copy GRUB to {BOOT_LOADER_FIRMWARE_PATH} and a config to \\EFI\\BOOT\\grub.cfg.",
         f"4. Add the boot entry \"{BOOT_DESCRIPTION}\" with bcdedit and a firmware boot option (Boot####) for it, and set both to run once, on the next restart only. Windows stays first in the normal boot order.",
-        "5. Restart 15 seconds later. The installer then ERASES the whole of disk " + f"{disk} (Windows, the new partition and every file) and installs {role}.",
+        "5. Restart 15 seconds later. The installer then ERASES the whole of disk " + f"{disk} (Windows, the new partition and every file) and installs the Fleet base system.",
         "Undo: if any step fails, everything above is taken back newest first and Windows boots as before. docs/windows.md lists the commands to do it by hand.",
     ]
 
@@ -1768,18 +1763,17 @@ def write_region(iso, target, offset, zero_head=0, on_progress=None, fallback=No
               devices="; ".join(refused))
 
 
-def grub_config(role, linux_path, initrd_path, cmdline, wifi=False):
-    invariant(role in ROLES, "refusing to write a boot config for an unknown role", role=role)
+def grub_config(linux_path, initrd_path, cmdline, handoff=False):
     for word in (linux_path, initrd_path, cmdline):
         invariant("\n" not in word and "\r" not in word and "'" not in word, "the boot config would span lines or quote badly", value=word[:80])
-    search_wifi = "search --no-floppy --set=fleet_credentials --file /EFI/fleet/fleet-wifi.initrd\n" if wifi else ""
-    extra_initrd = " ($fleet_credentials)/EFI/fleet/fleet-wifi.initrd" if wifi else ""
+    search_handoff = "search --no-floppy --set=fleet_credentials --file /EFI/fleet/fleet-handoff.initrd\n" if handoff else ""
+    extra_initrd = " ($fleet_credentials)/EFI/fleet/fleet-handoff.initrd" if handoff else ""
     return (
         "set timeout=3\n"
         "set default=0\n"
         f"search --no-floppy --set=root --file /{INSTALLER_IMAGE_MARKER}\n"
-        f"{search_wifi}"
-        f"menuentry 'Fleet installer: ERASES the internal disk and installs {role}' {{\n"
+        f"{search_handoff}"
+        "menuentry 'Fleet installer: ERASES the internal disk and installs a Fleet node' {\n"
         f"    linux {linux_path} {cmdline}\n"
         f"    initrd {initrd_path}{extra_initrd}\n"
         "}\n"
@@ -1790,15 +1784,15 @@ def _iso_has(files, path):
     return _iso_key(files, path) is not None
 
 
-def iso_boot_material(iso_path, role):
-    """The role's boot entry and GRUB program, read out of the installer image. Everything
+def iso_boot_material(iso_path):
+    """The installer's boot entry and GRUB program, read out of the installer image. Everything
     the boot needs is checked here, before Windows is changed: an image with a layout this
     program does not know (a newer release) stops with nothing changed."""
     try:
         with Path(iso_path).open("rb") as handle:
             files = _iso_index(handle)
             config = _iso_bytes(handle, files, "isolinux/isolinux.cfg").decode("utf-8", "replace")
-            block = _choose_block(_boot_blocks(config), role)
+            block = _choose_block(_boot_blocks(config))
             grub = _iso_bytes(handle, files, "EFI/BOOT/BOOTX64.EFI")
             missing = [path for path in (INSTALLER_IMAGE_MARKER, block["linux"], block["initrd"]) if not _iso_has(files, path)]
             if missing:
@@ -1809,7 +1803,7 @@ def iso_boot_material(iso_path, role):
             for path in (block["linux"], block["initrd"]):
                 _iso_bytes(handle, files, path)
     except (OSError, ValueError, KeyError) as exc:
-        invariant(False, "the installer image does not have the boot layout this installer expects", NEWER_RELEASE_FIX, role=role, problem=str(exc))
+        invariant(False, "the installer image does not have the boot layout this installer expects", NEWER_RELEASE_FIX, problem=str(exc))
     return block["linux"], block["initrd"], block.get("append", ""), grub
 
 
@@ -2422,12 +2416,11 @@ def write_durably(path, data):
         os.fsync(handle.fileno())
 
 
-def stage_windows(role, iso, token=None, vault=None, chosen=None, on_progress=None, writer=None, firmware="auto", wifi=None):
+def stage_windows(iso, token=None, chosen=None, on_progress=None, writer=None, firmware="auto", wifi=None):
     """Carve a partition out of C:, put the installer in it, and arrange one boot
     into it. Returns 0 once the restart is scheduled; anything else changed nothing.
     firmware is the UEFI variable access (tests hand in a stand-in); "auto" asks open_firmware()."""
     writer = writer or write_region
-    invariant(role in ROLES, "refusing to stage an unknown role", role=role)
     iso_size = os.path.getsize(iso)
     if firmware == "auto":
         firmware = open_firmware()
@@ -2444,10 +2437,10 @@ def stage_windows(role, iso, token=None, vault=None, chosen=None, on_progress=No
     if ram is not None and ram["status"] == "fail":
         say("Next: " + ram["fix"] + " Nothing was written.")
         return 2
-    linux_path, initrd_path, append, grub = iso_boot_material(iso, role)
-    cmdline = _boot_command(append, role, iso, token, vault, devbox_key() if role == "devbox" else None, findiso=False, origin="windows", wifi=wifi is not None)
-    wireless_initrd = wifi_module().initrd(wifi) if wifi is not None else b""
-    config = grub_config(role, linux_path, initrd_path, cmdline, wifi=wifi is not None)
+    linux_path, initrd_path, append, grub = iso_boot_material(iso)
+    cmdline = _boot_command(append, iso, findiso=False, origin="windows", wifi=wifi is not None)
+    private_initrd = handoff_initrd(wifi, token)
+    config = grub_config(linux_path, initrd_path, cmdline, handoff=bool(private_initrd))
     disk, need, letter = int(facts["DiskNumber"]), windows_need(iso_size), facts["Letter"]
     sector = int(facts.get("LogicalSectorSize") or 512)
     invariant(WRITE_SECTOR % sector == 0, "the disk's sector size does not divide the write alignment", sector=sector)
@@ -2457,7 +2450,7 @@ def stage_windows(role, iso, token=None, vault=None, chosen=None, on_progress=No
     restart_scheduled = False
     try:
         # Recorded before each change, so a killed run can be taken back by the next one.
-        journal.record(letter=letter, disk=disk, original_size=original_size, role=role, started=_stamp())
+        journal.record(letter=letter, disk=disk, original_size=original_size, started=_stamp())
         say(f"Making room: shrinking {letter}: by {need // MIB} MiB.")
         undo.add(f"give {letter}: its space back", lambda: windows_ps(ps_restore_script(letter, original_size), timeout=7200))
         windows_ps(ps_shrink_script(letter, original_size - need), timeout=7200)
@@ -2485,21 +2478,21 @@ def stage_windows(role, iso, token=None, vault=None, chosen=None, on_progress=No
         journal.record(esp_letter=mounted)
         loader = esp.joinpath(*BOOT_LOADER_PARTS)
         free = shutil.disk_usage(esp).free + (loader.stat().st_size if loader.is_file() else 0)
-        invariant(free >= len(grub) + len(config) + len(wireless_initrd) + LOADER_SLACK, "the EFI system partition has too little free space for the boot loader",
+        invariant(free >= len(grub) + len(config) + len(private_initrd) + LOADER_SLACK, "the EFI system partition has too little free space for the boot loader",
                   "Windows keeps some EFI system partitions nearly full. Free space there (docs/windows.md shows how), or make an install USB with the word flash.",
-                  free=free, need=len(grub) + len(config) + len(wireless_initrd) + LOADER_SLACK)
+                  free=free, need=len(grub) + len(config) + len(private_initrd) + LOADER_SLACK)
         cfg = esp / "EFI" / "BOOT" / "grub.cfg"
         # A grub.cfg this program wrote earlier is not the owner's: never keep or restore it.
         saved = cfg.read_bytes() if cfg.is_file() and not is_fleet_grub_config(cfg.read_bytes()) else None
         journal.record(esp_touched=True, grub_cfg_saved=saved.hex() if saved is not None else None)
         if loader.parent.exists():
-            shutil.rmtree(loader.parent)  # no stale file (an old Wi-Fi handoff) survives into this run
+            shutil.rmtree(loader.parent)  # no stale file (an old private handoff) survives into this run
         loader.parent.mkdir(parents=True, exist_ok=True)
         write_durably(loader, grub)
-        if wireless_initrd:
-            private = loader.parent / "fleet-wifi.initrd"
-            write_durably(private, wireless_initrd)
-            invariant(private.read_bytes() == wireless_initrd, "the Wi-Fi boot handoff did not read back correctly")
+        if private_initrd:
+            private = loader.parent / "fleet-handoff.initrd"
+            write_durably(private, private_initrd)
+            invariant(private.read_bytes() == private_initrd, "the private boot handoff did not read back correctly")
         cfg.parent.mkdir(parents=True, exist_ok=True)
         write_durably(cfg, config.encode("utf-8"))
         invariant(cfg.read_text(encoding="utf-8") == config and loader.read_bytes() == grub, "the EFI system partition did not keep the boot loader")
@@ -2543,7 +2536,7 @@ def stage_windows(role, iso, token=None, vault=None, chosen=None, on_progress=No
         # ambiguous launch failure must also cancel a possibly scheduled restart.
         journal.record(restart_scheduled=True)
         restart_scheduled = True
-        restart = run_logged([shutdown, "/r", "/t", "15", "/c", "Fleet installer: this computer will erase its disk and become a " + role + " node."],
+        restart = run_logged([shutdown, "/r", "/t", "15", "/c", "Fleet installer: this computer will erase its disk and become a Fleet node."],
                              capture_output=True, text=True, errors="replace", stdin=subprocess.DEVNULL)
         invariant(restart.returncode == 0, "Windows would not schedule the restart",
                   "Every change was taken back. Restart Windows once (a pending update or another program may hold the restart), then run the installer again.",
@@ -2598,17 +2591,6 @@ def write_media(os_name, iso, device, wifi=None, capacity=None):
     return 0
 
 
-def load_role(argv_role):
-    if argv_role:
-        return argv_role.strip()
-    say(f"Type the role ({ROLE_CHOICES}):")
-    answer, timed_out = read_answer(os.environ.get("FLEET_CONFIRM_TIMEOUT", "120"))
-    if timed_out or answer.strip() == "":
-        say(f"Next: the role was not given. Nothing was written. Run this program again and type {ROLE_CHOICES}.")
-        return None
-    return answer.strip()
-
-
 def choose_disk(os_name, action):
     try:
         disks = collect(os_name)
@@ -2623,8 +2605,7 @@ def cmd_fetch(argv):
     return fetch_installer(argv[0])
 
 
-VAULT_DEFAULT = ""
-GUIDE_URL = "https://raw.githubusercontent.com/crvouga/fleet/main/packages/fleet/docs/agent-install.md"
+GUIDE_URL = "Run fleet-node.sh guide for the embedded runbook (docs/agent-install.md)."
 X86 = ("x86_64", "amd64", "x64")
 GIB = 1024 ** 3
 MARK = {"ok": "ok  ", "info": "info", "warn": "WARN", "fail": "FAIL"}
@@ -2643,10 +2624,6 @@ def effective_uid():
             return None
     geteuid = getattr(os, "geteuid", None)
     return geteuid() if geteuid else None
-
-
-def vault_addr():
-    return (os.environ.get("FLEET_VAULT_ADDR") or VAULT_DEFAULT).rstrip("/")
 
 
 def finding(name, status, detail, fix=""):
@@ -2707,60 +2684,11 @@ def probe_installer():
         return None, size
 
 
-def lookup_verdict(role, status, reason, data):
-    """Turn Vault's answer to sys/wrapping/lookup into a finding. status is the
-    HTTP status, or None when Vault could not be reached at all."""
-    if status in (400, 403, 404):
-        return finding("enrollment", "fail", "the token is spent, expired, or not a wrapping token",
-                       f"Mint a new single-use token with: just enroll {role or '<role>'}")
-    if status != 200:
-        return finding("enrollment", "fail", f"Vault at {vault_addr()} did not answer ({reason})",
-                       "Check this machine's network and that Vault is up, then run this program again.")
-    if not isinstance(data, dict):
-        return finding("enrollment", "fail", "Vault answered with something that is not JSON",
-                       f"Check that {vault_addr()} is the Vault address, then run this program again.")
-    path = str(data.get("creation_path") or "").rstrip("/")
-    if role and not path.endswith(f"fleet/{role}"):
-        return finding("enrollment", "fail", f"the token was minted for {path or 'something else'}, not the {role} key",
-                       f"Mint a token for this role with: just enroll {role}")
-    return finding("enrollment", "ok", f"token is valid for {role or path} and has not been used")
-
-
-def lookup_token(token, role):
-    """Check a wrapping token without spending it. Returns a finding."""
-    tool = os.environ.get("FLEET_CURL", "curl")
-    url = f"{vault_addr()}/v1/sys/wrapping/lookup"
-    with tempfile.TemporaryDirectory(prefix="fleet-lookup-") as scratch:
-        body = Path(scratch) / "body"
-        fd = os.open(body, os.O_WRONLY | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            json.dump({"token": token}, handle)
-        reply = Path(scratch) / "reply"
-        try:
-            done = run_logged(
-                [tool, "-fsS", "--max-time", "20", "-X", "POST", "-H", "Content-Type: application/json",
-                 "--data-binary", f"@{body}", "-o", str(reply), url],
-                capture_output=True,
-                text=True,
-            )
-        except OSError as exc:
-            return finding("enrollment", "fail", f"curl could not run ({exc})", "Install curl, then run this program again.")
-        if done.returncode != 0:
-            reason = _curl_reason(done)
-            seen = re.search(r"error: (\d{3})", reason)
-            return lookup_verdict(role, int(seen.group(1)) if seen else None, reason, None)
-        try:
-            data = json.loads(reply.read_text(encoding="utf-8")).get("data") or {}
-        except (OSError, ValueError, AttributeError):
-            data = None
-    return lookup_verdict(role, 200, "", data)
-
-
 # The wizard replaces these with versions that do not need curl.
 NET = {}
 
 
-def preflight(os_name, role, action, token, directory, need_root=True, ssh_key=None, auto_enroll=False, disk_path=None, iso_path=None):
+def preflight(os_name, action, token, directory, need_root=True, disk_path=None, iso_path=None):
     """Everything that can be known before anything is erased. All problems are
     reported together so one fix pass is enough."""
     found = []
@@ -2775,15 +2703,8 @@ def preflight(os_name, role, action, token, directory, need_root=True, ssh_key=N
     else:
         found.append(finding("privilege", "ok", "root" if uid == 0 else "administrator rights are checked by the OS"))
     if action == "install":
-        previous = node_role(read_kv(os.environ.get("FLEET_NODE_CONF", "/etc/fleet/node.conf")))
-        if previous == "ci" and job_busy(os.environ.get("FLEET_BUSY_DIR", "/run/fleet")):
-            found.append(finding("runner-idle", "fail", "this CI node is running a job", "Wait for its jobs to finish, then check again. A role conversion never interrupts a running job."))
-        if role == "devbox":
-            try:
-                validate_ssh_key(ssh_key if ssh_key is not None else devbox_key())
-                found.append(finding("ssh-access", "ok", "public key for the dev account is valid"))
-            except (Invariant, OSError) as exc:
-                found.append(finding("ssh-access", "fail", str(exc), "Paste your SSH public key in the wizard, or set FLEET_DEVBOX_SSH_KEY_FILE to your .pub file. Never supply a private key."))
+        if job_busy(os.environ.get("FLEET_BUSY_DIR", "/run/fleet")):
+            found.append(finding("runner-idle", "fail", "this node is running a job", "Wait for its jobs to finish, then check again. A reinstall never interrupts a running job."))
         arch = machine_arch()
         if arch in X86:
             found.append(finding("architecture", "ok", arch))
@@ -2833,12 +2754,9 @@ def preflight(os_name, role, action, token, directory, need_root=True, ssh_key=N
                 found.append(ram)
     if action == "install":
         if token:
-            found.append(NET.get("lookup", lookup_token)(token, role))
-        elif auto_enroll:
-            found.append(finding("enrollment", "info", "the repository owner will be asked to approve this node on GitHub before anything is erased"))
+            found.append(finding("enrollment", "info", "an enrollment token rides along privately; the live installer checks it with Fleet before erasing"))
         else:
-            found.append(finding("enrollment", "warn", "no enrollment token; this node would generate a key no other node shares",
-                                 f"Mint one with `just enroll {role or '<role>'}` and rerun with its line, unless this role has no encrypted secrets yet."))
+            found.append(finding("enrollment", "info", "the live installer registers with Fleet and waits for app approval before erasing"))
     return found
 
 
@@ -2855,7 +2773,7 @@ def next_for(item):
     return f"Next: {fix}" if "Nothing was written" in fix else f"Next: {fix} Nothing was written."
 
 
-def plan_lines(os_name, role, chosen, directory):
+def plan_lines(os_name, chosen, directory):
     """What installing would do, step by step, with sizes. Read-only: it only describes."""
     erases = chosen["plain"] if chosen.get("ok") else "the internal disk"
     if os_name == "Windows":
@@ -2865,11 +2783,11 @@ def plan_lines(os_name, role, chosen, directory):
         size = WINDOWS["iso_size"]
         label = f"{size / 1024 ** 3:.2f} GiB" if size else "about 8 GiB"
         return [f"0. Download the installer ({label}) to {Path(directory) / 'fleet-installer.iso'}; it is deleted again once it has been written to the new partition.",
-                *windows_plan_lines(facts, size, role)]
+                *windows_plan_lines(facts, size)]
     if os_name == "Linux":
         return [f"1. Download the installer to {Path(directory) / 'fleet-installer.iso'}.",
                 "2. Load the installer's kernel and initrd with kexec.",
-                f"3. Restart into it. The installer ERASES {erases} and installs {role}."]
+                f"3. Restart into it. The installer ERASES {erases} and installs the Fleet base system."]
     return [f"The installer cannot restart this computer into itself; make an install USB with the word flash. A USB install ERASES {erases}."]
 
 
@@ -2880,33 +2798,29 @@ def cmd_doctor(argv):
     argv, token, token_error = enroll_token(argv)
     if token_error:
         return fail(token_error, 2)
+    if argv:
+        return fail(ROLE_ARGUMENT, 2)
     os_name = current_os()
     if os_name not in ("Linux", "Darwin", "Windows"):
         return fail(f"Next: {os_name} cannot start this installer. Nothing was written.", 2)
-    role = argv[0] if argv else None
-    if role is not None:
-        error = role_error(role)
-        if error:
-            return fail(error, 2)
     directory = state_dir()
     chosen = choose_disk(os_name, "install")
-    found = preflight(os_name, role, "install", token, directory, auto_enroll=enroll_enabled() and role is not None,
+    found = preflight(os_name, "install", token, directory,
                       disk_path=chosen["path"] if chosen["ok"] else None, iso_path=directory / "fleet-installer.iso")
     if chosen["ok"]:
         found.append(finding("disk", "ok", chosen["plain"]))
     else:
         found.append(finding("disk", "fail", "no internal disk can be erased safely", chosen["next"].replace("Next: ", "", 1)))
-    if role and installed_for(role, directory):
-        found.append(finding("state", "info", f"already installed as {role}; running the program again does not wipe it"))
+    if installed(directory):
+        found.append(finding("state", "info", "already installed; running the program again does not wipe it (use --reinstall)"))
     problems = [item for item in found if item["status"] == "fail"]
-    steps = plan_lines(os_name, role or "<role>", chosen, directory) if chosen["ok"] and os_name == "Windows" else []
+    steps = plan_lines(os_name, chosen, directory) if chosen["ok"] and os_name == "Windows" else []
     if as_json:
         print(json.dumps({
             "ok": not problems,
-            "role": role,
             "erases": chosen.get("plain") if chosen["ok"] else None,
             "plan": steps,
-            "confirm": f"{role}: {chosen['plain']}" if role and chosen["ok"] else None,
+            "confirm": f"install: {chosen['plain']}" if chosen["ok"] else None,
             "checks": found,
             "log": LOG["path"],
         }, indent=2))
@@ -2921,7 +2835,7 @@ def cmd_doctor(argv):
     if problems:
         say(f"Result: NOT ready, {len(problems)} problem{'s' if len(problems) != 1 else ''}.")
         return fail(next_for(problems[0]), 2)
-    say("Result: ready. Nothing was written. Show the person the role and the disk, get their yes, then run again with --yes.")
+    say("Result: ready. Nothing was written. Show the person the disk, get their yes, then run again with --yes.")
     return 0
 
 
@@ -2930,7 +2844,7 @@ def cmd_status():
     conf = os.environ.get("FLEET_NODE_CONF", "/etc/fleet/node.conf")
     role = node_role(read_kv(conf))
     if not role:
-        return fail("Next: this machine is not an installed fleet node (no role in " + conf + "). Install it with fleet-node.sh ROLE.", 1)
+        return fail("Next: this machine is not an installed fleet node (no role in " + conf + "). Install it with fleet-node.sh install.", 1)
     found = [finding("role", "ok", role)]
     try:
         host = os.environ.get("FLEET_HOSTNAME") or _run(["hostname"]).strip()
@@ -2944,7 +2858,7 @@ def cmd_status():
     else:
         found.append(finding("revision", "ok", rev[:12]))
     if (state_dir() / "withdrawn").is_file():
-        found.append(finding("membership", "fail", "withdrawn: this node was removed from the fleet", "Reinstall it with fleet-node.sh ROLE to rejoin."))
+        found.append(finding("membership", "fail", "withdrawn: this node was removed from the fleet", "Reinstall it with fleet-node.sh install --reinstall to rejoin."))
     health = Path(os.environ.get("FLEET_HEALTH_FAILURE", "/run/fleet/health-failure"))
     if health.is_file():
         found.append(finding("last-sync", "fail", "the last switch failed its health check and was rolled back: "
@@ -2976,122 +2890,11 @@ def cmd_status():
     return 0
 
 
+# An optional enrollment token (FLEET_ENROLLMENT_TOKENS on the controller).
 ENROLL_RE = re.compile(r"^[A-Za-z0-9._-]{8,512}$")
 
-# ---- Self-service enrollment ---------------------------------------------------
-# A new node has no credential for Vault, and the installer release is public, so
-# a node cannot simply ask for its role key. The person who owns the repository
-# approves the node instead: the node shows a prefilled GitHub issue, the owner
-# submits it, and the `Fleet enroll` workflow (which logs in to Vault with its
-# GitHub OIDC identity, never a stored secret) asks Vault for a single-use
-# response-wrapped token and posts it as a comment sealed to the node's one-time
-# public key. Only the node holds the matching private key, and the node alone
-# can unwrap the token. Anyone else reading the comment sees ciphertext.
-
-REPO = os.environ.get("FLEET_GITHUB_REPO", "crvouga/fleet")
-ENROLL_WAIT = 15 * 60
-ENROLL_POLL = 15
-FIELD_ROLE = "fleet-enroll-role: "
-FIELD_KEY = "fleet-enroll-key: "
-P25519 = 2 ** 255 - 19
-BASE_POINT = (9).to_bytes(32, "little")
-
-
-def x25519(scalar, point):
-    """RFC 7748 X25519, in plain Python so the one downloaded file needs no
-    package. Checked against the RFC's test vectors in tests/test_enroll.py."""
-    invariant(len(scalar) == 32 and len(point) == 32, "x25519 needs 32-byte inputs", scalar=len(scalar), point=len(point))
-    k = bytearray(scalar)
-    k[0] &= 248
-    k[31] &= 127
-    k[31] |= 64
-    k = int.from_bytes(k, "little")
-    x1 = int.from_bytes(point, "little") & ((1 << 255) - 1)
-    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
-    for t in reversed(range(255)):
-        bit = (k >> t) & 1
-        swap ^= bit
-        if swap:
-            x2, x3, z2, z3 = x3, x2, z3, z2
-        swap = bit
-        a, b = (x2 + z2) % P25519, (x2 - z2) % P25519
-        aa, bb = a * a % P25519, b * b % P25519
-        e = (aa - bb) % P25519
-        c, d = (x3 + z3) % P25519, (x3 - z3) % P25519
-        da, cb = d * a % P25519, c * b % P25519
-        x3 = (da + cb) ** 2 % P25519
-        z3 = x1 * (da - cb) ** 2 % P25519
-        x2 = aa * bb % P25519
-        z2 = e * (aa + 121665 * e) % P25519
-    if swap:
-        x2, x3, z2, z3 = x3, x2, z3, z2
-    return (x2 * pow(z2, P25519 - 2, P25519) % P25519).to_bytes(32, "little")
-
-
-def _hkdf(secret, salt, info, length):
-    prk = hmac.new(salt, secret, hashlib.sha256).digest()
-    out, block, counter = b"", b"", 1
-    while len(out) < length:
-        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
-        out += block
-        counter += 1
-    return out[:length]
-
-
-def _stream(key, length):
-    out = bytearray()
-    counter = 0
-    while len(out) < length:
-        out += hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha256).digest()
-        counter += 1
-    return bytes(out[:length])
-
-
-def _b64(raw):
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def _unb64(text):
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-
-
-def new_keypair():
-    private = os.urandom(32)
-    return private, x25519(private, BASE_POINT)
-
-
-def seal(plaintext, recipient_public):
-    """Encrypt to one public key: ephemeral X25519, HKDF-SHA256, an HMAC-SHA256
-    keystream, and an HMAC-SHA256 tag over the ciphertext (encrypt-then-MAC)."""
-    ephemeral = os.urandom(32)
-    ephemeral_public = x25519(ephemeral, BASE_POINT)
-    shared = x25519(ephemeral, recipient_public)
-    invariant(shared != bytes(32), "the recipient public key is a low-order point")
-    keys = _hkdf(shared, ephemeral_public + recipient_public, b"fleet-seal-v1", 64)
-    cipher = bytes(a ^ b for a, b in zip(plaintext, _stream(keys[:32], len(plaintext))))
-    tag = hmac.new(keys[32:], ephemeral_public + cipher, hashlib.sha256).digest()
-    return _b64(ephemeral_public + cipher + tag)
-
-
-def open_sealed(blob, private):
-    """Returns the plaintext, or None when the blob is not for this key or was altered."""
-    try:
-        raw = _unb64(blob.strip())
-    except ValueError:
-        return None
-    if len(raw) < 64:
-        return None
-    ephemeral_public, cipher, tag = raw[:32], raw[32:-32], raw[-32:]
-    shared = x25519(private, ephemeral_public)
-    if shared == bytes(32):
-        return None
-    public = x25519(private, BASE_POINT)
-    keys = _hkdf(shared, ephemeral_public + public, b"fleet-seal-v1", 64)
-    want = hmac.new(keys[32:], ephemeral_public + cipher, hashlib.sha256).digest()
-    if not hmac.compare_digest(tag, want):
-        return None
-    return bytes(a ^ b for a, b in zip(cipher, _stream(keys[:32], len(cipher))))
-
+# ---- Optional GitHub bug reports -----------------------------------------------
+# Node approval uses the Fleet controller protocol; these links are diagnostics only.
 
 # Every installer surface (the wizard, this program, the live installer screen)
 # reports problems on one GitHub issue form. Its field ids are fixed by
@@ -3138,152 +2941,11 @@ def report_link(message, command):
     return "Report: " + issue_form_url_within(title, f"fleet-node.sh {command}", "\n".join(facts), limit=2000)
 
 
-def enroll_issue_url(role, public):
-    body = (
-        f"Approve a new fleet {role} node. Submit this issue as it is.\n\n"
-        f"{FIELD_ROLE}{role}\n{FIELD_KEY}{_b64(public)}\n"
-    )
-    query = urllib.parse.urlencode({"title": f"fleet-enroll {role}", "body": body}, quote_via=urllib.parse.quote)
-    return f"https://github.com/{REPO}/issues/new?{query}"
-
-
-def parse_enroll_request(title, body):
-    """(role, public key bytes) from an enrollment issue, or raises Invariant."""
-    fields = {}
-    for line in str(body or "").splitlines():
-        for name in (FIELD_ROLE, FIELD_KEY):
-            if line.startswith(name):
-                fields[name] = line[len(name):].strip()
-    role = fields.get(FIELD_ROLE, "")
-    invariant(role in ROLES, "the enrollment request names an unknown role", "Run the installer again.", role=role)
-    invariant(str(title or "").strip() == f"fleet-enroll {role}", "the issue title does not match its role", title=title, role=role)
-    try:
-        public = _unb64(fields.get(FIELD_KEY, ""))
-    except ValueError:
-        public = b""
-    invariant(len(public) == 32, "the enrollment request holds no valid public key", "Run the installer again.")
-    return role, public
-
-
-def _github(path, etag=None):
-    base = os.environ.get("FLEET_GITHUB_API", "https://api.github.com").rstrip("/")
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "fleet-node", "X-GitHub-Api-Version": "2022-11-28"}
-    token = os.environ.get("FLEET_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = "Bearer " + token
-    if etag:
-        headers["If-None-Match"] = etag
-    try:
-        with urllib.request.urlopen(urllib.request.Request(base + path, headers=headers), timeout=20) as reply:
-            return reply.status, json.loads(reply.read().decode("utf-8", "replace")), reply.headers.get("ETag")
-    except urllib.error.HTTPError as exc:
-        return exc.code, None, etag
-    except (urllib.error.URLError, OSError, ValueError):
-        return 0, None, etag
-
-
-def await_approval(role, private, public, wait=ENROLL_WAIT, interval=ENROLL_POLL, sleep=time.sleep, notify=None, cancel=None):
-    """Poll the public issue until the workflow answers. Returns (token, error)."""
-    marker = FIELD_KEY + _b64(public)
-    issue, etags = None, {}
-    deadline = time.monotonic() + wait
-    while True:
-        if issue is None:
-            path = f"/repos/{REPO}/issues?state=all&sort=created&direction=desc&per_page=30"
-            code, data, etags["issues"] = _github(path, etags.get("issues"))
-            if code == 200:
-                for item in data:
-                    if "pull_request" not in item and marker in str(item.get("body") or ""):
-                        issue = item["number"]
-                        if notify:
-                            notify("The request was received. Waiting for the approval workflow.")
-                        break
-        if issue is not None:
-            code, data, etags["comments"] = _github(f"/repos/{REPO}/issues/{issue}/comments?per_page=50", etags.get("comments"))
-            for comment in (data or []) if code == 200 else []:
-                if (comment.get("user") or {}).get("login") != "github-actions[bot]":
-                    continue
-                for line in str(comment.get("body") or "").splitlines():
-                    if line.startswith("fleet-error: "):
-                        return None, line[len("fleet-error: "):].strip()
-                    if line.startswith("fleet-sealed: "):
-                        plain = open_sealed(line[len("fleet-sealed: "):], private)
-                        if plain is None:
-                            continue
-                        try:
-                            answer = json.loads(plain.decode("utf-8"))
-                        except ValueError:
-                            continue
-                        if answer.get("role") == role and ENROLL_RE.fullmatch(str(answer.get("token") or "")):
-                            return answer["token"], None
-        if cancel and cancel():
-            return None, "cancelled"
-        if time.monotonic() >= deadline:
-            return None, "nobody approved this node in time"
-        sleep(interval)
-
-
-def self_enroll(role, notify=None, wait=None, cancel=None):
-    """Ask the owner to approve this node. Returns (token, error). Nothing is
-    erased here; a refusal or a timeout leaves every disk as it was."""
-    say_it = notify or say
-    private, public = new_keypair()
-    url = enroll_issue_url(role, public)
-    say_it("Approve this node: press 'Submit new issue' on the GitHub page that opens, signed in as the repository owner.")
-    say_it("If no page opened, open this address on any computer: " + url)
-    if not os.environ.get("FLEET_NO_BROWSER"):
-        try:
-            webbrowser.open(url)
-        except webbrowser.Error:
-            pass
-    seconds = wait if wait is not None else int(os.environ.get("FLEET_ENROLL_WAIT") or ENROLL_WAIT)
-    interval = int(os.environ.get("FLEET_ENROLL_POLL") or ENROLL_POLL)
-    token, error = await_approval(role, private, public, seconds, interval, notify=notify, cancel=cancel)
-    if token:
-        say_it("Approved. The enrollment token arrived sealed and was opened on this machine.")
-    return token, error
-
-
-def enroll_enabled():
-    return not flag(os.environ.get("FLEET_NO_ENROLL"))
-
-
-
-
-def validate_ssh_key(value):
-    """No authorized_keys options or line injection. Validate the wire type.
-    The live installer additionally asks ssh-keygen to validate the key."""
-    value = str(value or "").strip()
-    invariant(value and len(value) <= 2048 and "\n" not in value and "\r" not in value,
-              "a devbox needs one SSH public key", "Paste the contents of your .pub file; never your private key.")
-    parts = value.split()
-    invariant(len(parts) >= 2 and parts[0] in ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"),
-              "unsupported SSH public key type", "Use a standard Ed25519, RSA or ECDSA .pub file.")
-    try:
-        wire = base64.b64decode(parts[1], validate=True)
-    except ValueError:
-        invariant(False, "the SSH public key has invalid base64", "Copy the complete contents of your .pub file.")
-    length = int.from_bytes(wire[:4], "big")
-    invariant(len(wire) >= 8 and wire[4:4 + length] == parts[0].encode() and len(wire) > 4 + length,
-              "the SSH public key is incomplete or has a mismatched type", "Copy the complete contents of your .pub file.")
-    if parts[0] == "ssh-ed25519":
-        tail = wire[4 + length:]
-        invariant(len(tail) == 36 and tail[:4] == (32).to_bytes(4, "big"), "the Ed25519 public key must contain exactly 32 bytes")
-    return " ".join(parts[:2])
-
-
-def devbox_key():
-    inline = os.environ.get("FLEET_DEVBOX_SSH_KEY")
-    if inline:
-        return validate_ssh_key(inline)
-    path = Path(os.environ.get("FLEET_DEVBOX_SSH_KEY_FILE") or "/nix/fleet-state/devbox/authorized_keys")
-    return validate_ssh_key(path.read_text(encoding="utf-8") if path.is_file() else "")
-
-
 def enroll_token(argv):
-    """Return (rest, token, error). The token is a single-use Vault wrapping
-    token for this role's age key. It is read from a file or the environment,
-    never from an argument, so it is not left in shell history or ps."""
+    """Return (rest, token, error). The optional enrollment token lets Fleet
+    approve this node without a person. It is read from a file or the
+    environment, never from an argument, so it is not left in shell history or
+    ps, and it is never printed."""
     rest = []
     path = os.environ.get("FLEET_ENROLL_TOKEN_FILE", "")
     items = iter(argv)
@@ -3306,7 +2968,7 @@ def enroll_token(argv):
             return argv, None, "Next: the token file could not be read. Nothing was written."
     token = token.strip()
     if token and not ENROLL_RE.fullmatch(token):
-        return argv, None, "Next: the enrollment token is not a Vault token. Nothing was written."
+        return argv, None, "Next: the enrollment token is malformed (8 to 512 letters, digits, '.', '_' or '-'). Nothing was written."
     return rest, token or None, None
 
 
@@ -3316,7 +2978,7 @@ def cmd_install(argv, action):
     reinstall = "--reinstall" in argv
     argv = [a for a in argv if a not in ("--yes", "-y", "--plan", "--reinstall")]
     if reinstall and action != "install":
-        return fail("Next: --reinstall takes a node role, not flash. Nothing was written.", 2)
+        return fail("Next: --reinstall is for install, not flash. Nothing was written.", 2)
     argv, token, token_error = enroll_token(argv)
     if token_error:
         return fail(token_error, 2)
@@ -3325,17 +2987,9 @@ def cmd_install(argv, action):
     os_name = current_os()
     if os_name not in ("Linux", "Darwin", "Windows"):
         return fail(f"Next: {os_name} cannot start this installer. Nothing was written.", 2)
-    role = None
-    if action == "install":
-        role = load_role(argv[0] if argv else "")
-        if role is None:
-            return 1
-        error = role_error(role)
-        if error:
-            return fail(error, 2)
-        if argv and len(argv) > 1:
-            return fail("Next: pass only the role. Nothing was written.", 2)
-    elif argv:
+    if argv and action == "install":
+        return fail(ROLE_ARGUMENT, 2)
+    if argv:
         return fail("Next: flash takes no role. Nothing was written.", 2)
     directory = state_dir()
     chosen = choose_disk(os_name, action)
@@ -3343,7 +2997,7 @@ def cmd_install(argv, action):
         return fail(chosen["next"], chosen.get("code", 2))
     # Every check that does not need a person runs before anyone is asked to
     # confirm, so a doomed install never gets as far as the prompt.
-    found = preflight(os_name, role, action, token, directory, auto_enroll=action == "install" and enroll_enabled(), disk_path=chosen["path"],
+    found = preflight(os_name, action, token, directory, disk_path=chosen["path"],
                       iso_path=directory / "fleet-installer.iso")
     show_findings(found)
     problems = [item for item in found if item["status"] == "fail"]
@@ -3353,19 +3007,18 @@ def cmd_install(argv, action):
     if plan_only:
         # Nothing below runs: no approval is requested, nothing is downloaded, nothing is changed.
         say("What this would do on this computer:")
-        for line in (plan_lines(os_name, role, chosen, directory) if action == "install" else [f"Write the installer to the USB disk {chosen['plain']} (erases it)."]):
+        for line in (plan_lines(os_name, chosen, directory) if action == "install" else [f"Write the installer to the USB disk {chosen['plain']} (erases it)."]):
             say("  " + line)
         say("Result: ready. This was only the plan: nothing was written or changed. Run the same command without --plan to do it.")
         return 0
     if action == "install":
-        say(f"Role: {role}")
         say(f"Disk: {chosen['plain']}")
         if reinstall:
             say("Hard reinstall requested: the existing installation and every file on the internal disk will be erased.")
-        say("This erases that internal disk. Nothing is erased until you confirm the role and the disk.")
+        say("This erases that internal disk and installs a Fleet node. Its role is assigned in the Fleet app afterwards. Nothing is erased until you confirm the disk.")
         say("Type this line exactly:")
-        say(f"{role}: {chosen['plain']}")
-        label = role
+        say(f"install: {chosen['plain']}")
+        label = "install"
     else:
         say("Disk: " + chosen["plain"])
         say("This writes the installer onto that USB disk and erases what is on it. The internal disk is not erased.")
@@ -3385,28 +3038,19 @@ def cmd_install(argv, action):
     block = install_block if action == "install" else media_block
     invariant(block(again["disk"]) is None, "the disk about to be erased fails the rules that chose it", disk=again["disk"])
     invariant(device_ok(again["path"]), "the disk about to be erased has an unusable device path", path=again["path"])
-    if action == "install" and not reinstall and installed_for(role, directory):
-        say(f"This machine is already installed as {role}. The disk was not wiped.")
+    if action == "install" and not reinstall and installed(directory):
+        say("This machine is already an installed Fleet node. The disk was not wiped. Change its role in the Fleet app, or use --reinstall to erase it deliberately.")
         return 0
     iso = directory / "fleet-installer.iso"
     fetched = fetch_installer(iso)
     if fetched != 0:
         return fetched
-    # Wi-Fi downloads can outlive a wrapping-token lease. Request approval only
-    # after the complete image has been verified, and recheck the disk afterward.
-    if action == "install" and not token and enroll_enabled() and (reinstall or not installed_for(role, directory)):
-        token, error = self_enroll(role)
-        if error:
-            return fail(f"Next: this node was not approved ({error}). Nothing was written. Run this program again, or add --no-enroll to install without the role's shared key.", 2)
-        verdict = NET.get("lookup", lookup_token)(token, role)
-        if verdict["status"] == "fail":
-            return fail(f"Next: the approval token cannot be used ({verdict['detail']}). Nothing was written. Run this program again to be approved again.", 2)
     fresh = choose_disk(os_name, action)
     invariant(fresh.get("ok") and fresh.get("disk_id") == chosen["disk_id"],
               "the disk changed while the installer was downloading or waiting for approval",
               "Review the exact disk again. Nothing was erased.")
     if action == "install":
-        return perform_install(os_name, role, str(iso), token, os.environ.get("FLEET_VAULT_ADDR") or None, directory, chosen)
+        return perform_install(os_name, str(iso), token, directory, chosen)
     network = wifi_profile(os_name)
     capacity = int(chosen["disk"].get("size") or 0)
     if not wifi_module().simulated():
@@ -3416,7 +3060,7 @@ def cmd_install(argv, action):
     if written != 0:
         return written
     say("FLEET-WIPE media")
-    say(f"The USB disk now holds the installer. Boot that disk. On the installer menu choose {ROLE_CHOICES}. Choose a role and press Enter; every entry erases the internal disk.")
+    say("The USB disk now holds the installer. Boot that disk and press Enter at the installer menu; it erases the internal disk. Approve the computer in the Fleet app, then assign its role there.")
     return 0
 
 
@@ -3424,7 +3068,15 @@ class ReleaseChanging(RuntimeError):
     """Only the release metadata is inconsistent during publication, not image bytes."""
 
 
-def check_release_readiness(role, expected_sha, iso_url):
+def readiness_blocked(document):
+    """The single `blocked` list of an installer readiness document (version 2)."""
+    invariant(document.get("version") == 2, "the installer readiness version is unsupported", NEWER_RELEASE_FIX, version=document.get("version"))
+    blocked = document["blocked"]
+    invariant(isinstance(blocked, list) and all(isinstance(item, str) for item in blocked), "the installer readiness checks are malformed")
+    return blocked
+
+
+def check_release_readiness(expected_sha, iso_url):
     if wifi_module().simulated():
         return
     url = iso_url.rsplit('/', 1)[0] + '/fleet-installer.readiness.json'
@@ -3433,30 +3085,25 @@ def check_release_readiness(role, expected_sha, iso_url):
     invariant(len(raw) <= 65536, 'the release readiness manifest is too large')
     try:
         document = json.loads(raw)
-        invariant(document['version'] == 1, 'the release readiness version is unsupported', NEWER_RELEASE_FIX, version=document['version'])
-        blocked = document['roles'][role]['blocked']
-        invariant(isinstance(blocked, list) and all(isinstance(value, str) for value in blocked), 'the release readiness checks are malformed')
+        blocked = readiness_blocked(document)
         if document['imageSha256'] != expected_sha:
             raise ReleaseChanging('The installer release is being updated; waiting for matching metadata before downloading.')
     except (KeyError, ValueError, TypeError) as exc:
         invariant(False, 'FLEET_RELEASE_READINESS_INVALID: the release readiness manifest is incomplete or newer than this installer',
                   'Download the latest Fleet installer and try again. If it repeats, the release is incomplete: re-run the Fleet workflow. Nothing was erased.',
-                  role=role, problem=f"{type(exc).__name__}: {exc}")
+                  problem=f"{type(exc).__name__}: {exc}")
     invariant(not blocked, 'FLEET_PLATFORM_NOT_READY: ' + '; '.join(blocked),
               'The platform administrator must resolve the configuration errors and publish the installer. No image was downloaded and nothing was erased.')
 
 
-def check_installer_readiness(iso, role):
+def check_installer_readiness(iso):
     if wifi_module().simulated():
         return
     try:
         with Path(iso).open("rb") as handle:
             raw = _iso_bytes(handle, _iso_index(handle), "fleet-readiness.json")
         invariant(len(raw) <= 65536, "the installer readiness manifest is too large")
-        manifest = json.loads(raw)
-        invariant(manifest.get("version") == 1, "the installer readiness manifest has an unsupported version", NEWER_RELEASE_FIX, version=manifest.get("version"))
-        blocked = manifest["roles"][role]["blocked"]
-        invariant(isinstance(blocked, list) and all(isinstance(item, str) for item in blocked), "the installer readiness checks are malformed")
+        blocked = readiness_blocked(json.loads(raw))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         invariant(False, "FLEET_INSTALLER_READINESS_MISSING: this image cannot prove it can join and update",
                   "Download the current Fleet installer. Nothing was erased.")
@@ -3464,50 +3111,60 @@ def check_installer_readiness(iso, role):
               "The platform administrator must resolve these Fleet configuration errors and publish a new installer. Reopen the wizard afterward. Nothing was erased.")
 
 
-def perform_install(os_name, role, iso, token, vault, directory, chosen, on_progress=None, wifi=None):
+def perform_install(os_name, iso, token, directory, chosen, on_progress=None, wifi=None):
     """The point of no return, shared by the command line and the wizard. On a
     real machine kexec does not come back; the marker is for the test seam."""
-    invariant(role in ROLES, "perform_install was given an unknown role", role=role)
     invariant(chosen.get("ok") and chosen.get("disk_id"), "perform_install needs a chosen disk", chosen=chosen)
     invariant(os.path.isfile(iso) and os.path.getsize(iso) > 0, "perform_install needs the verified installer image", iso=str(iso))
-    # Read credentials before withdrawing a runner or changing partitions.
+    invariant(token is None or ENROLL_RE.fullmatch(token) is not None, "perform_install was given a malformed enrollment token")
+    # Read credentials before closing job admission or changing partitions.
     network = wifi_profile(os_name, wifi)
-    check_installer_readiness(iso, role)
+    check_installer_readiness(iso)
     handoff = {"wifi": network} if network is not None else {}
-    previously_withdrawn = bool(checked_marker(directory, "withdrawn"))
-    # An earlier attempt that was killed before its cleanup left `handoff` with the duty to
-    # restore the CI runner. That withdrawal belongs to this reinstall too: keep the duty.
-    inherited = previously_withdrawn and read_kv(Path(directory) / "handoff").get("restore_ci") == "1"
     started = False
+    closed = False
     try:
-        retire_runner_for_install(directory)
-        restore_ci = inherited or (not previously_withdrawn and bool(checked_marker(directory, "withdrawn")))
-        write_text(Path(directory) / "handoff", f"role={role}\ndisk={chosen['disk_id']}\nstatus=staged\nrestore_ci={int(restore_ci)}\n")
+        closed = close_job_admission()
+        write_text(Path(directory) / "handoff", f"disk={chosen['disk_id']}\nstatus=staged\n")
         if os_name == "Windows":
-            staged = stage_windows(role, str(iso), token, vault, chosen, on_progress, **handoff)
+            staged = stage_windows(str(iso), token, chosen, on_progress, **handoff)
         else:
-            staged = stage_reboot(os_name, role, str(iso), token, vault, **handoff)
+            staged = stage_reboot(os_name, str(iso), token, **handoff)
         if staged != 0:
             return staged
         started = True
     finally:
         if not started:
             (Path(directory) / "handoff").unlink(missing_ok=True)
-        if not started and (inherited or not previously_withdrawn) and checked_marker(directory, "withdrawn"):
-            # Staging failed before the live installer could erase anything.
-            # Undo only this reinstall's withdrawal; intentional removals stay.
-            (Path(directory) / "withdrawn").unlink()
+        if not started and closed:
+            # Staging failed before the live installer could erase anything:
+            # reopen the job admission this attempt closed.
             root = Path(os.environ.get("FLEET_BUSY_DIR", "/run/fleet"))
             write_text(root / "agent-drained", "recover failed reinstall\n")
             resume = os.environ.get("FLEET_RESUME") or (None if wifi_module().simulated() else shutil.which("fleet-resume"))
             if resume and run_logged([resume]).returncode == 0:
                 (root / "agent-drained").unlink(missing_ok=True)
-                log("failed handoff: previous CI node resumed")
+                log("failed handoff: job admission reopened")
             else:
-                log("FLEET_RECOVERY_PENDING: the fleet agent will retry runner recovery after the failed handoff", "ERROR")
-    say(f"FLEET-WIPE role={role}")
-    say(f"Installer staged for {role}; joining Fleet is confirmed only after the new node boots and reports.")
+                log("FLEET_RECOVERY_PENDING: the fleet agent will retry reopening job admission after the failed handoff", "ERROR")
+    say("FLEET-WIPE install")
+    say("Installer staged; joining Fleet is confirmed only after the new node boots and reports. Assign its role in the Fleet app.")
     return 0
+
+
+def close_job_admission():
+    """A node that runs CI jobs must be idle before its disk is erased. Serialize
+    with the job-start hook (modules/runners.nix) so no job begins between this
+    check and the reboot. Returns whether admission was closed here."""
+    root = Path(os.environ.get("FLEET_BUSY_DIR", "/run/fleet"))
+    if not (root / "gate").exists():
+        return False  # no runner slots on this machine
+    import fcntl
+    with open(root / "gate", "a") as gate:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        invariant(not job_busy(root), "a job started before the reinstall", "Wait for the job to finish, then review again. Nothing was erased.")
+        write_text(root / "draining", "reinstall\n")
+    return True
 
 
 def runner_name_prefix():
@@ -3517,31 +3174,6 @@ def runner_name_prefix():
     invariant(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", value) is not None,
               "the CI node has no safe runner identity", "Wait for node identity to initialize before retrying.")
     return value
-
-
-def retire_runner_for_install(directory):
-    """An idle CI node withdraws before changing roles; serialize with its
-    job-start hook so no project code begins between the check and reboot."""
-    previous = node_role(read_kv(os.environ.get("FLEET_NODE_CONF", "/etc/fleet/node.conf")))
-    if previous != "ci":
-        return
-    import fcntl
-    root = Path(os.environ.get("FLEET_BUSY_DIR", "/run/fleet"))
-    root.mkdir(parents=True, exist_ok=True)
-    with open(root / "gate", "a") as gate:
-        fcntl.flock(gate, fcntl.LOCK_EX)
-        invariant(not job_busy(root), "a runner job started before the reinstall", "Wait for the job to finish, then review again. Nothing was erased.")
-        if not checked_marker(directory, "withdrawn"):
-            key = os.environ.get("FLEET_CREDENTIAL", "/run/secrets/github-app-key")
-            runner = read_kv(os.environ.get("FLEET_RUNNER_CONF", "/etc/fleet/runner.conf"))
-            invariant(credential_ready(key, runner), "cannot withdraw this CI node with its current credential",
-                      "Restore the CI role's GitHub App credential before reinstalling. Nothing was erased.")
-            host = runner_name_prefix()
-            invariant(bool(host), "the CI node has no hostname to withdraw")
-            code = call_runner("withdraw", runner, key, host)
-            invariant(code == 0, "the CI node could not be withdrawn before reinstalling", "Check GitHub connectivity and the CI credential, then try again. Nothing was erased.", code=code)
-            write_text(Path(directory) / "withdrawn", "status=withdrawn\nrole=ci\n")
-        write_text(root / "draining", "reinstall\n")
 
 
 def job_busy(directory):
@@ -3572,8 +3204,10 @@ def credential_ready(key_path, conf):
 
 
 def node_role(conf):
+    """The role the running system reports in node.conf ("base" before the
+    controller assigned one), or "" when there is no valid one."""
     role = (conf or {}).get("role", "")
-    if role in ROLES:
+    if ROLE_NAME_RE.fullmatch(role):
         return role
     return ""
 
@@ -3617,7 +3251,7 @@ def cmd_remove():
         say(plan["next"])
     if plan["power_off"]:
         if not withdrawn:
-            write_text(directory / "withdrawn", "status=withdrawn\n" + (f"role={role}\n" if role in ROLES else ""))
+            write_text(directory / "withdrawn", "status=withdrawn\n")
         say("The machine can be powered off.")
         retire_from_fleet_api()
         return power_off(role)
@@ -3653,18 +3287,18 @@ def power_off(role):
     return 0
 
 
-USAGE = f"""usage: fleet-node.sh COMMAND
+USAGE = """usage: fleet-node.sh COMMAND
 
-  ROLE              install this machine as {ROLE_CHOICES}
-  doctor [ROLE]     read-only: what would be erased, and what stands in the way
+  install           erase the internal disk and install a Fleet node (the default)
+  doctor            read-only: what would be erased, and what stands in the way
   status            health of an installed node
   remove            take this node out of the fleet and power it off
   flash             write the installer to a USB disk
   guide             print the runbook an agent follows
 
-Flags: --yes (take the confirmation as typed), --token-file PATH, --no-enroll (skip the GitHub approval
-and let the node make its own key), --json (doctor), --plan (print the exact steps and sizes, change nothing).
---reinstall deliberately erases an existing installation of the same role; disk checks and confirmation still apply.
+Flags: --yes (take the confirmation as typed), --token-file PATH (optional enrollment token), --json (doctor), --plan (print the exact steps and sizes, change nothing).
+--reinstall deliberately erases an existing installation; disk checks and confirmation still apply.
+The role is assigned in the Fleet app after the node is approved, never here.
 Every run writes a log; its path is printed when something fails.
 Agent runbook: """ + GUIDE_URL
 
@@ -3675,8 +3309,6 @@ def dispatch(argv):
     if command in ("help", "-h", "--help"):
         print(USAGE)
         return 0
-    if command in ROLES:
-        return cmd_install([command, *rest], "install")
     if command == "install":
         return cmd_install(rest, "install")
     if command == "flash":
@@ -3689,10 +3321,7 @@ def dispatch(argv):
         return cmd_status()
     if command == "remove":
         return cmd_remove()
-    error = role_error(command)
-    if error and command != "":
-        return fail(error, 2)
-    return fail("Next: use install, doctor, status, flash, fetch, or remove (help lists them). Nothing was written.", 2)
+    return fail("Next: use install, doctor, status, flash, fetch, or remove (help lists them). Roles are assigned in the Fleet app, never here. Nothing was written.", 2)
 
 
 def main(argv=None):
@@ -3709,9 +3338,6 @@ def main(argv=None):
     if any(a in ("--yes", "-y") for a in argv):
         os.environ["FLEET_YES"] = "1"
         argv = [a for a in argv if a not in ("--yes", "-y")]
-    if "--no-enroll" in argv:
-        os.environ["FLEET_NO_ENROLL"] = "1"
-        argv = [a for a in argv if a != "--no-enroll"]
     if argv and argv[0] not in ("help", "-h", "--help"):
         start_log(argv)
     try:

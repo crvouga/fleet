@@ -50,7 +50,7 @@ STEPS = (
     ("network", "Connect to the network",
      "Nothing to do yet. Keep this computer near the Wi-Fi it used before."),
     ("approval", "Read this node's approval",
-     "Nothing to do. This uses the approval from the GitHub enrollment issue."),
+     "Approve this node under Pending in the Fleet app. Nothing is erased until approval succeeds."),
     ("checks", "Check Fleet, the update cache and GitHub",
      "Nothing to do. This usually takes less than two minutes."),
     ("disk", "Find the internal disk",

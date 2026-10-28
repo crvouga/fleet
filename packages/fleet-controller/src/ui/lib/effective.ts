@@ -28,11 +28,11 @@ export function effectiveSettings(
   view: NodeView,
   documents: ScopeDocuments
 ): EffectiveSetting[] {
-  const layers: readonly Scope[] = [
-    'fleet',
-    `role:${view.role}`,
-    `node:${view.id}`,
-  ];
+  // The ASSIGNED role's scope applies; an unassigned node has none.
+  const layers: readonly Scope[] =
+    view.role === null
+      ? ['fleet', `node:${view.id}`]
+      : ['fleet', `role:${view.role}`, `node:${view.id}`];
   const out: EffectiveSetting[] = [];
   for (const section of SECTIONS) {
     for (const key of Object.keys(RULES[section])) {
@@ -58,9 +58,10 @@ export function inheritedSettings(
   role: string | null
 ): Map<string, EffectiveSetting> {
   const layers: Scope[] = [];
-  if (scope.startsWith('node:') && role !== null)
-    layers.push('fleet', `role:${role}` as Scope);
-  else if (scope.startsWith('role:')) layers.push('fleet');
+  if (scope.startsWith('node:')) {
+    layers.push('fleet');
+    if (role !== null) layers.push(`role:${role}` as Scope);
+  } else if (scope.startsWith('role:')) layers.push('fleet');
   const inherited = new Map<string, EffectiveSetting>();
   for (const section of SECTIONS) {
     for (const key of Object.keys(RULES[section])) {

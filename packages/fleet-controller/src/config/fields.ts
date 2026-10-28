@@ -31,6 +31,11 @@ export interface FleetConfig {
     repositories?: string[];
     extraLabels?: string[];
   };
+  /**
+   * OpenSSH public keys that may log in as the unprivileged `dev` user on a
+   * devbox. Applied only while the node runs the devbox role; root keys stay in Git.
+   */
+  devbox?: { authorizedKeys?: string[] };
   /** Controller-only. Never sent to a node. */
   alerts?: { offlineAfterSeconds?: number; webhookUrl?: string | null };
 }
@@ -72,6 +77,10 @@ const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const LABEL_PATTERN = /^[A-Za-z0-9_.:-]{1,50}$/;
 const MAX_REPOSITORIES = 64;
 const MAX_LABELS = 16;
+const MAX_AUTHORIZED_KEYS = 16;
+/** One OpenSSH public key line: no options prefix, no newline, optional plain comment. */
+export const AUTHORIZED_KEY_PATTERN =
+  /^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-rsa) [A-Za-z0-9+/]{16,8192}={0,3}( [A-Za-z0-9 ._@:+-]{1,100})?$/;
 export const MAX_URL_LENGTH = 500;
 
 export const RULES: Readonly<Record<Section, Readonly<Record<string, Rule>>>> =
@@ -107,6 +116,13 @@ export const RULES: Readonly<Record<Section, Readonly<Record<string, Rule>>>> =
         max: MAX_LABELS,
         pattern: LABEL_PATTERN,
         forbidden: RESERVED_LABELS,
+      },
+    },
+    devbox: {
+      authorizedKeys: {
+        kind: 'list',
+        max: MAX_AUTHORIZED_KEYS,
+        pattern: AUTHORIZED_KEY_PATTERN,
       },
     },
     alerts: {

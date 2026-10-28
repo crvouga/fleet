@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Create the missing per-role age keys and wire them in.
 
-Writes the private keys to the vault root's ignored auto.tfvars.json (the
+Writes private keys to the operator-owned local JSON file (the
 `fleet_age_keys` input) and the matching public recipients to .sops.yaml.
 Existing keys are kept, so running it twice changes nothing. Private keys are
 never printed and never written under a tracked path.
 
 Keys are created for the active roles in roles.json. A retired role's existing
-key stays in the input, because the vault root keeps its document until a
-reviewed change deletes the role from the registry.
+key stays in the input until an operator-reviewed change removes it.
 """
 import json
 import os
@@ -89,7 +88,7 @@ def main(argv):
     publics = {role: public_of(tool, keys[role]) for role in ROLES}
     sops.write_text(sops_text(publics))
     print(f"created: {', '.join(created) or 'none'}", file=sys.stderr)
-    print(f"private keys: {out} (git-ignored, apply with the vault OpenTofu root)", file=sys.stderr)
+    print(f"private keys: {out} (private; back up securely and import into your optional secret store)", file=sys.stderr)
     print(f"public recipients: {sops}", file=sys.stderr)
     return 0
 

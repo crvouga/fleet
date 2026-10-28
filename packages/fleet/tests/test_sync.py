@@ -446,7 +446,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("no previous generation", result.stderr)
         self.assertIn("github unreachable", (self.root / "health-failure").read_text())
 
-    def test_default_probe_rolls_back_when_github_is_down(self):
+    def test_default_probe_rolls_back_when_configured_cache_is_down(self):
         self.commit("good")
         good = self.run_sync()
         self.assertEqual(good.returncode, 0, good.stderr)
@@ -476,7 +476,8 @@ class SyncTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.profile.resolve(), kept)
         urls = (self.root / "curl-urls").read_text()
-        self.assertIn("https://github.com", urls)
+        self.assertNotIn("https://github.com", urls)
+        self.assertIn("nix-cache-info", urls)
         self.assertNotIn("reboot", self.actions())
 
     def test_default_probe_fails_when_the_sync_timer_is_failed(self):

@@ -1,4 +1,4 @@
-import type { NodeRow, NodeStatus, NodeView } from '../types';
+import type { NodeRow, NodeStatus } from '../types';
 
 /** Defaults used when no setting overrides them. */
 export const DEFAULT_OFFLINE_AFTER_SECONDS = 300;
@@ -36,24 +36,4 @@ export function statusOf(
     return 'online';
   }
   return age <= offlineAfterSeconds ? 'stale' : 'offline';
-}
-
-export function viewOf(
-  row: NodeRow,
-  now: Date,
-  offlineAfterSeconds: number
-): NodeView {
-  return {
-    ...row,
-    status: statusOf(row, now, offlineAfterSeconds),
-    shortId: row.id.slice(0, 4),
-    label: row.displayName ?? row.hostname,
-    ageSeconds:
-      row.lastSeenAt === null
-        ? null
-        : Math.max(
-            0,
-            Math.round((now.getTime() - row.lastSeenAt.getTime()) / 1000)
-          ),
-  };
 }

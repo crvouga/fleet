@@ -18,6 +18,7 @@ import {
 } from '../lib/format';
 import { availability, bucketize } from '../lib/series';
 import { cx, tw } from '../lib/tw';
+import { DesiredStatePanel } from './node-desired';
 import { TelemetrySnapshot } from './node-telemetry';
 import {
   EditPanel,
@@ -56,6 +57,17 @@ function Callout(props: {
   );
 }
 
+function BlockedCallout(props: { view: FleetEntry['view'] }) {
+  const { view } = props;
+  if (view.convergence !== 'blocked') return null;
+  return (
+    <Callout tone="warn" title="Cannot converge">
+      {view.reconcileIssues[0] ??
+        'The node reports that it cannot reach its desired state.'}
+    </Callout>
+  );
+}
+
 function Callouts(props: { entry: FleetEntry }) {
   const { entry } = props;
   const { facts, view } = entry;
@@ -64,10 +76,13 @@ function Callouts(props: { entry: FleetEntry }) {
     <div class="space-y-3 empty:hidden">
       {view.status === 'pending' ? (
         <Callout tone="info" title="Waiting for your approval">
-          This machine asked to join as <strong>{view.role}</strong>. Check the
-          details below, then approve or reject it.
+          This machine runs{' '}
+          <strong>{view.observedRole ?? 'an unknown system'}</strong> and asked
+          to join. Check the details below, then approve or reject it. Fleet
+          assigns its role; the machine never chooses one.
         </Callout>
       ) : null}
+      <BlockedCallout view={view} />
       {view.status === 'offline' ? (
         <Callout tone="error" title="Offline">
           {view.ageSeconds === null
@@ -185,11 +200,6 @@ function EnrolmentFacts(props: { entry: FleetEntry; data: FleetData }) {
   return (
     <>
       <Fact label="Agent">{view.agentVersion ?? <Unknown />}</Fact>
-      <Fact label="Config revision">
-        <span class="font-mono text-xs">
-          {view.configRevision ?? 'none applied'}
-        </span>
-      </Fact>
       <Fact label="Enrolled via">{view.enrolledVia}</Fact>
       <Fact label="First seen">
         <ExactTime at={view.firstSeenAt} />
@@ -322,6 +332,7 @@ export function NodeDetailBody(props: NodeDetailProps) {
           <NodeTimeline events={events} now={data.now} />
         </div>
         <div class="space-y-6">
+          <DesiredStatePanel view={entry.view} />
           <FactsPanel entry={entry} data={data} />
           <EditPanel view={entry.view} />
           <ManagePanel view={entry.view} />

@@ -151,8 +151,14 @@ def read_private(path):
         return decode(handle.read(4097))
 
 
-def initrd(profile):
-    """A gzip newc archive: Linux accepts concatenated initramfs members."""
+TOKEN = re.compile(r"[A-Za-z0-9._-]{8,512}")
+
+
+def initrd(profile, token=None):
+    """A gzip newc archive: Linux accepts concatenated initramfs members.
+
+    It carries the Wi-Fi profile and/or the optional enrollment token to the
+    live installer (modules/installer.nix moves both into /run, root-only)."""
     def member(name, body, mode, ino):
         name = name.encode() + b"\0"
         fields = [ino, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0]
@@ -160,8 +166,14 @@ def initrd(profile):
         entry = header + name
         entry += b"\0" * (-len(entry) % 4)
         return entry + body + b"\0" * (-len(body) % 4)
-    archive = member("fleet-wifi.json", encode(profile), stat.S_IFREG | 0o600, 1)
-    archive += member("TRAILER!!!", b"", 0, 2)
+    require(token is None or (isinstance(token, str) and TOKEN.fullmatch(token)), "The enrollment token is malformed.")
+    members = []
+    if profile is not None:
+        members.append(("fleet-wifi.json", encode(profile)))
+    if token is not None:
+        members.append(("fleet-enrollment.token", token.encode("ascii") + b"\n"))
+    archive = b"".join(member(name, body, stat.S_IFREG | 0o600, index + 1) for index, (name, body) in enumerate(members))
+    archive += member("TRAILER!!!", b"", 0, len(members) + 1)
     return gzip.compress(archive, mtime=0)
 
 

@@ -7,6 +7,7 @@ import type {
   HeartbeatBody,
   HeartbeatPoint,
   NodeRow,
+  Role,
   SettingsHistoryRow,
   SettingsRow,
 } from '../types';
@@ -23,9 +24,10 @@ import {
   updateApproval,
   updateNotified,
   updatePatch,
+  updateRole,
 } from './node-queries';
-import { registerWithEvents } from './register-queries';
-import { text, toNodeRow } from './rows';
+import { registerWithEvents, roleAssignedEvent } from './register-queries';
+import { text, textOrNull, toNodeRow } from './rows';
 import {
   deleteScope,
   selectAllSettings,
@@ -142,6 +144,24 @@ export class SqliteStore implements Store {
         },
         null
       );
+      return node;
+    });
+  }
+
+  assignRole(
+    id: string,
+    role: Role | null,
+    actor: string
+  ): Promise<NodeRow | null> {
+    return this.db.begin(async (tx) => {
+      const before = await selectNode(tx, id, true);
+      if (before === null) return null;
+      const previous = textOrNull(before, 'role') as Role | null;
+      if (previous === role) return toNodeRow(before);
+      const row = await updateRole(tx, id, role);
+      if (row === null) return null;
+      const node = toNodeRow(row);
+      await insertEvent(tx, roleAssignedEvent(node, previous, actor), null);
       return node;
     });
   }

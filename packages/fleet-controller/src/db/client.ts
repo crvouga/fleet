@@ -3,6 +3,7 @@ import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { mkdirSync, chmodSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import { MIGRATIONS, SCHEMA_VERSION } from './migrations';
 import type { Row } from './rows';
 
 export type Rows = Row[] & { count: number };
@@ -58,10 +59,13 @@ export async function createDb(options: DbOptions): Promise<Db> {
   try {
     chmodSync(options.path, 0o600);
     sqlite.exec(
-      'PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;'
+      'PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;'
     );
     if (options.replicated) sqlite.exec('PRAGMA wal_autocheckpoint = 0');
+    // Foreign keys stay off while a migration rebuilds a referenced table.
+    sqlite.exec('PRAGMA foreign_keys = OFF');
     migrate(sqlite);
+    sqlite.exec('PRAGMA foreign_keys = ON');
   } catch (error) {
     sqlite.close();
     throw error;
@@ -103,6 +107,25 @@ function serialized(sqlite: Database): Db {
   );
 }
 
+function upgrade(sqlite: Database, from: number): void {
+  for (let version = from; version < SCHEMA_VERSION; version += 1) {
+    const step = MIGRATIONS[version];
+    if (step === undefined)
+      throw new StartupError(
+        'schema',
+        `No migration from schema version ${version}. Deploy a Fleet version that can upgrade it.`
+      );
+    sqlite.exec(step);
+  }
+  const broken = sqlite.query('PRAGMA foreign_key_check').all();
+  if (broken.length > 0)
+    throw new StartupError(
+      'schema',
+      'The database upgrade left rows with broken references and was rolled back. Restore the backup and report the problem.'
+    );
+}
+
+/** New databases start at the newest version; older ones upgrade in one transaction. */
 function migrate(sqlite: Database): void {
   sqlite
     .transaction(() => {
@@ -110,17 +133,20 @@ function migrate(sqlite: Database): void {
         .query<{ user_version: number }, []>('PRAGMA user_version')
         .get();
       const version = result?.user_version ?? 0;
-      if (version > 1)
+      if (version > SCHEMA_VERSION)
         throw new StartupError(
           'schema',
           'The database schema is newer than this controller. Deploy the matching or newer Fleet version; do not delete the working database or change its schema version.'
         );
+      if (version === SCHEMA_VERSION) return;
       if (version === 0) {
         sqlite.exec(
           readFileSync(new URL('./schema.sql', import.meta.url), 'utf8')
         );
-        sqlite.exec('PRAGMA user_version = 1');
+      } else {
+        upgrade(sqlite, version);
       }
+      sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     })
     .immediate();
 }

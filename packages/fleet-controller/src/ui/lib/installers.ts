@@ -1,9 +1,6 @@
-export const INSTALLER_RELEASE =
-  'https://github.com/crvouga/fleet/releases/tag/fleet-installer';
-export const WINDOWS_DOWNLOAD_GUIDE =
-  'https://github.com/crvouga/fleet/blob/main/packages/fleet/docs/installer.md#windows-download-verification';
-const DOWNLOAD =
-  'https://github.com/crvouga/fleet/releases/download/fleet-installer/';
+export const INSTALLER_RELEASE = '/installers/release';
+export const WINDOWS_DOWNLOAD_GUIDE = '/installers/windows-guide';
+const DOWNLOAD = '/installers/download/';
 
 export const INSTALLERS = [
   {

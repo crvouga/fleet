@@ -27,6 +27,8 @@ export function NodeReadiness({ entry }: { entry: FleetEntry }) {
       node: view.id,
       hostname: view.hostname,
       role: view.role,
+      runs: view.observedClosure,
+      convergence: view.convergence,
       readiness: label,
       membership: view.approval,
       connectivity: view.status,

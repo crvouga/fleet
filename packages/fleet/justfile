@@ -24,14 +24,14 @@ fetch-iso:
 bootstrap role ip:
     bash scripts/bootstrap.sh {{quote(role)}} {{quote(ip)}}
 
-# Create the missing per-role age keys: private keys go to the vault root's
-# ignored auto.tfvars.json, public recipients go to .sops.yaml. Safe to repeat.
+# Create the missing per-role age keys: private keys go to ~/.config/fleet/
+# (or FLEET_KEYS_OUT), public recipients go to .sops.yaml. Safe to repeat.
 fleet-keys:
     python3 scripts/fleet-keys.py
 
 # The one-time setup the repository owner does, once for the whole fleet: role
 # age keys, the runner GitHub App, the encrypted CI secrets, fleet.nix. A new
-# node never repeats any of it. Example: just setup --repos crvouga/private-app
+# node never repeats any of it. Example: just setup --repos owner/private-app
 setup *args:
     python3 scripts/setup.py {{args}}
 
@@ -43,17 +43,19 @@ enroll role:
     set -euo pipefail
     python3 scripts/fleet_roles.py require-active {{quote(role)}}
     for tool in bao jq; do command -v "$tool" >/dev/null || { echo "Next: install $tool, then run this again." >&2; exit 1; }; done
+    : "${FLEET_CONTROLLER_URL:?Set FLEET_CONTROLLER_URL to your Fleet app origin}"
+    : "${FLEET_VAULT_ADDR:?Set FLEET_VAULT_ADDR to your Vault/OpenBao origin}"
     token=$(bao kv get -wrap-ttl=1h -format=json "secret/fleet/{{role}}" | jq -er '.wrap_info.token') \
-      || { echo "Next: could not read secret/fleet/{{role}}. Run 'bao login', and 'just fleet-keys' plus an applied vault root if the key was never created." >&2; exit 1; }
-    release=https://github.com/crvouga/fleet/releases/download/fleet-installer/fleet-node.sh
-    guide=https://raw.githubusercontent.com/crvouga/fleet/main/packages/fleet/docs/agent-install.md
+      || { echo "Next: could not read secret/fleet/{{role}}. Run 'bao login', and 'just fleet-keys' and store the role key in your configured Vault/OpenBao if it was never created." >&2; exit 1; }
+    release=${FLEET_CONTROLLER_URL%/}/installers/assets/fleet-node.sh
+    guide="fleet-node.sh guide"
     echo "# Single use. Expires in 1 hour. Paste ONE of these on the new {{role}} node." >&2
     echo >&2
     echo "# 1. A shell on the node:" >&2
-    echo "curl -fsSL -o fleet-node.sh $release && sudo env FLEET_ENROLL_TOKEN=$token bash fleet-node.sh {{role}} --yes"
+    echo "curl -fsSL -o fleet-node.sh $release && sudo env FLEET_CONTROLLER_URL=$FLEET_CONTROLLER_URL FLEET_VAULT_ADDR=$FLEET_VAULT_ADDR FLEET_ENROLL_TOKEN=$token bash fleet-node.sh {{role}} --yes"
     echo >&2
     echo "# 2. An agent on the node (it checks first and asks you to confirm the disk):" >&2
-    echo "Set this machine up as a fleet {{role}} node by following $guide and use this single-use enrollment token (valid 1 hour): $token"
+    echo "Set this machine up as a fleet {{role}} node by following $guide with FLEET_CONTROLLER_URL=$FLEET_CONTROLLER_URL and FLEET_VAULT_ADDR=$FLEET_VAULT_ADDR. Use this single-use enrollment token (valid 1 hour): $token"
 
 status node:
     bash scripts/node.sh status {{quote(node)}}

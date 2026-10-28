@@ -572,12 +572,12 @@ class NodeEntryTests(unittest.TestCase):
         self.assertIn("/v1/sys/wrapping/lookup", urls)
         self.assertNotIn("/unwrap", urls)
 
-    def test_no_token_is_a_loud_warning_not_a_block(self):
+    def test_no_token_uses_direct_fleet_app_approval(self):
         result = self.run_entry(["doctor", "ci"])
         text = self.combined(result)
         self.assertEqual(result.returncode, 0, text)
-        self.assertRegex(text, r"WARN\s+enrollment")
-        self.assertIn("just enroll ci", text)
+        self.assertRegex(text, r"info\s+enrollment")
+        self.assertIn("registers directly with Fleet", text)
 
     def test_every_run_leaves_a_timestamped_log_without_secrets(self):
         token = self.root / "token"
@@ -901,150 +901,21 @@ class NodeEntryTests(unittest.TestCase):
         short = self.run_entry(["doctor", "ci"], "", self._windows_env())
         self.assertEqual(short.returncode, 2, self.combined(short))
 
-    # ---- self-service enrollment through GitHub ---------------------------------
-
-    def _enrolling(self, extra=None):
+    def test_normal_install_never_contacts_github_or_requests_issue_approval(self):
         github = FakeGitHub()
         self.addCleanup(github.close)
-        env = self.env.copy()
-        env.pop("FLEET_NO_ENROLL", None)
-        env.update({"FLEET_GITHUB_API": github.url, "FLEET_NO_BROWSER": "1", "FLEET_ENROLL_POLL": "1", "FLEET_ENROLL_WAIT": "20", **(extra or {})})
-        return github, env
-
-    def _start(self, args, env):
-        return subprocess.Popen([str(SCRIPT), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, env=env, cwd=self.root)
-
-    def _read_request(self, process):
-        """Read the node's output until it prints the approval link; return (link, lines)."""
-        lines = []
-        for line in process.stdout:
-            lines.append(line)
-            if "issues/new?" in line:
-                link = line[line.index("https://"):].strip()
-                return link, lines
-        self.fail("the node never printed an approval link:\n" + "".join(lines))
-
-    def _owner_approves(self, github, link, answer=None, role="ci", token="hvs.CAESIapproved"):
-        """What the owner's click and the Fleet enroll workflow do, against the fake GitHub."""
-        sys.path.insert(0, str(ROOT / "scripts"))
-        spec = importlib.util.spec_from_file_location("decide_for_enroll_test", DECIDE)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        query = parse_qs(urlparse(link).query)
-        _, public = module.parse_enroll_request(query["title"][0], query["body"][0])
-        number = github.open_issue(query["title"][0], query["body"][0])
-        github.comment(number, answer or "fleet-sealed: " + module.seal(json.dumps({"role": role, "token": token}).encode(), public))
-
-    def test_a_new_node_is_approved_on_github_and_installs_with_the_shared_key(self):
-        github, env = self._enrolling()
-        process = self._start(["ci", "--yes"], env)
-        link, lines = self._read_request(process)
-        self.assertIn("title=fleet-enroll%20ci", link)
-        self._owner_approves(github, link)
-        rest, _ = process.communicate(timeout=60)
-        text = "".join(lines) + rest
-        self.assertEqual(process.returncode, 0, text)
-        self.assertIn("Approved.", text)
-        self.assertIn("fleet.enroll=hvs.CAESIapproved", self.boot_log.read_text())
-        self.assertNotIn("hvs.CAESIapproved", text)
-        self.assertIn("/v1/sys/wrapping/lookup", self.curl_log.read_text())
-        self.assertNotIn("/unwrap", self.curl_log.read_text())
-
-    def test_nothing_is_erased_while_waiting_for_the_owner(self):
-        github, env = self._enrolling()
-        process = self._start(["ci", "--yes"], env)
-        self._read_request(process)
-        self.assertFalse(self.boot_log.exists())
-        self.assertFalse((self.state / "installed").exists())
-        process.kill()
-        process.communicate()
-
-    def test_no_approval_in_time_leaves_everything_alone(self):
-        _, env = self._enrolling({"FLEET_ENROLL_WAIT": "2"})
-        result = self.run_entry(["ci", "--yes"], "", env)
-        text = self.combined(result)
-        self.assertEqual(result.returncode, 2, text)
-        self.assertIn("nobody approved this node in time", text)
-        self.assertIn("--no-enroll", text)
-        self.assertFalse(self.boot_log.exists())
-        self.assertFalse((self.state / "installed").exists())
-
-    def test_a_workflow_refusal_is_shown_with_its_fix(self):
-        github, env = self._enrolling()
-        process = self._start(["ci", "--yes"], env)
-        link, lines = self._read_request(process)
-        self._owner_approves(github, link, answer="fleet-error: Vault has no age key for the ci role. Run `just setup`.")
-        rest, _ = process.communicate(timeout=60)
-        text = "".join(lines) + rest
-        self.assertEqual(process.returncode, 2, text)
-        self.assertIn("just setup", text)
-        self.assertFalse(self.boot_log.exists())
-
-    def test_a_token_that_vault_no_longer_honors_stops_before_the_wipe(self):
-        github, env = self._enrolling()
-        process = self._start(["ci", "--yes"], env)
-        link, lines = self._read_request(process)
-        self.curl_mode.write_text("bad-token")
-        self._owner_approves(github, link)
-        rest, _ = process.communicate(timeout=60)
-        self.assertEqual(process.returncode, 2, "".join(lines) + rest)
-        self.assertIn("spent, expired", rest)
-        self.assertIn("approved again", rest)
-        self.assertFalse(self.boot_log.exists())
-
-    def test_the_approval_is_for_the_chosen_role(self):
-        github, env = self._enrolling({"FLEET_ENROLL_WAIT": "4"})
-        process = self._start(["ci", "--yes"], env)
-        link, lines = self._read_request(process)
-        self._owner_approves(github, link, role="devbox")
-        rest, _ = process.communicate(timeout=60)
-        self.assertEqual(process.returncode, 2, "".join(lines) + rest)
-        self.assertFalse(self.boot_log.exists(), "a token for another role must never be used")
-
-    def test_no_enroll_installs_without_asking_github(self):
-        github, env = self._enrolling()
-        result = self.run_entry(["ci", "--yes", "--no-enroll"], "", env)
-        self.assertEqual(result.returncode, 0, self.combined(result))
-        self.assertRegex(self.combined(result), r"WARN\s+enrollment")
-        self.assertEqual(github.requests, [])
-        self.assertNotIn("fleet.enroll=", self.boot_log.read_text())
-
-    def test_a_supplied_token_skips_the_approval(self):
-        github, env = self._enrolling()
-        token = self.root / "token"
-        token.write_text("hvs.CAESIwrapped\n")
-        result = self.run_entry(["ci", "--yes", "--token-file", str(token)], "", env)
+        env = {**self.env, 'FLEET_GITHUB_API': github.url}
+        env.pop('FLEET_NO_ENROLL', None)
+        result = self.run_entry(['ci', '--yes'], '', env)
         self.assertEqual(result.returncode, 0, self.combined(result))
         self.assertEqual(github.requests, [])
+        self.assertNotIn('issues/new?', self.combined(result))
+        self.assertNotIn('fleet.enroll=', self.boot_log.read_text())
 
-    def test_doctor_announces_the_approval_without_asking_for_it(self):
-        github, env = self._enrolling()
-        result = self.run_entry(["doctor", "ci"], "", env)
-        text = self.combined(result)
-        self.assertEqual(result.returncode, 0, text)
-        self.assertRegex(text, r"info\s+enrollment\s+the repository owner will be asked")
-        self.assertEqual(github.requests, [])
-
-    def test_a_machine_that_is_already_installed_is_not_asked_again(self):
-        github, env = self._enrolling()
-        (self.state / "installed").write_text("role=ci\ndisk=whatever\nstatus=installed\n")
-        result = self.run_entry(["ci", "--yes"], "", env)
-        self.assertEqual(github.requests, [], self.combined(result))
-
-    def test_hard_reinstall_requests_fresh_approval_even_for_the_existing_role(self):
-        github, env = self._enrolling()
-        (self.state / "installed").write_text("role=ci\nstatus=installed\n")
-        process = self._start(["ci", "--reinstall", "--yes"], env)
-        link, lines = self._read_request(process)
-        self.assertFalse(self.boot_log.exists(), "approval must precede boot preparation")
-        self._owner_approves(github, link)
-        rest, _ = process.communicate(timeout=60)
-        text = "".join(lines) + rest
-        self.assertEqual(process.returncode, 0, text)
-        self.assertIn("Hard reinstall requested", text)
-        self.assertIn("fleet.enroll=hvs.CAESIapproved", self.boot_log.read_text())
-        self.assertNotIn("hvs.CAESIapproved", text)
+    def test_legacy_no_enroll_flag_cannot_bypass_live_app_approval(self):
+        result = self.run_entry(['ci', '--yes', '--no-enroll'], '', self.env)
+        self.assertEqual(result.returncode, 0, self.combined(result))
+        self.assertNotIn('fleet.enroll=', self.boot_log.read_text())
 
     def test_reinstall_flag_cannot_turn_flash_into_an_internal_disk_write(self):
         result = self.run_entry(["flash", "--reinstall", "--yes"])

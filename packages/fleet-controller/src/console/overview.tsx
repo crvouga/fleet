@@ -107,6 +107,15 @@ function RoleCards({ state }: { state: ConsoleState }) {
                 <Table.Td>{state.fleet.summary.byRole[role].total}</Table.Td>
               </Table.Tr>
             ))}
+            {state.fleet.summary.unassigned.total > 0 && (
+              <Table.Tr>
+                <Table.Td>
+                  <Anchor href="/nodes?role=unassigned">unassigned</Anchor>
+                </Table.Td>
+                <Table.Td>{state.fleet.summary.unassigned.online}</Table.Td>
+                <Table.Td>{state.fleet.summary.unassigned.total}</Table.Td>
+              </Table.Tr>
+            )}
           </Table.Tbody>
         </Table>
       </Stack>

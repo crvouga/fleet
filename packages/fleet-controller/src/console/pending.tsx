@@ -13,6 +13,7 @@ import { ErrorNotice, PageHeading } from '@pkgs/admin-ui/components';
 import type { NodeView } from '../types';
 import type { ConsoleState } from './model';
 import { useAction } from './action';
+import { ApproveWithRole } from './role-select';
 export function Pending({
   state,
   reload,
@@ -69,21 +70,21 @@ function PendingCard({
             {view.label}
           </Anchor>
           <Text size="sm" c="dimmed">
-            Requested role: {view.role} · {view.remoteAddr ?? 'Address unknown'}
+            Runs: {view.observedRole ?? 'not reported'} · Hardware:{' '}
+            {view.hardwareCapabilities.join(', ') || 'nothing detected'} ·{' '}
+            {view.remoteAddr ?? 'Address unknown'}
           </Text>
           <Text size="xs" ff="monospace" c="dimmed">
             {view.id}
           </Text>
         </Stack>
         <Group>
-          <Button
-            loading={action.busy}
-            onClick={() =>
-              action.run(`/nodes/${view.id}/approve`, { next: '/pending' })
-            }
-          >
-            Approve
-          </Button>
+          <ApproveWithRole
+            id={view.id}
+            label="Approve"
+            action={action}
+            next="/pending"
+          />
           <Button
             variant="default"
             disabled={action.busy}
@@ -115,18 +116,13 @@ function RejectedList({
         {rejected.map(({ view }) => (
           <Group key={view.id} justify="space-between">
             <Anchor href={`/nodes/${view.id}`}>{view.label}</Anchor>
-            <Button
+            <ApproveWithRole
+              id={view.id}
+              label="Approve anyway"
+              action={action}
+              next="/pending"
               size="xs"
-              variant="light"
-              loading={action.busy}
-              onClick={() =>
-                action.run(`/nodes/${view.id}/approve`, {
-                  next: '/pending',
-                })
-              }
-            >
-              Approve anyway
-            </Button>
+            />
           </Group>
         ))}
       </Stack>
