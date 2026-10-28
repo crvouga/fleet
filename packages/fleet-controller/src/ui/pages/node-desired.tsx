@@ -105,6 +105,35 @@ function StateFacts(props: { view: NodeView }) {
   );
 }
 
+/** A pending next recipient and the rotate action (a plain POST form, audited as a node setting). */
+function AgeRotation(props: { view: NodeView }) {
+  const { view } = props;
+  const secrets =
+    view.role === null ? 'its role secrets' : `the ${view.role} role secrets`;
+  return (
+    <div class="space-y-2">
+      {view.ageRecipientNext !== null && (
+        <div role="status" class="text-sm text-fg-2">
+          <p class="eyebrow">Next age recipient</p>
+          <CopyableCode
+            text={view.ageRecipientNext}
+            label="Copy next age recipient"
+          />
+          <p class="mt-1">
+            Rotation pending: re-encrypt {secrets} for the next recipient and
+            merge. Remove the old recipient after the node reports the new one.
+          </p>
+        </div>
+      )}
+      <form method="post" action={`/nodes/${view.id}/recovery/rotate-age-key`}>
+        <button type="submit" class="btn btn-sm">
+          Rotate age identity
+        </button>
+      </form>
+    </div>
+  );
+}
+
 function Issues(props: { issues: readonly string[] }) {
   if (props.issues.length === 0) return null;
   return (
@@ -131,6 +160,7 @@ export function DesiredStatePanel(props: { view: NodeView }) {
       </h2>
       <RoleForm view={view} />
       <StateFacts view={view} />
+      <AgeRotation view={view} />
       <Issues issues={view.reconcileIssues} />
     </section>
   );

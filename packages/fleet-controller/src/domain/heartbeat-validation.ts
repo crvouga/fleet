@@ -7,6 +7,7 @@ import type {
 import { isObservedRole } from '../types';
 import {
   readAgeRecipient,
+  readAgeRecipientNext,
   readClosure,
   readDesiredRevision,
   readHardware,
@@ -277,6 +278,7 @@ export function validateHeartbeat(input: unknown): HeartbeatResult {
     ...readIdentity(problems, input),
     ...readHardware(problems, input['hardware']),
     ...readAgeRecipient(problems, input['ageRecipient']),
+    ...readAgeRecipientNext(problems, input['ageRecipientNext']),
     ...readReconcile(problems, input['reconcile']),
     ...readLists(problems, input),
     revision: readString(problems, 'revision', input['revision'], {

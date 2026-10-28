@@ -31,57 +31,86 @@ class Folder(unittest.TestCase):
 
 
 class MarkerCompatibilityTest(Folder):
-    def test_a_withdrawn_marker_from_an_older_fleet_remove_is_still_read(self):
+    def test_markers_from_older_installers_still_read_without_their_role(self):
+        for role in ("ci", "devbox", "unknown", "mainframe"):
+            (self.root / "installed").write_text(f"role={role}\nstatus=installed\n")
+            self.assertEqual(decide.checked_marker(self.root, "installed"), {"status": "installed"})
+            self.assertTrue(decide.installed(self.root))
         (self.root / "withdrawn").write_text("status=withdrawn\nrole=unknown\n")
-        marker = decide.checked_marker(self.root, "withdrawn")
-        self.assertEqual(marker, {"status": "withdrawn"})
-        self.assertFalse(decide.installed_for("ci", self.root))
+        self.assertEqual(decide.checked_marker(self.root, "withdrawn"), {"status": "withdrawn"})
+        self.assertFalse(decide.installed(self.root), "a withdrawn node is reinstalled to rejoin")
 
-    def test_other_unknown_roles_are_still_corruption(self):
-        (self.root / "installed").write_text("status=installed\nrole=unknown\n")
+    def test_a_malformed_marker_is_still_corruption(self):
+        (self.root / "installed").write_text("status=staged\n")
         with self.assertRaises(decide.Invariant):
             decide.checked_marker(self.root, "installed")
-        (self.root / "withdrawn").write_text("status=withdrawn\nrole=mainframe\n")
-        with self.assertRaises(decide.Invariant):
-            decide.checked_marker(self.root, "withdrawn")
 
 
-class InterruptedReinstallTest(Folder):
-    """An earlier attempt was killed after withdrawing the CI runner and before its cleanup."""
+class JobAdmissionTest(Folder):
+    """A node that runs CI jobs is idle and closed to new jobs before its disk can
+    be erased; a handoff that fails before the reboot opens admission again."""
 
     def setUp(self):
         super().setUp()
         self.iso = self.root / "fleet-installer.iso"
         self.iso.write_bytes(b"iso")
-        (self.root / "withdrawn").write_text("status=withdrawn\nrole=ci\n")
-        (self.root / "handoff").write_text("role=ci\ndisk=x\nstatus=staged\nrestore_ci=1\n")
-        busy = self.root / "busy"
-        busy.mkdir()
+        self.busy = self.root / "busy"
+        self.busy.mkdir()
+        self.runner = self.root / "runner.conf"
+        self.runner.write_text("scope=repository\n")
+        self.resumed = self.root / "resumed"
         resume = self.root / "resume"
-        resume.write_text("#!/bin/sh\nexit 0\n")
+        resume.write_text(f"#!/bin/sh\ntouch {self.resumed}\nrm -f {self.busy}/draining\n")
         resume.chmod(0o755)
-        env = {"FLEET_BUSY_DIR": str(busy), "FLEET_RESUME": str(resume)}
+        env = {"FLEET_BUSY_DIR": str(self.busy), "FLEET_RESUME": str(resume), "FLEET_RUNNER_CONF": str(self.runner)}
         for patch in (mock.patch.dict(os.environ, env), mock.patch.object(decide, "wifi_profile", return_value=None),
-                      mock.patch.object(decide, "check_installer_readiness"), mock.patch.object(decide, "retire_runner_for_install")):
+                      mock.patch.object(decide, "check_installer_readiness")):
             patch.start()
             self.addCleanup(patch.stop)
 
     def install(self, staged):
-        with mock.patch.object(decide, "stage_reboot", return_value=staged):
-            return decide.perform_install("Linux", "ci", str(self.iso), None, None, self.root, {"ok": True, "disk_id": "x"})
+        seen = {}
 
-    def test_a_successful_retry_keeps_the_duty_to_restore_the_runner(self):
-        self.assertEqual(self.install(0), 0)
-        self.assertIn("restore_ci=1", (self.root / "handoff").read_text())
+        def stage(*args, **kwargs):
+            seen["draining"] = (self.busy / "draining").exists()
+            seen["handoff"] = (self.root / "handoff").read_text()
+            return staged
+        with mock.patch.object(decide, "stage_reboot", stage):
+            code = decide.perform_install("Linux", str(self.iso), None, self.root, {"ok": True, "disk_id": "x"})
+        return code, seen
 
-    def test_a_failed_retry_restores_the_runner_it_inherited(self):
-        self.assertEqual(self.install(1), 1)
-        self.assertFalse((self.root / "withdrawn").exists(), "the inherited withdrawal is undone, not left forever")
+    def test_admission_is_closed_before_the_handoff_and_the_handoff_names_no_role(self):
+        code, seen = self.install(0)
+        self.assertEqual(code, 0)
+        self.assertTrue(seen["draining"])
+        self.assertEqual(seen["handoff"], "disk=x\nstatus=staged\n")
+        self.assertFalse((self.root / "withdrawn").exists(), "a reinstall never withdraws the runner")
+
+    def test_a_failed_handoff_reopens_admission(self):
+        code, _ = self.install(1)
+        self.assertEqual(code, 1)
+        self.assertTrue(self.resumed.exists())
+        self.assertFalse((self.busy / "draining").exists())
+        self.assertFalse((self.busy / "agent-drained").exists())
         self.assertFalse((self.root / "handoff").exists())
 
+    def test_a_running_job_stops_the_install_before_anything_is_staged(self):
+        (self.busy / "slot-1").mkdir()
+        (self.busy / "slot-1/busy").write_text("running\n")
+        with self.assertRaisesRegex(decide.Invariant, "job started"):
+            self.install(0)
+        self.assertFalse((self.root / "handoff").exists())
+
+    def test_a_machine_without_runner_slots_is_not_drained(self):
+        self.runner.unlink()
+        code, seen = self.install(1)
+        self.assertEqual(code, 1)
+        self.assertFalse(seen["draining"])
+        self.assertFalse(self.resumed.exists())
+
     def test_an_intentional_removal_is_never_undone(self):
-        (self.root / "handoff").unlink()
-        self.assertEqual(self.install(1), 1)
+        (self.root / "withdrawn").write_text("status=withdrawn\n")
+        self.assertEqual(self.install(1)[0], 1)
         self.assertTrue((self.root / "withdrawn").exists())
 
 
@@ -103,8 +132,13 @@ class KexecTest(Folder):
                 mock.patch.object(decide.shutil, "which", return_value="/sbin/kexec"), \
                 mock.patch.object(decide, "extract_boot", return_value=(str(kernel), str(initrd), "fleet.role=ci")), \
                 mock.patch.object(decide, "run_logged", run), mock.patch.object(decide, "say"):
-            self.assertEqual(decide.stage_reboot("Linux", "ci", str(iso), token="hvs.token"), 1)
+            self.assertEqual(decide.stage_reboot("Linux", str(iso), token="enroll-token-123"), 1)
         self.assertEqual(calls[-1], ["kexec", "-u"])
+        load = " ".join(calls[0])
+        self.assertNotIn("enroll-token-123", load)
+        self.assertNotIn("fleet.role=", load)
+        self.assertIn("--initrd=" + str(self.root / "initrd-handoff"), load)
+        self.assertFalse((self.root / "initrd-handoff").exists(), "the private handoff does not outlive the attempt")
 
 
 class StagedCopySpaceTest(Folder):
@@ -115,8 +149,8 @@ class StagedCopySpaceTest(Folder):
         usage = SimpleNamespace(total=1, used=1, free=size // 2)
         with mock.patch.dict(decide.NET, {"probe": lambda: (None, size)}), \
                 mock.patch.object(decide.shutil, "disk_usage", return_value=usage), \
-                mock.patch.dict(os.environ, {"FLEET_NO_ENROLL": "1", "FLEET_EUID": "0", "FLEET_ARCH": "x86_64"}):
-            found = {item["name"]: item for item in decide.preflight("Linux", None, "media", None, self.root, need_root=False)}
+                mock.patch.dict(os.environ, {"FLEET_EUID": "0", "FLEET_ARCH": "x86_64"}):
+            found = {item["name"]: item for item in decide.preflight("Linux", "media", None, self.root, need_root=False)}
         self.assertEqual(found["space"]["status"], "ok", found["space"])
 
 
@@ -134,13 +168,14 @@ class NewerReleaseTest(Folder):
     def test_a_readiness_manifest_from_a_newer_release_says_so(self):
         release = self.root / "release"
         release.mkdir()
+        for document in ({"version": 3}, {"version": 1, "roles": {}}):
+            (release / "fleet-installer.readiness.json").write_text(json.dumps(document))
+            with mock.patch.object(decide.wifi_module(), "simulated", return_value=False), self.assertRaises(decide.Invariant) as caught:
+                decide.check_release_readiness("0" * 64, (release / "fleet-installer.iso").as_uri())
+            self.assertIn("latest Fleet installer", caught.exception.fix)
         (release / "fleet-installer.readiness.json").write_text(json.dumps({"version": 2}))
         with mock.patch.object(decide.wifi_module(), "simulated", return_value=False), self.assertRaises(decide.Invariant) as caught:
-            decide.check_release_readiness("ci", "0" * 64, (release / "fleet-installer.iso").as_uri())
-        self.assertIn("latest Fleet installer", caught.exception.fix)
-        (release / "fleet-installer.readiness.json").write_text(json.dumps({"version": 1, "roles": {}}))
-        with mock.patch.object(decide.wifi_module(), "simulated", return_value=False), self.assertRaises(decide.Invariant) as caught:
-            decide.check_release_readiness("devbox", "0" * 64, (release / "fleet-installer.iso").as_uri())
+            decide.check_release_readiness("0" * 64, (release / "fleet-installer.iso").as_uri())
         self.assertIn("newer than this installer", caught.exception.what)
 
 

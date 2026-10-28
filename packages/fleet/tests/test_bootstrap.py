@@ -37,20 +37,20 @@ class BootstrapTests(unittest.TestCase):
 
     def test_non_tty_points_at_the_machine(self):
         result = subprocess.run(
-            [str(SCRIPT), "ci", "192.0.2.10"],
+            [str(SCRIPT), "192.0.2.10"],
             capture_output=True,
             text=True,
             env=self.env,
             check=False,
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("fleet-install ci", result.stderr)
+        self.assertIn("run: fleet-install", result.stderr)
         self.assertFalse(self.log.exists())
 
     def test_tty_sshs_fleet_install(self):
         master, slave = pty.openpty()
         proc = subprocess.Popen(
-            [str(SCRIPT), "devbox", "192.0.2.10"],
+            [str(SCRIPT), "192.0.2.10"],
             stdin=slave,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -64,13 +64,13 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, err.decode())
         command = self.log.read_text()
         self.assertIn("root@192.0.2.10", command)
-        self.assertIn("fleet-install devbox", command)
+        self.assertTrue(command.rstrip().endswith("FLEET_AUTO=1 fleet-install"), command)
         self.assertNotIn("nix", command)
         self.assertNotIn("age", command)
 
-    def test_gpu_is_rejected_locally(self):
+    def test_a_role_is_rejected_locally(self):
         result = subprocess.run(
-            [str(SCRIPT), "ci-gpu", "192.0.2.10"],
+            [str(SCRIPT), "ci", "192.0.2.10"],
             capture_output=True,
             text=True,
             env=self.env,

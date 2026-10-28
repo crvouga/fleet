@@ -59,6 +59,12 @@ def main(argv):
             "--hidden-import", "fleet_wifi", "--hidden-import", "wifi_capture",
             "--hidden-import", "certifi", "--collect-data", "certifi",
         ]
+        if system == "windows":
+            # Attribution is build metadata; Authenticode separately proves the publisher.
+            resource = (HERE / "windows-version-info.txt").read_text()
+            version_info = stage / "windows-version-info.txt"
+            version_info.write_text(resource.replace("@FLEET_VERSION@", repr(version)), encoding="utf-8")
+            command += ["--version-file", str(version_info)]
         if system == "macos":
             command += ["--windowed", "--osx-bundle-identifier", "org.fleet.installer"]
         run([*command, str(stage / "main.py")], cwd=stage)

@@ -24,10 +24,13 @@ function launch(state: string, action = 'run') {
 
 async function ready(state: string, child: Child) {
   for (let attempt = 0; attempt < 300; attempt++) {
-    if (child.exitCode !== null)
-      throw new Error(
-        `Local startup exited ${child.exitCode}: ${await new Response(child.stderr).text()}`
-      );
+    if (child.exitCode !== null) {
+      const output =
+        child.stderr instanceof ReadableStream
+          ? await new Response(child.stderr).text()
+          : 'No stderr stream';
+      throw new Error(`Local startup exited ${child.exitCode}: ${output}`);
+    }
     try {
       const runtime = JSON.parse(
         await readFile(join(state, 'runtime.json'), 'utf8')

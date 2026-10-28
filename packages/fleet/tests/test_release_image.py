@@ -27,7 +27,7 @@ class ReleaseImageTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.source = self.root / "source.iso"
         tree = iso_fixture.installer_tree()
-        tree['fleet-readiness.json'] = json.dumps({'version': 1, 'roles': {role: {'blocked': []} for role in decide.ROLES}}).encode()
+        tree['fleet-readiness.json'] = json.dumps({'version': 2, 'blocked': []}).encode()
         image = iso_fixture.build(tree).ljust(98304, b'x')
         self.source.write_bytes(image)
         self.release = self.root / "release"
@@ -58,7 +58,7 @@ class ReleaseImageTests(unittest.TestCase):
                     continue
                 with self.subTest(path=path, replacement=replacement):
                     tree = iso_fixture.installer_tree()
-                    tree['fleet-readiness.json'] = b'{"version":1,"roles":{}}'
+                    tree['fleet-readiness.json'] = b'{"version":2,"blocked":[]}'
                     parent = tree
                     for name in path[:-1]:
                         parent = parent[name]
@@ -72,15 +72,19 @@ class ReleaseImageTests(unittest.TestCase):
                         release_image.package_image(self.source, output, 20000)
                     self.assertFalse(output.exists())
 
-    def test_release_requires_a_boot_entry_for_every_role(self):
-        for role in decide.ROLES:
-            with self.subTest(role=role):
+    def test_release_requires_a_boot_entry_and_the_single_blocked_list(self):
+        tree = iso_fixture.installer_tree()
+        tree['fleet-readiness.json'] = b'{"version":2,"blocked":[]}'
+        tree['isolinux']['isolinux.cfg'] = b'DEFAULT boot\n'
+        self.source.write_bytes(iso_fixture.build(tree))
+        with self.assertRaises(decide.Invariant):
+            release_image.validate_image(self.source)
+        for readiness in (b'{"version":1,"roles":{"ci":{"blocked":[]}}}', b'{"version":2}', b'{"version":2,"blocked":[1]}'):
+            with self.subTest(readiness=readiness):
                 tree = iso_fixture.installer_tree()
-                tree['fleet-readiness.json'] = b'{"version":1,"roles":{}}'
-                config = tree['isolinux']['isolinux.cfg']
-                tree['isolinux']['isolinux.cfg'] = config.replace(f'fleet.role={role}'.encode(), b'fleet.role=missing')
+                tree['fleet-readiness.json'] = readiness
                 self.source.write_bytes(iso_fixture.build(tree))
-                with self.assertRaises(decide.Invariant):
+                with self.assertRaises(ValueError):
                     release_image.validate_image(self.source)
 
     def test_both_probes_report_the_whole_size(self):

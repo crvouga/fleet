@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
-import { ADMIN_TOKEN, CI_ROLE_TOKEN } from '../support/controller';
+import { ADMIN_TOKEN, CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { at, heartbeatBody, nodeIdOf, secretOf, T0 } from '../support/fixtures';
 
 describeController('admin node endpoints', (ctx) => {
   const enroll = (n: number, role: 'ci' | 'web' = 'ci') =>
     ctx().h.register(n, {
-      roleToken: role === 'ci' ? CI_ROLE_TOKEN : undefined,
+      enrollmentToken: role === 'ci' ? CI_ENROLLMENT_TOKEN : undefined,
       role,
       hostname: `${role}-${nodeIdOf(n).slice(0, 4)}`,
     });
@@ -72,7 +72,7 @@ describeController('admin node endpoints', (ctx) => {
       const reply = await h.admin('GET', '/v1/nodes');
       expect(reply.text).not.toContain(hashes[0]?.['secret_hash']);
       expect(reply.text).not.toContain(secretOf(1));
-      expect(reply.text).not.toContain(CI_ROLE_TOKEN);
+      expect(reply.text).not.toContain(CI_ENROLLMENT_TOKEN);
       expect(reply.text).not.toContain('secret');
     });
 
@@ -197,7 +197,8 @@ describeController('admin node endpoints', (ctx) => {
       await enroll(1);
       const bad: [unknown, string][] = [
         [{}, 'at least one'],
-        [{ role: 'web' }, 'role cannot be changed'],
+        [{ role: 'web' }, 'role must be one of ci, devbox, or null'],
+        [{ role: 'base' }, 'role must be one of ci, devbox, or null'],
         [{ approval: 'approved' }, 'approval cannot be changed'],
         [{ displayName: 'x'.repeat(81) }, 'displayName'],
         [{ displayName: 5 }, 'displayName'],
@@ -278,8 +279,10 @@ describeController('admin node endpoints', (ctx) => {
       await h.register(1);
       await h.admin('PUT', '/v1/settings/fleet', { sync: { paused: true } });
       await act('approve');
-      expect((await beat(1)).body.config.values).toEqual({
-        sync: { paused: true },
+      expect((await beat(1)).body.desired).toMatchObject({
+        role: null,
+        closure: 'base',
+        values: { sync: { paused: true } },
       });
     });
   });

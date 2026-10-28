@@ -58,7 +58,8 @@ const SPECS: readonly Spec[] = [
     body: {
       revision: LATEST,
       reconcile: { phase: 'converged', issues: [] },
-      ageRecipient: 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+      ageRecipient:
+        'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
       capabilities: ['high-mem'],
       cpu: { cores: 32, model: 'AMD Ryzen 9 9955HX' },
       memory: { totalMiB: 128 * GIB, availableMiB: 62 * GIB },
@@ -80,7 +81,8 @@ const SPECS: readonly Spec[] = [
       closure: 'ci-gpu',
       hardware: { capabilities: ['gpu'] },
       reconcile: { phase: 'converged', issues: [] },
-      ageRecipient: 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppppp',
+      ageRecipient:
+        'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppppp',
       capabilities: ['gpu'],
       cpu: { cores: 16, model: 'AMD Ryzen 7 7840U' },
       memory: { totalMiB: 64 * GIB, availableMiB: 21 * GIB },
@@ -253,7 +255,8 @@ const SPECS: readonly Spec[] = [
     body: {
       revision: OLD,
       hardware: { capabilities: ['gpu'] },
-      ageRecipient: 'age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
+      ageRecipient:
+        'age1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',
       reconcile: {
         phase: 'blocked',
         issues: [
@@ -279,7 +282,8 @@ const SPECS: readonly Spec[] = [
       revision: LATEST,
       hardware: { capabilities: [] },
       reconcile: { phase: 'converged', issues: [] },
-      ageRecipient: 'age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+      ageRecipient:
+        'age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
       cpu: { cores: 8, model: 'Intel Core i5-1240P' },
       memory: { totalMiB: 32 * GIB, availableMiB: 29 * GIB },
       load1: 0.1,

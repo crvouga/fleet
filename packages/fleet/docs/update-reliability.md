@@ -3,6 +3,11 @@
 Once a node is enrolled, routine system changes go through Git and CI. No SSH
 command, reinstall or per-node approval is part of updating an existing node.
 This applies after converting a Windows machine to its NixOS Fleet role too.
+A role assigned in Fleet (or with `fleet-target` on a node without a controller)
+is converged the same way: the node builds the assigned closure from the same
+revision and treats the change like a kernel update (drain, boot, staggered
+reboot, fallback and rollback). `/run/fleet/reconcile.json` and the node page
+say whether the node is `converged`, `progressing` or `blocked`, and why.
 
 1. Merge the role configuration or code into `main`.
 2. Each node builds the exact Git revision with upstream Nix substitutes and

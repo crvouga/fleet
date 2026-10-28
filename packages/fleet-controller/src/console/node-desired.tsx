@@ -2,7 +2,9 @@
 import {
   Alert,
   Badge,
+  Button,
   Code,
+  Group,
   List,
   Paper,
   SimpleGrid,
@@ -11,7 +13,7 @@ import {
   Title,
 } from '@mantine/core';
 import { CopyValue, ErrorNotice } from '@pkgs/admin-ui/components';
-import type { Convergence } from '../types';
+import type { Convergence, NodeView } from '../types';
 import type { FleetEntry } from '../ui/lib/fleet-data';
 import { useAction } from './action';
 import { AssignRole } from './role-select';
@@ -49,6 +51,52 @@ function Fact({ label, value }: { label: string; value: string | null }) {
       ) : (
         <Code>{value}</Code>
       )}
+    </Stack>
+  );
+}
+
+/** The secrets the operator re-encrypts for a node's next recipient. */
+function roleSecretsLabel(role: NodeView['role']): string {
+  return role === null ? 'its role secrets' : `the ${role} role secrets`;
+}
+
+/** The node's age recipient, a pending next one, and the rotate action. */
+function AgeIdentity({
+  view,
+  action,
+}: {
+  view: NodeView;
+  action: ReturnType<typeof useAction>;
+}) {
+  return (
+    <Stack gap="xs">
+      {view.ageRecipient === null ? (
+        <Fact label="Age recipient" value={null} />
+      ) : (
+        <CopyValue label="Age recipient" value={view.ageRecipient} />
+      )}
+      {view.ageRecipientNext !== null && (
+        <>
+          <CopyValue label="Next age recipient" value={view.ageRecipientNext} />
+          <Alert color="yellow" title="Rotation pending">
+            Re-encrypt {roleSecretsLabel(view.role)} for the next recipient and
+            merge. The node switches once it can decrypt them; remove the old
+            recipient after it reports the new one.
+          </Alert>
+        </>
+      )}
+      <Group>
+        <Button
+          size="xs"
+          variant="light"
+          loading={action.busy}
+          onClick={() =>
+            action.run(`/nodes/${view.id}/recovery/rotate-age-key`, {})
+          }
+        >
+          Rotate age identity
+        </Button>
+      </Group>
     </Stack>
   );
 }
@@ -91,11 +139,7 @@ export function NodeDesiredState({
           <Fact label="Desired revision" value={view.desiredRevision} />
           <Fact label="Applied revision" value={view.appliedRevision} />
         </SimpleGrid>
-        {view.ageRecipient === null ? (
-          <Fact label="Age recipient" value={null} />
-        ) : (
-          <CopyValue label="Age recipient" value={view.ageRecipient} />
-        )}
+        <AgeIdentity view={view} action={action} />
         {view.reconcileIssues.length > 0 && (
           <Alert color="orange" title="What blocks convergence">
             <List size="sm">

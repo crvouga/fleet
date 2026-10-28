@@ -67,6 +67,19 @@ function refusal(
   return null;
 }
 
+/**
+ * Approval may assign the role in the same step; other transitions ignore it.
+ * An empty choice keeps the stored role, so a reinstalled machine keeps its role.
+ */
+function approvalRole(
+  rule: Transition,
+  form: Record<string, unknown>
+): ReturnType<typeof formRole> {
+  if (rule.to !== 'approved' || form['role'] === '')
+    return { ok: true, role: undefined };
+  return formRole(form['role']);
+}
+
 function transition(deps: AppDeps, name: string): Handler {
   const rule = TRANSITIONS[name];
   return action(deps, async (c, actor) => {
@@ -81,13 +94,10 @@ function transition(deps: AppDeps, name: string): Handler {
     const refused = refusal(rule, node, form, next);
     if (refused !== null)
       return back(c, refused.to, { kind: 'error', text: refused.text });
-    // Approval may assign the role in the same step; other transitions ignore it.
-    const role = rule.to === 'approved' ? formRole(form['role']) : null;
-    if (role !== null && !role.ok)
-      return back(c, next, { kind: 'error', text: BAD_ROLE });
+    const role = approvalRole(rule, form);
+    if (!role.ok) return back(c, next, { kind: 'error', text: BAD_ROLE });
     await deps.store.setApproval(node.id, rule.to, actor);
-    const chosen = role?.ok ? role.role : undefined;
-    const as = await assignWith(deps, node.id, chosen, actor);
+    const as = await assignWith(deps, node.id, role.role, actor);
     return back(c, next, {
       kind: 'success',
       text: `${node.displayName ?? node.hostname} ${rule.done}${as}.`,

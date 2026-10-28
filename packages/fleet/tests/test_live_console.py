@@ -32,7 +32,7 @@ class LiveConsoleTests(unittest.TestCase):
         toplevel = self.root / "system"
         (toplevel / "etc/fleet").mkdir(parents=True)
         (toplevel / "etc/fleet/revision").write_text("c839ee07aabbccddeeff00112233445566778899\n")
-        (self.root / "manifest").write_text(f"ci {toplevel}\ndisko /x\n")
+        (self.root / "manifest").write_text(f"base {toplevel}\ndisko /x\n")
         self.log = self.root / "install.log"
         self.console = self.root / "console"
         self.urls = self.root / "qr-urls"
@@ -112,7 +112,7 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertEqual(query["template"], ["fleet-installer.yml"])
         self.assertEqual(query["title"], ["Fleet installer screen: FLEET_APPROVAL_REQUIRED"])
         self.assertIn("step 3 of 7", query["step"][0])
-        self.assertIn("ci c839ee07 windows stopped-before-erase exit=2 step=3/7", query["diagnostic"][0])
+        self.assertIn("base c839ee07 windows stopped-before-erase exit=2 step=3/7", query["diagnostic"][0])
         self.assertNotIn("%20", url)
         for text in (screen, url, (self.root / "state/state.json").read_text()):
             self.assertNotIn(SECRET, text)
@@ -168,7 +168,7 @@ class LiveConsoleTests(unittest.TestCase):
             self.console.write_text("")
             self.live("tick")
             screen = self.console.read_text()
-            self.assertIn("[>] 6. Install the ci system", screen)
+            self.assertIn("[>] 6. Install the Fleet base system", screen)
             self.assertIn("Still working", screen)
             self.assertIn("nixos-install of nixos-system-ci", " ".join(screen.split()))
         self.live("stopped", "--status", "1")

@@ -2,8 +2,8 @@
 
 Readiness belongs to each operator deployment. Results from another fleet,
 repository, host, or historical infrastructure are not proof that yours works.
-Fleet does not include cloud provisioning, a Vault/OpenBao deployment, a GitHub
-App, DNS, an identity provider, or credentials.
+Fleet does not include cloud provisioning, a GitHub App, DNS, an identity
+provider, or credentials.
 
 Before publishing an installer:
 
@@ -14,17 +14,17 @@ Before publishing an installer:
   [operator deployment flake](../../../examples/deployment/flake.nix). Commit
   the deployment's `flake.lock`. The default source is deliberately unconfigured;
   installation is blocked until you provide it.
-- Set your emergency SSH public keys. For CI, configure your GitHub App,
-  repositories, and encrypted role credentials. Each role needs its own age key.
+- Set your emergency root SSH public keys in Git. For CI, configure your GitHub
+  App, repositories, and encrypted role credentials. Each role has its own
+  secrets file; `.sops.yaml` must name recipients for `secrets/fleet.yaml`.
 - Build the installer from that exact configured revision. Publish the image,
-  matching checksums, readiness sidecar, and parts with `scripts/release-image.py`.
+  matching checksums, readiness sidecar (one `blocked` list for the platform),
+  and parts with `scripts/release-image.py`.
   Set `FLEET_CONTROLLER_URL` on installer clients to your Fleet app;
   use `FLEET_INSTALLER_URL` for an image hosted elsewhere.
 - If using the optional controller, follow [CONFIGURATION.md](../../../CONFIGURATION.md),
-  validate startup, browser sign-in, owner-managed access, and node approval.
-- If using shared-key enrollment, configure your own Vault/OpenBao, role documents,
-  wrapping policy and your operator-owned trust configuration.
-  A standalone role without shared encrypted secrets can use `--no-enroll`.
+  validate startup, browser sign-in, owner-managed access, node approval and
+  role assignment. Optional enrollment tokens are operator configuration.
 
 Before relying on a physical node:
 
@@ -33,8 +33,14 @@ Before relying on a physical node:
 - Qualify firmware, network and installed Wi-Fi on a backed-up spare. Windows
   conversion needs x86_64 UEFI/GPT and Secure Boot off. macOS/ARM supports media
   creation, not unattended conversion into an ARM NixOS node.
-- Check installed role, revision, service health and SSH host-key fingerprints
-  from the local console. For managed nodes, require approved fresh heartbeats.
+- Install, approve, then assign the role in the Fleet app. Check the running
+  role, revision, service health and SSH host-key fingerprints from the local
+  console. For managed nodes, require approved fresh heartbeats.
+- After assigning a role with secrets, add the node's reported age recipient:
+  save `GET /v1/recipients` to a file, run
+  `python3 scripts/fleet-keys.py --operator age1... recipients.json`, write the
+  output to `.sops.yaml`, run `sops updatekeys` and merge it through review.
+  Until then the node reports `FLEET_SECRETS_RECIPIENT_MISSING`.
 - For CI, require actual online GitHub runner registrations and a successful
   trusted project job. Follow [project onboarding](onboard-project.md); downloaded
   Ubuntu tools and browsers are not automatically compatible with NixOS.

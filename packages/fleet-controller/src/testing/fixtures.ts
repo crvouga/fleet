@@ -74,6 +74,41 @@ export interface NodeOptions {
   readonly intervalSeconds?: number;
 }
 
+/** The observed columns a heartbeat body leaves on a stored row. */
+function observedOf(
+  body: HeartbeatBody,
+  observedRole: ObservedRole | null
+): Pick<
+  NodeRow,
+  | 'observedRole'
+  | 'observedClosure'
+  | 'ageRecipient'
+  | 'hardware'
+  | 'reconcile'
+  | 'appliedRevision'
+> {
+  return {
+    observedRole,
+    observedClosure: observedRole === null ? null : body.closure,
+    ageRecipient: body.ageRecipient ?? null,
+    hardware: body.hardware ?? null,
+    reconcile: body.reconcile ?? null,
+    appliedRevision: body.agent.desiredRevision,
+  };
+}
+
+function approvalDates(
+  approval: NodeRow['approval']
+): Pick<NodeRow, 'approvedAt' | 'approvedBy' | 'retiredAt'> {
+  return {
+    approvedAt:
+      approval === 'approved' ? new Date('2026-09-01T08:05:00.000Z') : null,
+    approvedBy: approval === 'approved' ? 'chris' : null,
+    retiredAt:
+      approval === 'retired' ? new Date('2026-10-01T08:05:00.000Z') : null,
+  };
+}
+
 /** A stored node row built from a heartbeat body, for tests and the demo. */
 export function nodeRow(options: NodeOptions): NodeRow {
   const {
@@ -89,7 +124,6 @@ export function nodeRow(options: NodeOptions): NodeRow {
   const id = nodeId(short);
   const hostname = hostnameOption ?? `${role ?? 'node'}-${short}`;
   const body = heartbeatBody(id, observedRole ?? 'base', hostname, bodyOptions);
-  const reported = observedRole !== null;
   return {
     displayName: null,
     note: null,
@@ -101,23 +135,14 @@ export function nodeRow(options: NodeOptions): NodeRow {
     ...direct,
     id,
     role,
-    observedRole,
-    observedClosure: reported ? body.closure : null,
-    ageRecipient: body.ageRecipient ?? null,
-    hardware: body.hardware ?? null,
-    reconcile: body.reconcile ?? null,
+    ...observedOf(body, observedRole),
     hostname,
     approval,
     facts: body as unknown as Record<string, unknown>,
     revision: body.revision,
     agentVersion: body.agent.version,
-    appliedRevision: body.agent.desiredRevision,
     remoteAddr: '192.168.1.20',
-    approvedAt:
-      approval === 'approved' ? new Date('2026-09-01T08:05:00.000Z') : null,
-    approvedBy: approval === 'approved' ? 'chris' : null,
-    retiredAt:
-      approval === 'retired' ? new Date('2026-10-01T08:05:00.000Z') : null,
+    ...approvalDates(approval),
     offlineNotifiedAt: null,
   };
 }

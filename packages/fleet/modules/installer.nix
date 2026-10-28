@@ -52,6 +52,13 @@ in {
       chmod 0600 /run/fleet-enrollment/token
       rm -f /fleet-enrollment.token
     fi
+    if [ -f /fleet-git-credential ]; then
+      mkdir -p /run/fleet-git-credential
+      chmod 0700 /run/fleet-git-credential
+      cp /fleet-git-credential /run/fleet-git-credential/credential
+      chmod 0600 /run/fleet-git-credential/credential
+      rm -f /fleet-git-credential
+    fi
   '';
   # Live image. The USB ISO carries the role-less base closure. fleet-install on
   # this console partitions the disk and installs it; the Fleet controller

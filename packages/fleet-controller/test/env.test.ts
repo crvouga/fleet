@@ -14,7 +14,6 @@ const VALID: EnvSource = {
   AWS_SECRET_ACCESS_KEY: 'test-secret',
   FLEET_ADMIN_TOKEN: 'a'.repeat(32),
   FLEET_SESSION_SECRET: 'b'.repeat(32),
-  FLEET_ROLE_TOKEN_HASHES: '{}',
 };
 
 function problems(source: EnvSource): string {
@@ -36,7 +35,7 @@ describe('readControllerEnv', () => {
       }),
       port: 8080,
       adminToken: 'a'.repeat(32),
-      roleTokenHashes: {},
+      enrollmentTokens: [],
     });
   });
 
@@ -53,14 +52,19 @@ describe('readControllerEnv', () => {
       ...VALID,
       PORT: '9000',
       VAULT_ADDR: 'https://vault.example.com/',
-      FLEET_ROLE_TOKEN_HASHES: JSON.stringify({
-        ci: sha256('x').toUpperCase(),
-        web: sha256('y'),
-      }),
+      FLEET_ENROLLMENT_TOKENS: JSON.stringify([
+        { sha256: sha256('x').toUpperCase(), role: 'ci' },
+        { sha256: sha256('y'), role: null },
+        { sha256: sha256('z') },
+      ]),
     });
     expect(env).toMatchObject({
       port: 9000,
-      roleTokenHashes: { ci: sha256('x'), web: sha256('y') },
+      enrollmentTokens: [
+        { sha256: sha256('x'), role: 'ci' },
+        { sha256: sha256('y'), role: null },
+        { sha256: sha256('z'), role: null },
+      ],
     });
   });
 
@@ -87,22 +91,50 @@ describe('readControllerEnv', () => {
     );
   });
 
-  test('refuses malformed role token hashes', () => {
-    expect(problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: 'nope' })).toContain(
-      'JSON object'
+  test('refuses the retired role token hashes and names the replacement', () => {
+    for (const value of ['{}', JSON.stringify({ ci: sha256('x') })]) {
+      const message = problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: value });
+      expect(message).toContain(
+        'FLEET_ROLE_TOKEN_HASHES is no longer supported'
+      );
+      expect(message).toContain('FLEET_ENROLLMENT_TOKENS');
+    }
+    expect(
+      readControllerEnv({ ...VALID, FLEET_ROLE_TOKEN_HASHES: ' ' })
+    ).toBeDefined();
+  });
+
+  test('refuses malformed enrollment tokens', () => {
+    const bad = (value: unknown) =>
+      problems({ ...VALID, FLEET_ENROLLMENT_TOKENS: JSON.stringify(value) });
+    expect(problems({ ...VALID, FLEET_ENROLLMENT_TOKENS: 'nope' })).toContain(
+      'JSON array'
     );
-    expect(problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: '[]' })).toContain(
-      'JSON object'
+    expect(bad({ sha256: sha256('x') })).toContain('JSON array');
+    expect(bad([{ sha256: 'abc', role: 'ci' }])).toContain('64 hex');
+    expect(bad([{ sha256: sha256('x'), role: 'gpu' }])).toContain(
+      'active role or null'
+    );
+    expect(bad([{ sha256: sha256('x'), role: 'web' }])).toContain(
+      'active role or null'
+    );
+    expect(bad([{ sha256: sha256('x'), role: 'ci', extra: 1 }])).toContain(
+      'only have the keys'
     );
     expect(
-      problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: '{"ci":"abc"}' })
-    ).toContain('64 hex');
+      bad([
+        { sha256: sha256('x'), role: 'ci' },
+        { sha256: sha256('x'), role: null },
+      ])
+    ).toContain('more than once');
     expect(
-      problems({
-        ...VALID,
-        FLEET_ROLE_TOKEN_HASHES: JSON.stringify({ gpu: sha256('x') }),
-      })
-    ).toContain('unknown role "gpu"');
+      bad(
+        Array.from({ length: 17 }, (_, i) => ({
+          sha256: sha256(String(i)),
+          role: null,
+        }))
+      )
+    ).toContain('at most 16');
   });
 
   test('refuses invalid ports and removed pooler settings', () => {
@@ -119,7 +151,7 @@ describe('readControllerEnv', () => {
       DATABASE_URL: 'mysql://user:hunter2-secret@db/app',
       FLEET_ADMIN_TOKEN: 'tiny-admin-secret',
       FLEET_SESSION_SECRET: 'tiny-session-secret',
-      FLEET_ROLE_TOKEN_HASHES: '{"ci":"super-secret-not-hex"}',
+      FLEET_ENROLLMENT_TOKENS: '[{"sha256":"super-secret-not-hex"}]',
     });
     for (const secret of [
       'hunter2-secret',

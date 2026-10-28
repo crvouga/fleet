@@ -45,6 +45,10 @@ export const SECTION_META: Readonly<
     blurb:
       'Who may sign in to a developer machine. Applied only while a node runs the devbox role.',
   },
+  secrets: {
+    title: 'Secrets',
+    blurb: 'Each node’s own age identity, which role secrets are encrypted to.',
+  },
   alerts: {
     title: 'Alerts',
     blurb: 'Handled by this controller only; nodes never receive these values.',
@@ -131,6 +135,11 @@ export const SETTING_META: Readonly<Record<string, SettingMeta>> = {
     label: 'Authorized SSH keys',
     unit: 'OpenSSH public key',
     help: 'Public keys that may log in as the unprivileged dev user, one per line (for example ssh-ed25519 AAAA… you@laptop). No options prefix. Leave empty to inherit from the fleet or role; with no keys anywhere, nobody can log in as dev. Root access is never granted here.',
+  },
+  'secrets.rotateAgeKeyAfter': {
+    label: 'Rotate the age identity',
+    unit: 'Unix time',
+    help: 'Set by the node page’s Rotate age identity button. A node whose age identity was created before this time generates a next identity and reports its recipient; it switches to it once its role’s secrets are re-encrypted for that recipient and merged.',
   },
   'alerts.offlineAfterSeconds': {
     label: 'Offline threshold',

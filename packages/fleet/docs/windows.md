@@ -1,8 +1,8 @@
 # Converting a Windows computer in place
 
-Open the Windows installer, choose **Turn THIS computer into a node → CI**
-(or another role), and confirm the disk it names. Accept the administrator
-prompt and approve the GitHub page when it opens. The installer handles the
+Open the Windows installer, choose **Turn THIS computer into a node**, and
+confirm the disk it names. Accept the administrator prompt, then approve the
+computer under Pending in your Fleet app and assign its role there. The installer handles the
 checks, download, free-space preparation, partitioning, boot setup and restart.
 You do not need Git Bash, PowerShell commands, a separate doctor run or a plan.
 
@@ -49,13 +49,13 @@ required firmware change still need the person at the computer.
 - [ ] **Enough RAM.** The installer image is copied whole into memory and the installer then needs room of its own: **the image size plus 2 GiB**. The check uses the current release size and names the exact figure. A USB install cannot help, because it boots the same image into RAM too.
 - [ ] **Free space on C:** Windows has to be able to give up the image size plus 64 MiB from the end of `C:`, and the download sits on `C:` meanwhile, so the early check asks for both. If it says `C:` cannot shrink enough, see "C: will not shrink" below.
 - [ ] **Run it as an administrator**: the wizard asks for permission by itself (UAC). For `fleet-node.sh`, open Git Bash with **Run as administrator**.
-- [ ] **Optional CLI diagnostics**: `bash fleet-node.sh ci --plan` or `bash fleet-node.sh doctor ci`. The wizard already performs its own checks and disk review; neither command is required.
+- [ ] **Optional CLI diagnostics**: `bash fleet-node.sh install --plan` or `bash fleet-node.sh doctor`. The wizard already performs its own checks and disk review; neither command is required.
 
 ## What you will see
 
-1. **Start it.** Either the wizard (`fleet-installer-windows-x64.exe`; choose _Turn THIS computer into a node_) or `bash fleet-node.sh ROLE` in an administrator Git Bash. The checks run and every problem is listed at once with what to do about it.
-2. **Confirm the erase.** You type the line shown (CLI), or tick the box (wizard). The wizard's review also says which Wi-Fi network will be carried into the installer, by name, or that none was found and a cable is needed. The image is downloaded and verified before approval, so a slow Wi-Fi transfer cannot spend the approval token’s lifetime.
-3. **Approve the node.** A GitHub page opens; the repository owner presses _Submit new issue_. The wizard shows the same page as a link with a **Copy link** button and how long it keeps waiting. The internal disk is still unchanged. Wi-Fi settings are carried to the live installer, which checks connectivity again before erasing it.
+1. **Start it.** Either the wizard (`fleet-installer-windows-x64.exe`; choose _Turn THIS computer into a node_) or `bash fleet-node.sh install` in an administrator Git Bash. The checks run and every problem is listed at once with what to do about it.
+2. **Confirm the erase.** You type the line shown (CLI), or tick the box (wizard). The wizard's review also says which Wi-Fi network will be carried into the installer, by name, or that none was found and a cable is needed. An optional enrollment token travels with the Wi-Fi settings in a private file, `\EFI\fleet\fleet-handoff.initrd` on the EFI system partition; undo removes it.
+3. **Approval comes later.** Nothing is approved in Windows. The live installer registers with Fleet after the restart (step 6). Wi-Fi settings are carried to the live installer, which checks connectivity again before erasing anything.
 4. **Download and check the installer** (several GB, into `%LOCALAPPDATA%\fleet-installer` for the wizard or `~\.fleet` for the CLI). It is verified against its published checksum.
 5. **Windows is prepared**, in this order (the messages appear on screen):
    1. _Making room_: `C:` is shrunk by the image size plus 64 MiB. Your files are not touched. This can take minutes.
@@ -66,11 +66,11 @@ required firmware change still need the person at the computer.
       - A UEFI boot option (`Boot####`) written directly into the firmware variables, appended _last_ to `BootOrder`, and `BootNext` pointed at it; the program reads both back.
         Windows stays first in the normal boot order, so if the firmware ignores the one-time choice you simply land in Windows again.
    5. The computer is told to **restart in 15 seconds**. Save any open work now: Windows may show an "apps are preventing restart" screen; choose _Restart anyway_.
-6. **The restart.** The screen shows a menu "Fleet installer: ERASES the internal disk and installs ROLE" for 3 seconds, then Linux boots and copies the installer into RAM (a few minutes of boot text). Then a screen titled **FLEET INSTALLER** lists seven steps, marks the current one and says what to do. Usually that is nothing:
+6. **The restart.** The screen shows a menu "Fleet installer: ERASES the internal disk and installs a Fleet node" for 3 seconds, then Linux boots and copies the installer into RAM (a few minutes of boot text). Then a screen titled **FLEET INSTALLER** lists seven steps, marks the current one and says what to do. Usually that is nothing:
    1. _Connect to the network_ (keep the cable in, or stay near the Wi-Fi Windows used). Under the step, the screen ticks off its own checks: the Wi-Fi adapter, the Wi-Fi settings carried from Windows (by network name), whether that network is in range, the connection and the internet. A failed check says why, for example that the network refused the saved password or that Linux has no driver for the adapter, and what to do about it.
-   2. _Read this node's approval_, 3. _Check Fleet, the update cache and GitHub_, 4. _Find the internal disk_. Nothing is erased in steps 1 to 4, and the screen says so.
-   3. _Erase the internal disk_ and 6. _Install the ROLE system_ (5 to 20 minutes; the screen updates every 30 seconds). Do not turn the computer off from step 5 on.
-   4. _Restart into the new ROLE node_. The machine comes back as `ROLE-xxxx` (the 4 hex digits come from the hardware) and appears in [Fleet](https://fleet.example.com/nodes) a few minutes later.
+   2. _Read this node's approval_ (approve the computer under Pending in your Fleet app; it waits up to five minutes, and rejection or timeout erases nothing; an enrollment token approves it without a person), 3. _Check Fleet and the update cache_, 4. _Find the internal disk_. Nothing is erased in steps 1 to 4, and the screen says so.
+   3. _Erase the internal disk_ and 6. _Install the Fleet base system_ (5 to 20 minutes; the screen updates every 30 seconds). Do not turn the computer off from step 5 on.
+   4. _Restart into the new Fleet node_. The machine appears in [Fleet](https://fleet.example.com/nodes) a few minutes later. Assign its role there; the hostname then follows the role (`ROLE-xxxx`, the 4 hex digits come from the hardware).
 
 7. **The node's own screen.** From then on the console shows **FLEET NODE ROLE-xxxx** with one status line and its checks: network, Fleet, updates and, for a CI node, its GitHub runners. **STARTING** is normal for the first few minutes. **READY** means the runners are online in GitHub and there is nothing to do. **PROBLEM** says what is wrong, who has to act (usually the repository owner, for example when GitHub refuses the App), and shows a QR code for a pre-filled issue. **UNKNOWN** means the node cannot confirm its readiness itself; it does not mean it is broken. The screen also shows the SSH fingerprint and age public key.
 
@@ -198,7 +198,7 @@ Verified without Windows (tests in `tests/`):
 - Every PowerShell script the program sends is parsed by PowerShell 7's parser (`tests/test_powershell.py`; needs `pwsh` or Docker, and is _skipped_ locally and _fails_ in CI when neither exists), and run against stand-in cmdlets so their property names, pipelines and JSON are exercised. They are single-line, use only single quotes, and read back only JSON and property names, so the language of your Windows does not matter.
 - The `Boot####` load option, its device path, the mixed-endian GUID and `BootNext` are checked byte for byte against a hand-derived value, and the `kernel32` calls (privilege, read, write, delete) run against stand-in DLLs.
 - The conversion against a model of Windows, with a failure injected at each step: the model always ends up as it started (`tests/test_windows_stage.py`, `tests/test_fleet_node.py`).
-- The ISO reader and conversion fixtures include NixOS store paths with repeated slashes, such as `/boot//nix/store/...` (issue #148). CI also reads every role's kernel, initrd and EFI loader from the built ISO before it can be published. This verifies image compatibility; it does not verify a physical firmware handoff.
+- The ISO reader and conversion fixtures include NixOS store paths with repeated slashes, such as `/boot//nix/store/...` (issue #148). CI also reads the base system's kernel, initrd and EFI loader from the built ISO before it can be published. This verifies image compatibility; it does not verify a physical firmware handoff.
 - Writes at offsets past 4 GiB and past 2 TiB (sparse file), sector alignment, and the retry through the partition's own device.
 
 Not verified, and the first places to look if it fails on real hardware:

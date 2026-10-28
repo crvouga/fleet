@@ -113,50 +113,65 @@ class WriteRegionTest(unittest.TestCase):
 
 
 class GrubConfigTest(unittest.TestCase):
-    def test_the_entry_boots_the_chosen_role_from_the_image(self):
-        config = decide.grub_config("devbox", "/boot/k", "/boot/i", "root=LABEL=X copytoram fleet.role=devbox")
+    def test_the_entry_boots_the_image_and_names_no_role(self):
+        config = decide.grub_config("/boot/k", "/boot/i", "root=LABEL=X copytoram")
         self.assertIn("search --no-floppy --set=root --file /EFI/nixos-installer-image", config)
-        self.assertIn("linux /boot/k root=LABEL=X copytoram fleet.role=devbox\n", config)
+        self.assertIn("linux /boot/k root=LABEL=X copytoram\n", config)
         self.assertIn("initrd /boot/i\n", config)
-        self.assertIn("installs devbox", config)
+        self.assertIn("installs a Fleet node", config)
+        self.assertNotIn("fleet_credentials", config)
+        self.assertTrue(decide.is_fleet_grub_config(config.encode()))
+
+    def test_a_private_handoff_is_a_second_initrd(self):
+        config = decide.grub_config("/boot/k", "/boot/i", "x", handoff=True)
+        self.assertIn("search --no-floppy --set=fleet_credentials --file /EFI/fleet/fleet-handoff.initrd\n", config)
+        self.assertIn("initrd /boot/i ($fleet_credentials)/EFI/fleet/fleet-handoff.initrd\n", config)
 
     def test_a_value_that_could_break_out_of_the_entry_is_refused(self):
         for bad in ("a\nb", "a'b", "a\rb"):
             with self.assertRaises(decide.Invariant):
-                decide.grub_config("ci", "/boot/k", "/boot/i", bad)
-        with self.assertRaises(decide.Invariant):
-            decide.grub_config("root", "/boot/k", "/boot/i", "x")
+                decide.grub_config("/boot/k", "/boot/i", bad)
 
 
 class BootMaterialTest(unittest.TestCase):
-    def test_each_role_gets_its_own_entry_and_the_grub_program(self):
+    def test_the_one_entry_and_the_grub_program_are_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             iso = Path(tmp) / "i.iso"
             iso.write_bytes(iso_fixture.build(iso_fixture.installer_tree(grub=b"GRUB-PROGRAM")))
-            for role in decide.ROLES:
-                linux, initrd, append, grub = decide.iso_boot_material(iso, role)
-                self.assertEqual((linux, initrd, grub), (iso_fixture.KERNEL_PATH, iso_fixture.INITRD_PATH, b"GRUB-PROGRAM"))
-                self.assertTrue(append.split()[-1] == f"fleet.role={role}" or f"fleet.role={role}" in append.split(), append)
+            linux, initrd, append, grub = decide.iso_boot_material(iso)
+            self.assertEqual((linux, initrd, grub), (iso_fixture.KERNEL_PATH, iso_fixture.INITRD_PATH, b"GRUB-PROGRAM"))
             self.assertIn("root=LABEL=FLEET_ISO", append)
+            self.assertNotIn("copytoram", append, "the default entry, not the copytoram variant")
+
+    def test_an_older_image_with_role_entries_still_boots_without_its_role(self):
+        tree = iso_fixture.installer_tree()
+        tree["isolinux"]["isolinux.cfg"] = (
+            f"DEFAULT boot\nLABEL boot-devbox\nLINUX {iso_fixture.KERNEL_PATH}\nAPPEND init=/x fleet.role=devbox\nINITRD {iso_fixture.INITRD_PATH}\n"
+            f"LABEL boot\nLINUX {iso_fixture.KERNEL_PATH}\nAPPEND init=/x fleet.role=ci\nINITRD {iso_fixture.INITRD_PATH}\n").encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            iso = Path(tmp) / "i.iso"
+            iso.write_bytes(iso_fixture.build(tree))
+            append = decide.iso_boot_material(iso)[2]
+            self.assertEqual(append, "init=/x fleet.role=ci")
+            self.assertNotIn("fleet.role=", decide._boot_command(append, iso, findiso=False))
 
     def test_issue_148_store_paths_also_extract_for_linux_and_boot_from_grub(self):
         with tempfile.TemporaryDirectory() as tmp:
             iso = Path(tmp) / "i.iso"
             iso.write_bytes(iso_fixture.build(iso_fixture.installer_tree()))
-            for role in decide.ROLES:
-                kernel, initrd, append = decide.extract_boot(iso, role)
-                self.assertEqual(Path(kernel).read_bytes(), b"kernel-bytes\n")
-                self.assertEqual(Path(initrd).read_bytes(), b"initrd-bytes\n")
-                linux_path, initrd_path, _, _ = decide.iso_boot_material(iso, role)
-                config = decide.grub_config(role, linux_path, initrd_path, append)
-                self.assertIn(f"linux {iso_fixture.KERNEL_PATH} ", config)
-                self.assertIn(f"initrd {iso_fixture.INITRD_PATH}\n", config)
+            kernel, initrd, append = decide.extract_boot(iso)
+            self.assertEqual(Path(kernel).read_bytes(), b"kernel-bytes\n")
+            self.assertEqual(Path(initrd).read_bytes(), b"initrd-bytes\n")
+            linux_path, initrd_path, _, _ = decide.iso_boot_material(iso)
+            config = decide.grub_config(linux_path, initrd_path, append)
+            self.assertIn(f"linux {iso_fixture.KERNEL_PATH} ", config)
+            self.assertIn(f"initrd {iso_fixture.INITRD_PATH}\n", config)
 
     def test_simple_boot_paths_remain_supported(self):
         with tempfile.TemporaryDirectory() as tmp:
             iso = Path(tmp) / "i.iso"
             iso.write_bytes(iso_fixture.build(iso_fixture.installer_tree(nix_store=False)))
-            self.assertEqual(decide.iso_boot_material(iso, "ci")[:2], ("/boot/bzImage", "/boot/initrd"))
+            self.assertEqual(decide.iso_boot_material(iso)[:2], ("/boot/bzImage", "/boot/initrd"))
 
     def test_iso_lookups_use_posix_separators_on_every_host(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -180,7 +195,7 @@ class BootMaterialTest(unittest.TestCase):
             iso = Path(tmp) / "i.iso"
             iso.write_bytes(iso_fixture.build(tree))
             with self.assertRaises(decide.Invariant) as caught:
-                decide.iso_boot_material(iso, "ci")
+                decide.iso_boot_material(iso)
             self.assertIn("latest Fleet installer", caught.exception.fix, "a layout this program does not know points at a newer installer")
 
     def test_an_image_without_the_boot_marker_is_refused_before_windows_changes(self):
@@ -190,7 +205,7 @@ class BootMaterialTest(unittest.TestCase):
             iso = Path(tmp) / "i.iso"
             iso.write_bytes(iso_fixture.build(tree))
             with self.assertRaises(decide.Invariant) as caught:
-                decide.iso_boot_material(iso, "ci")
+                decide.iso_boot_material(iso)
             self.assertIn("nixos-installer-image", caught.exception.context["problem"])
 
 

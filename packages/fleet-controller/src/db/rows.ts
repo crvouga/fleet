@@ -131,9 +131,7 @@ function hardwareOf(row: Row): NodeRow['hardware'] {
   if (raw === null) return null;
   const list = Array.isArray(raw['capabilities']) ? raw['capabilities'] : [];
   return {
-    capabilities: list.filter((item): item is Capability =>
-      isCapability(item)
-    ),
+    capabilities: list.filter((item): item is Capability => isCapability(item)),
   };
 }
 

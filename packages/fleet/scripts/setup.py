@@ -5,10 +5,12 @@
 
 Creates what a new node cannot make for itself, and nothing a node can:
 
-  1. one age key per role (private halves go to your local private key file, public halves to .sops.yaml)
+  1. a check that .sops.yaml names the recipients of secrets/fleet.yaml (render
+     it with scripts/fleet-keys.py from your operator keys and the controller's
+     GET /v1/recipients; nodes create their own age identities on first boot)
   2. the GitHub App that registers runners, from a manifest, so the only click is
      "Create GitHub App" and then "Install"
-  3. secrets/fleet.yaml, the App's private key encrypted to the ci role's key
+  3. secrets/fleet.yaml, the App's private key encrypted to those recipients
   4. settings/github.json: App ids, scope and bootstrap repositories; fleet.nix enables the secret
 
 Every later node needs none of this: it downloads the installer and runs it.
@@ -210,10 +212,11 @@ def wait_for_installation(app, owner, wait, poll):
 # ---- files -----------------------------------------------------------------------
 
 def recipient_for(sops_text, name):
-    """The age recipient .sops.yaml assigns to secrets/<name>.yaml."""
-    match = re.search(rf"path_regex:\s*secrets/{re.escape(name)}\\\.[^\n]*\n\s*age:\s*(age1[0-9a-z]+)", sops_text)
+    """The comma-separated age recipients .sops.yaml assigns to secrets/<name>.yaml."""
+    match = re.search(rf"path_regex:\s*secrets/{re.escape(name)}\\\.[^\n]*\n\s*age:\s*(age1[0-9a-z]+(?:,age1[0-9a-z]+)*)", sops_text)
     if not match:
-        raise SystemExit(f"Next: .sops.yaml has no age recipient for secrets/{name}.yaml. Run `just fleet-keys` first.")
+        raise SystemExit(f"Next: .sops.yaml has no age recipients for secrets/{name}.yaml. Render it with scripts/fleet-keys.py "
+                         "--operator <your age public key> (add the controller's GET /v1/recipients JSON when nodes exist) first.")
     return match.group(1)
 
 
@@ -289,12 +292,14 @@ def main(argv):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name):
             raise SystemExit(f"Next: {name} is not owner/name.")
 
-    say("1/4 Role age keys")
-    keys = subprocess.run([sys.executable, str(HERE / "fleet-keys.py")], capture_output=True, text=True,
-                          env={**os.environ, "FLEET_SOPS": str(package / ".sops.yaml")})
-    if keys.returncode != 0:
-        raise SystemExit("Next: creating the role keys failed: " + keys.stderr.strip()[-300:])
-    say("    " + keys.stderr.strip().splitlines()[0])
+    say("1/4 SOPS recipients")
+    if configured:
+        recipients = None
+        say("    secrets/fleet.yaml already exists; re-encrypt it with `sops updatekeys` when recipients change.")
+    else:
+        sops_config = package / ".sops.yaml"
+        recipients = recipient_for(sops_config.read_text() if sops_config.is_file() else "", "fleet")
+        say(f"    secrets/fleet.yaml will be encrypted to {len(recipients.split(','))} recipient(s) from .sops.yaml")
 
     if configured and not (package / "secrets" / "fleet.yaml").is_file():
         raise SystemExit("Next: settings/github.json already names a GitHub App but secrets/fleet.yaml is missing. Restore the file from git. "
@@ -316,7 +321,7 @@ def main(argv):
                 json.dump(app, handle)
         installation = wait_for_installation(app, OWNER, wait, poll)
         say("3/4 secrets/fleet.yaml")
-        encrypt_app_key(app["pem"], recipient_for((package / ".sops.yaml").read_text(), "fleet"), package / "secrets" / "fleet.yaml")
+        encrypt_app_key(app["pem"], recipients, package / "secrets" / "fleet.yaml")
         say("4/4 settings/github.json")
         updated = github_settings(github, app["id"], installation, kind, OWNER, repositories)
         registration.write_text(json.dumps(updated, indent=2) + "\n")
@@ -325,7 +330,7 @@ def main(argv):
     say("")
     say("Setup is done on this computer. Two reviewed steps remain, once, and no node ever repeats them:")
     say("  1. Commit packages/fleet (settings/github.json, fleet.nix, secrets/fleet.yaml, .sops.yaml) in a pull request and merge it.")
-    say("  2. If using shared-key enrollment, configure your secret store and its exact workflow JWT trust through your own IaC.")
+    say("  2. When Fleet assigns nodes a role, render .sops.yaml again with scripts/fleet-keys.py and run `sops updatekeys` on that role's file.")
     return 0
 
 

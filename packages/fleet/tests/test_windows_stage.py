@@ -219,7 +219,7 @@ class StageCase(unittest.TestCase):
         return world
 
     def stage(self, world, firmware="auto", **kw):
-        return decide.stage_windows("ci", str(self.iso), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=firmware, **kw)
+        return decide.stage_windows(str(self.iso), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=firmware, **kw)
 
 
 class HappyPathTest(StageCase):
@@ -240,10 +240,22 @@ class HappyPathTest(StageCase):
         world = self.world()
         self.assertEqual(self.stage(world, firmware=None, wifi=network), 0)
         config = (world.esp / "EFI/BOOT/grub.cfg").read_text()
-        self.assertIn("($fleet_credentials)/EFI/fleet/fleet-wifi.initrd", config)
+        self.assertIn("($fleet_credentials)/EFI/fleet/fleet-handoff.initrd", config)
         self.assertNotIn(network["password"], config)
-        archive = gzip.decompress((world.esp / "EFI/fleet/fleet-wifi.initrd").read_bytes())
+        archive = gzip.decompress((world.esp / "EFI/fleet/fleet-handoff.initrd").read_bytes())
         self.assertIn(network["password"].encode(), archive)
+
+    def test_the_enrollment_token_uses_the_same_private_initramfs(self):
+        import gzip
+        world = self.world()
+        self.assertEqual(self.stage(world, firmware=None, token="fleet-enroll.WindowsToken1"), 0)
+        config = (world.esp / "EFI/BOOT/grub.cfg").read_text()
+        self.assertNotIn("WindowsToken1", config)
+        self.assertNotIn("fleet.enroll=", config)
+        self.assertIn("($fleet_credentials)/EFI/fleet/fleet-handoff.initrd", config)
+        archive = gzip.decompress((world.esp / "EFI/fleet/fleet-handoff.initrd").read_bytes())
+        self.assertIn(b"fleet-enrollment.token", archive)
+        self.assertIn(b"fleet-enroll.WindowsToken1\n", archive)
 
     def test_a_failed_restart_removes_the_wifi_handoff_too(self):
         world = self.world()
@@ -251,7 +263,7 @@ class HappyPathTest(StageCase):
         network = {"ssid": "Fixture Wi-Fi", "password": "fixture-wifi-password"}
         with self.assertRaises(decide.Invariant):
             self.stage(world, firmware=None, wifi=network)
-        self.assertNotIn("EFI/fleet/fleet-wifi.initrd", world.esp_files())
+        self.assertNotIn("EFI/fleet/fleet-handoff.initrd", world.esp_files())
         self.assertTrue(world.clean())
 
     def test_both_mechanisms_are_installed_and_verified_and_windows_stays_first(self):
@@ -287,14 +299,14 @@ class HappyPathTest(StageCase):
         mine = elsewhere / "fleet-installer.iso"
         mine.write_bytes(self.iso.read_bytes())
         world = self.world()
-        self.assertEqual(decide.stage_windows("ci", str(mine), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=None), 0)
+        self.assertEqual(decide.stage_windows(str(mine), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=None), 0)
         self.assertTrue(mine.exists(), "a file the installer did not put there is never deleted")
 
     def test_an_arbitrary_name_in_the_state_folder_is_not_deleted_either(self):
         other = self.state / "my-notes.iso"
         other.write_bytes(self.iso.read_bytes())
         world = self.world()
-        self.assertEqual(decide.stage_windows("ci", str(other), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=None), 0)
+        self.assertEqual(decide.stage_windows(str(other), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=None), 0)
         self.assertTrue(other.exists())
 
     def test_the_cache_copy_of_the_wizard_is_removed(self):
@@ -304,7 +316,7 @@ class HappyPathTest(StageCase):
         mine.write_bytes(self.iso.read_bytes())
         world = self.world()
         with mock.patch.dict(os.environ, {"FLEET_CACHE": str(cache)}):
-            self.assertEqual(decide.stage_windows("ci", str(mine), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=None), 0)
+            self.assertEqual(decide.stage_windows(str(mine), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, firmware=None), 0)
         self.assertFalse(mine.exists())
 
     def test_the_copy_is_kept_if_the_install_is_taken_back(self):
@@ -314,12 +326,13 @@ class HappyPathTest(StageCase):
             self.stage(world, FakeFirmware(self.firmware_vars))
         self.assertTrue(self.iso.exists(), "a failed run must leave the download for the retry")
 
-    def test_the_boot_config_asks_for_ram_and_the_chosen_role(self):
+    def test_the_boot_config_asks_for_ram_and_names_no_role(self):
         world = self.world()
         self.stage(world, None)
         config = (world.esp / "EFI/BOOT/grub.cfg").read_text()
-        self.assertIn("fleet.role=ci", config)
+        self.assertNotIn("fleet.role=", config)
         self.assertIn("copytoram", config)
+        self.assertIn("installs a Fleet node", config)
 
 
 class OneMechanismFailsTest(StageCase):
@@ -485,7 +498,7 @@ class FailureAfterEachStepTest(StageCase):
             raise decide.Invariant("the disk accepted a short write", "test", {})
 
         with self.assertRaises(decide.Invariant):
-            decide.stage_windows("ci", str(self.iso), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, writer=broken, firmware=None)
+            decide.stage_windows(str(self.iso), chosen={"path": "\\\\.\\PHYSICALDRIVE0"}, writer=broken, firmware=None)
         self.assertTrue(world.clean())
         self.assertNotIn("mount", world.ops, "the boot loader must not be placed before the image is proven")
         self.assertNotIn("bcd:copy", world.ops, "the firmware must not be touched before the image is proven")
@@ -559,7 +572,7 @@ class PreflightTest(unittest.TestCase):
         (root / "efi").mkdir()
         (root / "kexec").write_text("#!/bin/sh\n")
         env = {"FLEET_EUID": "0", "FLEET_ARCH": "x86_64", "FLEET_EFI_DIR": str(root / "efi"), "FLEET_KEXEC": str(root / "kexec"),
-               "FLEET_ISO_FS": "ext4", "FLEET_NODE_CONF": str(root / "none.conf"), "FLEET_NO_ENROLL": "1"}
+               "FLEET_ISO_FS": "ext4", "FLEET_NODE_CONF": str(root / "none.conf")}
         patch = mock.patch.dict(os.environ, env)
         patch.start()
         self.addCleanup(patch.stop)
@@ -568,7 +581,7 @@ class PreflightTest(unittest.TestCase):
     def run_preflight(self, os_name, size, memory, **kw):
         probe = mock.patch.dict(decide.NET, {"probe": lambda: (None, size), "windows": lambda *a, **k: []}, clear=False)
         with probe, mock.patch.object(decide, "mem_total", return_value=memory):
-            found = decide.preflight(os_name, "ci", "install", None, self.root, **kw)
+            found = decide.preflight(os_name, "install", None, self.root, **kw)
         return {item["name"]: item for item in found}
 
     def test_linux_conversion_needs_the_image_plus_two_gib_of_ram(self):
@@ -592,7 +605,7 @@ class PreflightTest(unittest.TestCase):
     def test_an_install_usb_is_not_held_to_the_ram_rule(self):
         probe = mock.patch.dict(decide.NET, {"probe": lambda: (None, 8 * 1024 ** 3)}, clear=False)
         with probe, mock.patch.object(decide, "mem_total", return_value=1024 ** 3):
-            found = {item["name"] for item in decide.preflight("Linux", None, "media", None, self.root)}
+            found = {item["name"] for item in decide.preflight("Linux", "media", None, self.root)}
         self.assertNotIn("memory", found)
 
     def test_windows_that_is_not_elevated_stops_with_the_one_way_to_fix_it(self):
@@ -611,7 +624,7 @@ class PreflightTest(unittest.TestCase):
         seen = {}
         probe = mock.patch.dict(decide.NET, {"probe": lambda: (None, 5), "windows": lambda size, disk, strict, iso_path=None: seen.update(iso=iso_path) or []}, clear=False)
         with probe, mock.patch.object(decide, "mem_total", return_value=None), mock.patch.object(decide, "windows_admin", return_value=True):
-            decide.preflight("Windows", "ci", "install", None, self.root, iso_path=self.root / "fleet-installer.iso")
+            decide.preflight("Windows", "install", None, self.root, iso_path=self.root / "fleet-installer.iso")
         self.assertEqual(seen["iso"], self.root / "fleet-installer.iso")
 
 
@@ -660,16 +673,15 @@ class FindingsExtrasTest(unittest.TestCase):
         self.assertEqual(found["shrink"]["status"], "ok")
 
     def test_the_plan_names_every_step_and_the_sizes(self):
-        lines = decide.windows_plan_lines({**FACTS}, 6 * 1024 ** 3, "devbox")
+        lines = decide.windows_plan_lines({**FACTS}, 6 * 1024 ** 3)
         text = "\n".join(lines)
         self.assertEqual(len(lines), 6)
         self.assertIn("Shrink C: from 500.0 GiB to 493.9 GiB", text)
         self.assertIn("gives up 6208 MiB", text)
         self.assertIn("6144 MiB partition of type Linux data on disk 0", text)
         self.assertIn("partition 1 of disk 0", text)
-        self.assertIn("(devbox installer)", text)
         self.assertIn("ERASES the whole of disk 0", text)
-        self.assertIn("installs devbox", text)
+        self.assertIn("installs the Fleet base system", text)
 
 
 
@@ -789,7 +801,7 @@ class RerunTest(StageCase):
         (world.esp / "EFI" / "BOOT").mkdir(parents=True)
         (world.esp / "EFI" / "BOOT" / "grub.cfg").write_text("set timeout=3\nmenuentry 'Fleet installer: ERASES the internal disk and installs devbox' {\n}\n")
         (world.esp / "EFI" / "fleet").mkdir()
-        (world.esp / "EFI" / "fleet" / "fleet-wifi.initrd").write_bytes(b"old password")
+        (world.esp / "EFI" / "fleet" / "fleet-handoff.initrd").write_bytes(b"old password")
         world.fail_at = {"shutdown"}
         with self.assertRaises(decide.Invariant):
             self.stage(world, None)

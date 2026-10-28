@@ -10,7 +10,7 @@ import {
   validateHeartbeat,
 } from '../domain/heartbeat-validation';
 import type { RateLimiter } from '../domain/rate-limit';
-import type { NodeRow } from '../types';
+import type { HeartbeatBody, NodeRow } from '../types';
 
 import {
   controllerError,
@@ -93,9 +93,12 @@ function register(deps: AppDeps, log: Logger) {
       enrollmentToken
     );
     if (enrollmentToken !== undefined && entry === null) {
-      log.warn('registration presented an enrollment token that did not match', {
-        node: nodeId,
-      });
+      log.warn(
+        'registration presented an enrollment token that did not match',
+        {
+          node: nodeId,
+        }
+      );
     }
     const { node, created } = await deps.store.registerNode({
       id: nodeId,
@@ -124,34 +127,50 @@ function register(deps: AppDeps, log: Logger) {
   };
 }
 
-function heartbeat(deps: AppDeps) {
-  return async (c: Context): Promise<Response> => {
-    const auth = await authenticate(c, deps);
-    if ('response' in auth) return auth.response;
-    const body = await readJson(c);
-    if (!body.ok) return body.response;
-    const version = protocolVersionOf(body.value);
-    if (typeof version === 'number' && version !== 2)
-      return controllerError(
+/** The validated v2 report of the authenticated node, or the 400 to answer. */
+async function readReport(
+  c: Context,
+  nodeId: string
+): Promise<
+  { readonly report: HeartbeatBody } | { readonly response: Response }
+> {
+  const body = await readJson(c);
+  if (!body.ok) return body;
+  const version = protocolVersionOf(body.value);
+  if (typeof version === 'number' && version !== 2)
+    return {
+      response: controllerError(
         c,
         400,
         'unsupported_version',
         'This controller speaks heartbeat protocol v2. Update the node agent from Git.'
-      );
-    const parsed = validateHeartbeat(body.value);
-    if (!parsed.ok) return invalidBody(c, 'invalid_request', parsed.errors);
-    if (parsed.value.nodeId !== auth.node.id) {
-      return controllerError(
+      ),
+    };
+  const parsed = validateHeartbeat(body.value);
+  if (!parsed.ok)
+    return { response: invalidBody(c, 'invalid_request', parsed.errors) };
+  if (parsed.value.nodeId !== nodeId)
+    return {
+      response: controllerError(
         c,
         400,
         'invalid_request',
         'nodeId must equal the id in the credential.'
-      );
-    }
+      ),
+    };
+  return { report: parsed.value };
+}
+
+function heartbeat(deps: AppDeps) {
+  return async (c: Context): Promise<Response> => {
+    const auth = await authenticate(c, deps);
+    if ('response' in auth) return auth.response;
+    const read = await readReport(c, auth.node.id);
+    if ('response' in read) return read.response;
     const now = deps.now();
     const node = await deps.store.recordHeartbeat(
       auth.node.id,
-      parsed.value,
+      read.report,
       clientAddress(c),
       now
     );
@@ -171,7 +190,7 @@ function heartbeat(deps: AppDeps) {
       );
     }
     const desired = desiredFor(node, await loadConfig(deps.store, node));
-    const current = parsed.value.agent.desiredRevision === desired.revision;
+    const current = read.report.agent.desiredRevision === desired.revision;
     return c.json({
       ok: true,
       status: node.approval,

@@ -16,7 +16,10 @@ describeStore('SqliteStore telemetry history', (ctx) => {
   test('maximum collections stay complete in facts but compact in persisted history and MemoryStore', async () => {
     const { store, db } = ctx();
     const registered = await store.registerNode(
-      registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
     );
     const memory = new MemoryStore();
     memory.seedNode(registered.node);
@@ -55,7 +58,10 @@ describeStore('SqliteStore telemetry history', (ctx) => {
   test('five-second reports return at most 1440 representative points across the whole day', async () => {
     const { store, db } = ctx();
     const registered = await store.registerNode(
-      registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
     );
     const count = MAX_HISTORY_POINTS * 12;
     await db.sql`insert into heartbeats (node_id, at, load1)
@@ -99,7 +105,10 @@ describeStore('SqliteStore telemetry history', (ctx) => {
   test('preserves measured samples in facts and history alongside legacy agents', async () => {
     const { store } = ctx();
     await store.registerNode(
-      registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
     );
     const sample = telemetry();
     const node = await store.recordHeartbeat(

@@ -166,11 +166,13 @@ function diskEvents(
   ];
 }
 
-/** The node now runs its assigned role (or base, unassigned), and did not before. */
+/** The node now runs its assigned role (or base, unassigned), and did not in its last report. */
 function convergedRoleEvents(
   prev: NodeRow,
   body: HeartbeatBody
 ): DerivedEvent[] {
+  // The first report is a baseline, like boots and revisions.
+  if (prev.observedRole === null) return [];
   const assigned = prev.role ?? 'base';
   if (body.role !== assigned || prev.observedRole === body.role) return [];
   return [

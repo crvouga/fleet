@@ -101,6 +101,13 @@ role. Its compact lines:
   refusal from GitHub; see `scripts/runner_control.py` `refusal`).
 - `fleet agent= outcome= approval= last= failures= error=`: the agent's last
   report attempt.
+- `role running=ROLE/CLOSURE target=ROLE/CLOSURE phase=`: the role this node
+  runs, the one it is assigned (`/nix/fleet-state/target`) and fleet-sync's
+  convergence phase (`/run/fleet/reconcile.json`). A `blocked` phase lists its
+  reason as an `issue lasting` line, for example
+  `FLEET_SECRETS_RECIPIENT_MISSING` (re-encrypt the role's secrets for the node's
+  recipient) or `FLEET_ROLE_RETIRED` (assign an active role). On the node,
+  `fleet-target show` prints the same.
 - `net`, `sync`, `failed`, `hw`, `installed` (the install log's handoff line:
   wizard build and attempt), and `journal UNIT | …`: the last journal lines of the
   first unhealthy runner or failed unit, with long opaque strings redacted.
@@ -130,7 +137,7 @@ hardware probes mocked or use existing stand-ins. `FLEET_WRITE_TARGET` requires
 writes and firmware have their own regular-file stand-ins described in
 [windows.md](windows.md).
 
-CLI-only reports can use the read-only `fleet-node.sh doctor ROLE --json`
+CLI-only reports can use the read-only `fleet-node.sh doctor --json`
 command from [agent-install.md](agent-install.md). Do not rerun an installation,
 enroll again, change firmware, alter a boot entry or modify a staging journal
 to collect evidence. A successful stand-in test proves the software boundary;

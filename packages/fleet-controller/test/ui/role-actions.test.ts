@@ -125,6 +125,15 @@ describe('approving with a role', () => {
     expect(await roleEvents(harness, IDS.pending)).toHaveLength(0);
   });
 
+  test('approving a reinstalled machine with no choice keeps its stored role', async () => {
+    const harness = populated();
+    await harness.deps.store.assignRole(IDS.pending, 'devbox', 'chris');
+    await post(harness.app, `/nodes/${IDS.pending}/approve`, { role: '' });
+    const row = await harness.deps.store.findNode(IDS.pending);
+    expect(row?.approval).toBe('approved');
+    expect(row?.role).toBe('devbox');
+  });
+
   test('approve with a bad role approves nothing', async () => {
     const harness = populated();
     await post(harness.app, `/nodes/${IDS.pending}/approve`, { role: 'web' });

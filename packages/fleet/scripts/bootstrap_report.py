@@ -1,7 +1,10 @@
 """Authenticated installation status using the normal node protocol.
 
-The same private node credential is copied into the installed system. Reports
-describe installation progress; they never claim that a staged node is ready.
+The live installer registers the hardware identity without a role (contract
+C1) and waits for a person, or an enrollment token, to approve it before any
+disk is erased. The same private node credential is copied into the installed
+system. Reports describe installation progress; they never claim that a
+staged node is ready. The installer never compares or chooses a role.
 """
 import json
 import os
@@ -11,6 +14,8 @@ from pathlib import Path
 
 import agent
 import cattle
+
+TOKEN_MAX = 512
 
 
 class ApprovalRefused(Exception):
@@ -39,27 +44,49 @@ def latest_progress(path):
         return None
 
 
+def read_token(token_file):
+    token_file = Path(token_file)
+    return token_file.read_text()[:TOKEN_MAX + 2].strip() if token_file.is_file() else ''
+
+
+def live_identity():
+    """The hardware identity. Until the controller assigns a role the node is base."""
+    digest = cattle.read_machine_digest(attempts=1)
+    return {'id': digest, 'hostname': 'base-' + digest[:4]}
+
+
 class BootstrapReporter:
-    def __init__(self, toplevel, role, token_file, identity=None, http=None):
+    def __init__(self, toplevel, token_file, identity=None, http=None):
         metadata = json.loads((Path(toplevel) / 'etc/fleet/bootstrap.json').read_text())
-        token_file = Path(token_file)
-        self.role = role
-        self.token = token_file.read_text().strip() if token_file.is_file() else ''
-        self.paths = agent.Paths({'FLEET_AGENT_STATE': str(token_file.parent / (role + '.agent'))})
+        self.token = read_token(token_file)
+        # The private node credential of this live boot, beside the token.
+        self.paths = agent.Paths({'FLEET_AGENT_STATE': str(Path(token_file).parent / 'agent')})
         self.worker = agent.Agent(self.paths, metadata['apiUrl'], http=http, log=lambda _: None)
         self.identity = identity
         self.started = False
 
+    def bearer(self):
+        return self.identity['id'] + '.' + self.worker.secret
+
+    def register(self):
+        """POST /v1/nodes/register with no role (C1). Sets worker.approval."""
+        body = {'nodeId': self.identity['id'], 'hostname': self.identity['hostname'], 'secret': self.worker.secret}
+        if self.token:
+            body['enrollmentToken'] = self.token
+        status, document = self.worker.api('POST', '/v1/nodes/register', body)
+        if status in (200, 201) and isinstance(document, dict) and document.get('status') in ('approved', 'pending', 'rejected'):
+            self.worker.approval = document['status']
+            return True
+        return False
+
     def begin(self, check_api):
-        check_api(self.worker.base, self.role, self.token)
+        check_api(self.worker.base, self.token)
         if self.identity is None:
-            digest = cattle.read_machine_digest(attempts=1)
-            self.identity = {'id': digest, 'role': self.role, 'hostname': self.role + '-' + digest[:4]}
+            self.identity = live_identity()
         self.paths.state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        agent.write_private(self.paths.role_token, self.token + '\n')
         self.worker.ensure_secret()
         try:
-            registered = self.worker.register(self.identity)
+            registered = self.register()
         except agent.NetworkError:
             raise ReportUnavailable('FLEET_API_UNAVAILABLE: enrollment reporting is unavailable; retrying before disk changes.') from None
         deadline = time.monotonic() + min(1800, max(0, int(os.environ.get('FLEET_APPROVAL_WAIT_SECONDS', '300'))))
@@ -68,11 +95,11 @@ class BootstrapReporter:
                 raise ApprovalRefused('FLEET_APPROVAL_REQUIRED: approve this node under Pending in the Fleet app, then retry. Nothing was erased.')
             time.sleep(5)
             try:
-                status, document = self.worker.api('GET', '/v1/enrollment/status', None,
-                    bearer=self.identity['id'] + '.' + self.worker.secret)
+                status, document = self.worker.api('GET', '/v1/enrollment/status', None, bearer=self.bearer())
                 if status == 403:
                     raise ApprovalRefused('FLEET_APPROVAL_REQUIRED: this node was rejected or retired in Fleet. Nothing was erased.')
-                if status != 200 or not isinstance(document, dict) or document.get('nodeId') != self.identity['id'] or document.get('role') != self.role:
+                # C3: the role in the answer is the controller's business, never compared here.
+                if status != 200 or not isinstance(document, dict) or document.get('nodeId') != self.identity['id']:
                     raise ReportUnavailable('FLEET_API_UNAVAILABLE: Fleet approval could not be verified. Nothing was erased.')
                 self.worker.approval = document.get('status')
             except agent.NetworkError:
@@ -88,20 +115,21 @@ class BootstrapReporter:
         if not self.started:
             return
         identity = self.identity
+        message = message[:500]
         body = {
-            'v': 1, 'nodeId': identity['id'], 'role': self.role, 'hostname': identity['hostname'],
+            'v': 2, 'nodeId': identity['id'], 'role': 'base', 'closure': 'base', 'hostname': identity['hostname'],
             'capabilities': [], 'revision': None, 'bootId': None, 'uptimeSeconds': None,
             'kernel': None, 'arch': None, 'cpu': {'cores': None, 'model': None},
             'memory': {'totalMiB': None, 'availableMiB': None}, 'load1': None,
             'disk': {'nixUsedPercent': None, 'bootUsedPercent': None}, 'addresses': [],
             'sync': {'rolledBack': False, 'healthFailure': None, 'paused': False},
-            'failedUnits': [], 'runners': None, 'readiness': {'issues': [message[:500]]},
-            'agent': {'version': 'bootstrap-1', 'configRevision': None},
-            'events': [{'kind': 'installation', 'severity': 'error' if failed else 'info', 'message': message[:500]}],
+            'failedUnits': [], 'runners': None, 'readiness': {'issues': [message]},
+            'agent': {'version': '2', 'desiredRevision': None},
+            'reconcile': {'phase': 'blocked' if failed else 'progressing', 'issues': [message]},
+            'events': [{'kind': 'installation', 'severity': 'error' if failed else 'info', 'message': message}],
         }
         try:
-            status, _ = self.worker.api('POST', '/v1/heartbeat', body,
-                bearer=identity['id'] + '.' + self.worker.secret, timeout=10)
+            status, _ = self.worker.api('POST', '/v1/heartbeat', body, bearer=self.bearer(), timeout=10)
             if status != 200:
                 raise ReportUnavailable()
         except (agent.NetworkError, ReportUnavailable):
@@ -112,17 +140,16 @@ class BootstrapReporter:
 
 def main(args):
     try:
-        toplevel, role, token_file, message, *parent = args
+        toplevel, token_file, message, *parent = args
         metadata_path = Path(toplevel) / "etc/fleet/bootstrap.json"
         metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
         if metadata.get("approvalMode") == "local" and metadata.get("apiUrl") == "":
             return 0
-        reporter = BootstrapReporter(toplevel, role, token_file)
+        reporter = BootstrapReporter(toplevel, token_file)
         current = (agent.read_text(reporter.paths.secret, 256) or '').strip()
         if not agent.HEX64.fullmatch(current):
             return 1
-        digest = cattle.read_machine_digest(attempts=1)
-        reporter.identity = {'id': digest, 'role': role, 'hostname': role + '-' + digest[:4]}
+        reporter.identity = live_identity()
         reporter.worker.secret = current
         reporter.started = True
         if not parent:

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { renderMetrics } from '../../src/routes/metrics';
-import { viewOf } from '../../src/domain/status';
+import { viewOf } from '../../src/domain/node-view';
 import { nodeRow } from '../../src/testing/fixtures';
 import { telemetry } from '../support/telemetry';
 import { readFacts } from '../../src/ui/lib/facts';
@@ -14,7 +14,7 @@ test('the UI and readiness gauge refuse paused or rolled-back nodes', () => {
       lastSeenAt: now,
       body: { readiness: { issues: [] }, revision: 'abc123', sync },
     });
-    const view = viewOf(row, now, 300);
+    const view = viewOf(row, now, { alerts: { offlineAfterSeconds: 300 } });
     expect(integrationReady(view, readFacts(row))).toBe(false);
     const gauge = renderMetrics([view], now)
       .split('\n')
@@ -34,7 +34,10 @@ test('resource metrics preserve zero, omit unknown rates and suppress stale meas
       revision: 'abc123',
     },
   });
-  const current = renderMetrics([viewOf(row, now, 300)], now);
+  const current = renderMetrics(
+    [viewOf(row, now, { alerts: { offlineAfterSeconds: 300 } })],
+    now
+  );
   const measurements = current
     .split('\n')
     .filter((line) => !line.startsWith('#'));
@@ -58,7 +61,10 @@ test('resource metrics preserve zero, omit unknown rates and suppress stale meas
     )
   ).toBe(false);
   const later = new Date(now.getTime() + 200_000);
-  const stale = renderMetrics([viewOf(row, later, 300)], later)
+  const stale = renderMetrics(
+    [viewOf(row, later, { alerts: { offlineAfterSeconds: 300 } })],
+    later
+  )
     .split('\n')
     .filter((line) => !line.startsWith('#'));
   expect(

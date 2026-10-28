@@ -1,6 +1,6 @@
 # Fleet contributor instructions
 
-Fleet is standalone: no dependency on the original infrastructure repository, its Vault, domains, OIDC relay, GitHub IDs or credentials. All deployment configuration is operator supplied. Keep optional services optional; never fall back to synthetic data in managed mode. Use `bun run dev:fixtures` for synthetic data.
+Fleet runtime is standalone: no dependency on the original infrastructure repository, its Vault, domains, OIDC relay, GitHub IDs or credentials. Release engineering may use Chris Vouga’s shared infrastructure, including Vault/OpenBao in trusted CI and the verified installer publisher identity. Keep CI credentials and infrastructure clients out of application runtime and installer payloads. Shared CI integration guidance: https://www.chrisvouga.dev/llms-infra.txt (linked from https://www.chrisvouga.dev/llms.txt). All deployment configuration is operator supplied. Keep optional services optional; never fall back to synthetic data in managed mode. Use `bun run dev:fixtures` for synthetic data.
 
 Install with Bun 1.4.4. Run `bun run check`; Linux contributors also run `bun run check:nix`. Report unavailable checks truthfully. Keep ESLint structural limits enabled and never patch dependencies.
 

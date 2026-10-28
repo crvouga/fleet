@@ -13,14 +13,15 @@ def validate_image(source):
     """Exercise the installer's reader against the built ISO before publishing.
 
     Boot menus alone do not prove their referenced files can be found or read.
-    Check every role, including Windows' marker and EFI loader requirements.
+    Check the one installer entry, including Windows' marker and EFI loader
+    requirements, and the single `blocked` readiness list.
     """
     with open(source, 'rb') as image:
         files = decide._iso_index(image)
         readiness = json.loads(decide._iso_bytes(image, files, 'fleet-readiness.json'))
-        for role in decide.ROLES:
-            decide.iso_boot_material(source, role)
-    if readiness.get('version') != 1 or not isinstance(readiness.get('roles'), dict):
+    decide.iso_boot_material(source)
+    blocked = readiness.get('blocked') if isinstance(readiness, dict) else None
+    if readiness.get('version') != 2 or not isinstance(blocked, list) or not all(isinstance(item, str) for item in blocked):
         raise ValueError('installer image has no valid onboarding readiness metadata')
     return readiness
 
