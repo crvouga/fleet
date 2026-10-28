@@ -309,6 +309,7 @@ These follow the principles above (controller records intent, nodes converge and
 - **Access and configuration safety** ([access-and-config-safety.md](packages/fleet-controller/docs/access-and-config-safety.md)): viewer/admin roles, node credential rotation and immediate revocation, optimistic concurrency, dry-run impact and acknowledgement for settings, and per-node desired-state history.
 - **GitHub runners** ([github-runners.md](packages/fleet-controller/docs/github-runners.md)): the GitHub App key lives only on the controller; nodes ask it for short-lived registration tokens. Jobs, runners, orphans and placement are visible in the controller.
 - **Issue reporting** ([issue-reporting.md](packages/fleet-controller/docs/issue-reporting.md)), **observability** ([observability.md](packages/fleet-controller/docs/observability.md)) and **installer binding and enrollment grants** ([installer-enrollment.md](packages/fleet-controller/docs/installer-enrollment.md)).
+- **Technology choices** ([TECHNOLOGY_DECISIONS.md](TECHNOLOGY_DECISIONS.md)): why NixOS-native ephemeral runners rather than K3s, Flux and ARC, what was adopted, deferred or rejected, and the triggers that would change that.
 - **Verification** ([verification.md](packages/fleet-controller/docs/verification.md)): requirement-to-test traceability and what is not verified.
 
 ## Boundaries

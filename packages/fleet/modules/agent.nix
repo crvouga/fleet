@@ -23,6 +23,9 @@ in {
       ExecStart = "${tools.agent}/bin/fleet-agent run";
       Restart = "always";
       RestartSec = "30s";
+      # Under memory pressure the kernel sacrifices CI jobs (OOMScoreAdjust 500
+      # in runners.nix) long before the agent that reports and converges the node.
+      OOMScoreAdjust = -500;
     };
   };
 }

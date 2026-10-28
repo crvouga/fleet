@@ -263,6 +263,18 @@ in {
       DOCKER_HOST = "unix:///run/user/${toString (2000 + lib.lists.findFirstIndex (x: x == id) 0 ids)}/podman/podman.sock";
     };
     serviceOverrides = {
+      # Resource control, the systemd equivalent of Kubernetes requests/limits
+      # and priority classes without a second scheduler: every slot lives in one
+      # slice that is capped below the machine's memory (so a runaway job cannot
+      # starve fleet-agent or fleet-sync), shares CPU and I/O fairly, and is the
+      # first thing the kernel OOM killer chooses. Absolute per-slot memory
+      # limits are not set: the slot count is derived at boot from the live CPU
+      # and RAM (cattle.py), which Nix cannot know at evaluation time.
+      Slice = "fleet-ci.slice";
+      CPUWeight = 100;
+      IOWeight = 100;
+      TasksMax = 16384;
+      OOMScoreAdjust = 500;
       Restart = lib.mkForce "always";
       RestartSec = "15s";
       UMask = lib.mkForce "0077";
@@ -283,6 +295,19 @@ in {
       NoNewPrivileges = lib.mkForce false;
     };
   }) ids);
+  # The shared cgroup of every runner slot (see serviceOverrides). MemoryHigh
+  # throttles before MemoryMax kills, and both leave headroom for the system.
+  systemd.slices.fleet-ci = lib.mkIf (ids != [ ]) {
+    description = "Fleet CI runner slots";
+    sliceConfig = {
+      CPUAccounting = true;
+      MemoryAccounting = true;
+      IOAccounting = true;
+      TasksAccounting = true;
+      MemoryHigh = "88%";
+      MemoryMax = "92%";
+    };
+  };
   systemd.services = builtins.listToAttrs (lib.imap1 (n: id: lib.nameValuePair "github-runner-${id}" {
     wantedBy = lib.mkForce [ ];
     requires = [ "node-identity.service" ];
