@@ -94,6 +94,15 @@ describe.skipIf(!databaseAvailable)('startController', () => {
         remoteAddr: '127.0.0.1',
         status: 'online',
       });
+      const owner = await fetch(`${base}/v1/access/owner@example.org`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      });
+      expect(owner.status).toBe(200);
+      const access = await fetch(`${base}/v1/access`, {
+        headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      });
+      expect(await access.json()).toEqual({ emails: ['owner@example.org'] });
     } finally {
       await running.stop();
     }

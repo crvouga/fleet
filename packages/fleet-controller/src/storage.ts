@@ -16,11 +16,38 @@ export interface StorageConfig {
 }
 const read = (source: Source, key: string) => source[key]?.trim() || undefined;
 
-function required(source: Source, key: string, problems: string[]): string {
-  const value = read(source, key);
+/**
+ * Generic S3 names many hosting platforms already supply. Each is used only
+ * when Fleet's own name is unset; conflicting values refuse startup.
+ */
+export const S3_ALIASES = {
+  FLEET_S3_BUCKET: 'S3_BUCKET',
+  FLEET_S3_ENDPOINT: 'S3_ENDPOINT',
+  AWS_REGION: 'S3_REGION',
+  AWS_ACCESS_KEY_ID: 'S3_ACCESS_KEY_ID',
+  AWS_SECRET_ACCESS_KEY: 'S3_SECRET_ACCESS_KEY',
+} as const;
+type Aliased = keyof typeof S3_ALIASES;
+
+function setting(
+  source: Source,
+  key: Aliased,
+  problems: string[]
+): string | undefined {
+  const own = read(source, key);
+  const alias = read(source, S3_ALIASES[key]);
+  if (own && alias && own !== alias)
+    problems.push(
+      `${key} and ${S3_ALIASES[key]} are both set to different values; unset one of them`
+    );
+  return own ?? alias;
+}
+
+function required(source: Source, key: Aliased, problems: string[]): string {
+  const value = setting(source, key, problems);
   if (!value)
     problems.push(
-      `${key} is required; set it in deployment.env (see deployment.env.example)`
+      `${key} is required (or ${S3_ALIASES[key]}); set it in deployment.env (see deployment.env.example)`
     );
   else if (/[\r\n\0]/.test(value))
     problems.push(
@@ -30,7 +57,7 @@ function required(source: Source, key: string, problems: string[]): string {
 }
 
 function endpointOf(source: Source, problems: string[]): string | undefined {
-  const value = read(source, 'FLEET_S3_ENDPOINT');
+  const value = setting(source, 'FLEET_S3_ENDPOINT', problems);
   if (!value) return undefined;
   try {
     const url = new URL(value);
@@ -107,6 +134,18 @@ function timeoutOf(source: Source, problems: string[]): number {
   return value * 1000;
 }
 
+/** The S3 credentials Litestream reads from its environment, after alias resolution. */
+export function litestreamCredentials(
+  source: Source
+): Record<'AWS_ACCESS_KEY_ID' | 'AWS_SECRET_ACCESS_KEY', string> {
+  const ignored: string[] = [];
+  return {
+    AWS_ACCESS_KEY_ID: setting(source, 'AWS_ACCESS_KEY_ID', ignored) ?? '',
+    AWS_SECRET_ACCESS_KEY:
+      setting(source, 'AWS_SECRET_ACCESS_KEY', ignored) ?? '',
+  };
+}
+
 /** Production has one storage choice: local SQLite replicated through Litestream. */
 export function readStorage(source: Source, problems: string[]): StorageConfig {
   rejectRemoved(source, problems);
@@ -125,7 +164,7 @@ export function readStorage(source: Source, problems: string[]): StorageConfig {
       'FLEET_S3_PREFIX must be a non-empty object prefix with no leading/trailing slash, empty segments or dot segments (example: fleet/production)'
     );
   }
-  const region = read(source, 'AWS_REGION') ?? 'us-east-1';
+  const region = setting(source, 'AWS_REGION', problems) ?? 'us-east-1';
   if (!/^[a-z][a-z0-9-]{0,62}$/.test(region))
     problems.push(
       'AWS_REGION must be a region identifier such as us-east-1 or auto for providers that require it'

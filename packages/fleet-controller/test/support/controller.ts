@@ -5,7 +5,7 @@ import { createController, type ControllerAppOptions } from '../../src/app';
 import { FleetAdminAuth } from '../../src/auth/admin-auth';
 import type { AppDeps, AppEnv } from '../../src/deps';
 import type { Store } from '../../src/store';
-import type { BrowserAuth } from '../../src/auth/browser-contract';
+import type { AccessStore, BrowserAuth } from '../../src/auth/browser-contract';
 
 import { T0, nodeIdOf, secretOf, sha256 } from './fixtures';
 
@@ -68,6 +68,7 @@ export interface CallInit {
 
 export interface HarnessOptions {
   readonly browser?: BrowserAuth;
+  readonly access?: AccessStore;
   readonly clock?: Clock;
   readonly env?: Partial<AppEnv>;
   readonly controller?: ControllerAppOptions;
@@ -92,6 +93,7 @@ export function createHarness(
   const env = testEnv(options.env);
   const deps: AppDeps = {
     store,
+    ...(options.access ? { access: options.access } : {}),
     auth: new FleetAdminAuth({
       env,
       ...(options.browser ? { browser: options.browser } : {}),

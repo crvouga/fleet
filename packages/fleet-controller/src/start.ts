@@ -1,161 +1,110 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { stringify } from 'yaml';
+import { randomUUID } from 'node:crypto';
 import { createLogger, type Logger } from '@pkgs/logger';
 
-import { ConfigurationError, readControllerEnv } from './env';
+import {
+  ConfigurationError,
+  readControllerEnv,
+  type ControllerEnv,
+} from './env';
 import { preflight } from './preflight';
-import { StartupError, databaseFailure } from './startup-error';
-import { createDb } from './db/client';
-import type { StorageConfig } from './storage';
+import { StartupError } from './startup-error';
+import { litestreamCredentials } from './storage';
+import type { OwnershipContext } from './ownership/acquire';
+import { s3ConditionalStore } from './ownership/object-store';
+import { OwnerRecordError, verifyConditionalWrites } from './ownership/record';
+import { shutdownSignal, type Shutdown } from './ownership/shutdown';
+import { superviseWriter } from './ownership/supervisor';
 
-/** Generated without credentials; env expansion is disabled to preserve literal paths. */
-export function litestreamConfig(storage: StorageConfig): string {
-  return stringify({
-    dbs: [
-      {
-        path: storage.path,
-        replica: {
-          type: 's3',
-          bucket: storage.bucket,
-          path: storage.prefix,
-          region: storage.region,
-          ...(storage.endpoint
-            ? { endpoint: storage.endpoint, 'force-path-style': true }
-            : {}),
-          'sync-interval': '1s',
-        },
-      },
-    ],
-  });
-}
+export { litestreamConfig } from './litestream';
 
-async function run(
-  binary: string,
-  args: string[],
-  storage: StorageConfig
-): Promise<number> {
-  const child = Bun.spawn([binary, ...args], {
-    stdout: 'inherit',
-    stderr: 'inherit',
-    env: {
-      ...process.env,
-      FLEET_REPLICATION_MANAGED: '1',
-      FLEET_DATABASE_PATH: storage.path,
-    },
-  });
-  const cleanup = supervise(
-    child,
-    args.includes('-exec') ? undefined : storage.startupTimeoutMs
-  );
-  try {
-    const code = await child.exited;
-    if (!args.includes('-exec') && cleanup.interrupted()) return 1;
-    if (args.includes('-exec') && code === 0 && !cleanup.interrupted())
-      return 1;
-    return code;
-  } finally {
-    cleanup.release();
-  }
-}
-
-/** Bound restore/initial-sync retries; the long-running controller has no runtime deadline. */
-function supervise(
-  child: ReturnType<typeof Bun.spawn>,
-  timeoutMs?: number
-): { release(): void; interrupted(): boolean } {
-  let interrupted = false;
-  let force: ReturnType<typeof setTimeout> | undefined;
-  const stop = () => {
-    interrupted = true;
-    child.kill('SIGTERM');
-  };
-  const timer =
-    timeoutMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          stop();
-          force = setTimeout(() => child.kill('SIGKILL'), 1000);
-        }, timeoutMs);
-  process.on('SIGTERM', stop);
-  process.on('SIGINT', stop);
+function ownershipContext(
+  env: ControllerEnv,
+  log: Logger,
+  shutdown: Shutdown
+): OwnershipContext {
+  const credentials = litestreamCredentials(process.env);
+  const sessionToken = process.env['AWS_SESSION_TOKEN']?.trim();
   return {
-    interrupted: () => interrupted,
-    release: () => {
-      clearTimeout(timer);
-      clearTimeout(force);
-      process.off('SIGTERM', stop);
-      process.off('SIGINT', stop);
-    },
+    store: s3ConditionalStore(env.storage, {
+      accessKeyId: credentials.AWS_ACCESS_KEY_ID,
+      secretAccessKey: credentials.AWS_SECRET_ACCESS_KEY,
+      ...(sessionToken ? { sessionToken } : {}),
+    }),
+    prefix: env.storage.prefix,
+    instance: randomUUID(),
+    timing: env.ownership,
+    now: () => performance.now(),
+    sleep: shutdown.sleep,
+    stopped: shutdown.requested,
+    log,
   };
 }
 
-async function initialize(storage: StorageConfig): Promise<void> {
+async function requireConditionalWrites(ctx: OwnershipContext): Promise<void> {
+  let supported = false;
   try {
-    await (await createDb(storage)).close();
-  } catch (error) {
-    throw databaseFailure(error);
+    supported = await verifyConditionalWrites(
+      ctx.store,
+      ctx.prefix,
+      ctx.instance
+    );
+  } catch {
+    supported = false;
   }
+  if (!supported)
+    throw new StartupError(
+      'ownership',
+      'Object storage refused or ignored a conditional write (If-None-Match / If-Match). Fleet needs them to guarantee a single writer. Check bucket Put/Get/Delete permissions, endpoint and credentials, or use a provider with conditional writes (AWS S3, Cloudflare R2). The Fleet controller did not start listening.'
+    );
 }
 
-async function replicate(
+async function serveAsWriter(
+  env: ControllerEnv,
   binary: string,
-  storage: StorageConfig,
   log: Logger,
   workerCommand?: string
-): Promise<void> {
-  const temporary = mkdtempSync(join(tmpdir(), 'fleet-litestream-'));
-  const config = join(temporary, 'litestream.yml');
-  writeFileSync(config, litestreamConfig(storage), { mode: 0o600 });
-  const common = ['-config', config, '-no-expand-env'];
+): Promise<number> {
+  const shutdown = shutdownSignal();
   try {
-    log.info('checking replica and restoring missing SQLite working state');
-    if (
-      (await run(
-        binary,
-        [
-          'restore',
-          ...common,
-          '-if-db-not-exists',
-          '-if-replica-exists',
-          storage.path,
-        ],
-        storage
-      )) !== 0
-    ) {
-      throw new StartupError(
-        'restore',
-        'Litestream restore failed. Fix FLEET_S3_BUCKET, FLEET_S3_PREFIX, FLEET_S3_ENDPOINT, AWS_REGION or AWS credentials; verify bucket List/Get permissions and connectivity. Check the Litestream error above. If the operation timed out, increase FLEET_STARTUP_TIMEOUT_SECONDS for a large restore. The Fleet controller did not start listening.'
-      );
-    }
-    await initialize(storage);
-    log.info('verifying S3 replication before accepting traffic');
-    if ((await run(binary, ['replicate', ...common, '-once'], storage)) !== 0) {
-      throw new StartupError(
-        'replica-write',
-        'Initial Litestream replication failed. Verify S3 List/Get/Put/Delete permissions for the configured bucket/prefix, endpoint, region and credentials. Retain the local database and retry after fixing the error above. Increase FLEET_STARTUP_TIMEOUT_SECONDS if a slow initial sync exceeded its deadline. The Fleet controller did not start listening.'
-      );
-    }
-    const worker =
-      workerCommand ??
-      `"${process.execPath}" "${join(import.meta.dir, 'controller.ts')}"`;
-    const code = await run(
+    const ctx = ownershipContext(env, log, shutdown);
+    await requireConditionalWrites(ctx);
+    return await superviseWriter({
       binary,
-      ['replicate', ...common, '-exec', worker],
-      storage
-    );
-    if (code !== 0) {
-      log.error('Fleet controller or Litestream exited unsuccessfully', {
-        stage: 'serve',
-        exitCode: code,
-        fix: 'Read the startup/runtime error above. Fix database permissions, PORT conflicts, assets or replica access before restarting. See CONFIGURATION.md.',
-      });
-    }
-    process.exitCode = code;
+      storage: env.storage,
+      log,
+      worker:
+        workerCommand ??
+        `"${process.execPath}" "${new URL('controller.ts', import.meta.url).pathname}"`,
+      ctx,
+      shutdown,
+    });
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    shutdown.dispose();
   }
+}
+
+function describe(error: unknown): { stage: string; error: string } {
+  if (error instanceof StartupError)
+    return { stage: error.stage, error: error.message };
+  if (error instanceof ConfigurationError)
+    return { stage: 'configuration', error: error.message };
+  if (error instanceof OwnerRecordError)
+    return {
+      stage: 'ownership',
+      error: `${error.message}. Fleet will not guess who owns the replica: stop every instance using this FLEET_S3_PREFIX, then inspect fleet-owner.json under the prefix. The Fleet controller did not start listening.`,
+    };
+  return {
+    stage: 'configuration',
+    error:
+      'Startup prerequisite failed. Check local directory permissions, available disk space and FLEET_LITESTREAM_BIN. See CONFIGURATION.md.',
+  };
+}
+
+function reportFailure(log: Logger, error: unknown): void {
+  log.error('fleet controller startup failed', {
+    ...describe(error),
+    fix: 'Edit deployment.env using deployment.env.example; rerun bun run check:config, then bun run start. See CONFIGURATION.md.',
+  });
 }
 
 export async function start(
@@ -172,17 +121,16 @@ export async function start(
       );
       return;
     }
-    await replicate(binary, env.storage, log, workerCommand);
+    const code = await serveAsWriter(env, binary, log, workerCommand);
+    if (code !== 0)
+      log.error('Fleet controller or Litestream exited unsuccessfully', {
+        stage: 'serve',
+        exitCode: code,
+        fix: 'Read the startup/runtime error above. Fix database permissions, PORT conflicts, assets or replica access before restarting. See CONFIGURATION.md.',
+      });
+    process.exitCode = code;
   } catch (error) {
-    const known =
-      error instanceof ConfigurationError || error instanceof StartupError;
-    log.error('fleet controller startup failed', {
-      stage: error instanceof StartupError ? error.stage : 'configuration',
-      error: known
-        ? error.message
-        : 'Startup prerequisite failed. Check local directory permissions, available disk space and FLEET_LITESTREAM_BIN. See CONFIGURATION.md.',
-      fix: 'Edit deployment.env using deployment.env.example; rerun bun run check:config, then bun run start. See CONFIGURATION.md.',
-    });
+    reportFailure(log, error);
     process.exitCode = 1;
   }
 }

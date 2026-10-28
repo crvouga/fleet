@@ -9,6 +9,7 @@ import { bodyLimit } from 'hono/body-limit';
 
 import type { AppDeps } from './deps';
 import { RateLimiter } from './domain/rate-limit';
+import { mountAdminAccess } from './routes/admin-access';
 import { mountAdminEvents } from './routes/admin-events';
 import { mountAdminNodes } from './routes/admin-nodes';
 import { mountAdminSettings } from './routes/admin-settings';
@@ -32,6 +33,47 @@ export interface ControllerAppOptions {
   readonly loginLimit?: RateLimitSetting;
   /** How long /health waits for the database before answering 503. Default 3 s. */
   readonly healthTimeoutMs?: number;
+  /**
+   * False while this process may not serve requests (another instance owns
+   * the replica, or ownership is being handed over). Default: always.
+   */
+  readonly writable?: () => boolean;
+}
+
+/** Served even while not the writer: liveness and immutable static files. */
+const ALWAYS_SERVED = (path: string) =>
+  path === '/health' || path.startsWith('/assets/');
+
+/**
+ * Answers 503 + Retry-After while this instance is not the writer. Reads are
+ * gated too: some (sign-in callbacks, enrollment polls) write as a side effect.
+ */
+function mountWriteGate(app: Hono, writable: () => boolean): void {
+  app.use('*', async (c, next) => {
+    if (ALWAYS_SERVED(c.req.path) || writable()) return next();
+    c.header('Retry-After', '5');
+    return controllerError(
+      c,
+      503,
+      'not_writer',
+      'This instance is handing over or no longer owns the database; retry shortly.'
+    );
+  });
+}
+
+/** One structured log entry per request, through the shared observability contract. */
+function mountObservability(app: Hono, log: Logger): void {
+  app.use('*', async (c, next) => {
+    c.res = await observeHttp(
+      log,
+      c.req.raw,
+      async () => {
+        await next();
+        return c.res;
+      },
+      () => c.req.routePath
+    );
+  });
 }
 
 const REGISTER_LIMIT: RateLimitSetting = { limit: 20, windowMs: 60_000 };
@@ -51,18 +93,8 @@ export function createController(
   const limiter = (setting: RateLimitSetting) =>
     new RateLimiter({ ...setting, now: clock });
   const app = new Hono();
-  app.use('*', async (c, next) => {
-    c.res = await observeHttp(
-      log,
-      c.req.raw,
-      async () => {
-        await next();
-        return c.res;
-      },
-      () => c.req.routePath
-    );
-  });
-
+  mountObservability(app, log);
+  if (options.writable) mountWriteGate(app, options.writable);
   app.use(
     '*',
     bodyLimit({
@@ -90,6 +122,7 @@ export function createController(
   mountAdminNodes(app, deps);
   mountAdminEvents(app, deps);
   mountAdminSettings(app, deps);
+  mountAdminAccess(app, deps);
   mountMetrics(app, deps);
   app.on(
     'POST',

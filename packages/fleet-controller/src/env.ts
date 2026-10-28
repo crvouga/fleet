@@ -4,11 +4,14 @@ import { readOidc } from './auth/oidc-config';
 import type { OidcConfig } from './auth/browser-contract';
 import { readEnrollmentTokens } from './auth/enrollment-config';
 import type { AppEnv } from './deps';
+import type { OwnershipTiming } from './ownership/acquire';
+import { readOwnershipTiming } from './ownership/timing';
 
 /** Everything the process reads from its environment, parsed once at boot. */
 export interface ControllerEnv extends AppEnv {
   readonly oidc?: OidcConfig;
   readonly storage: StorageConfig;
+  readonly ownership: OwnershipTiming;
   readonly port: number;
 }
 
@@ -77,6 +80,7 @@ export function readControllerEnv(
   const env: ControllerEnv = {
     ...(oidc ? { oidc } : {}),
     storage: readStorage(source, problems),
+    ownership: readOwnershipTiming(source, problems),
     port: parsePort(source, problems),
 
     adminToken: readSecret(source, 'FLEET_ADMIN_TOKEN', problems),

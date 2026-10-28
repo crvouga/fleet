@@ -2,8 +2,9 @@
 
 Fleet runs as **one native Bun process supervised by Litestream**. SQLite is built
 into Bun. S3-compatible object storage holds the durable replica; the local
-SQLite working directory can be restored on a replacement host. Run one writer
-per database and replica prefix. There are no selectable storage backends.
+SQLite working directory can be restored on a replacement host. Fleet enforces
+a single writer per replica prefix itself (see [Writer ownership](#writer-ownership)),
+so overlapping and rolling deployments are safe. There are no selectable storage backends.
 
 The controller package is `packages/fleet-controller` and its example unit is
 `fleet-controller.service`. Existing environment variable names, node `fleetApi`
@@ -23,6 +24,13 @@ credentials, repository or identity provider.
 | `FLEET_S3_BUCKET`       | An existing bucket name: 3–63 lowercase letters, digits, hyphens or dots. Supply the name, not a URL.                |
 | `AWS_ACCESS_KEY_ID`     | Access key for that bucket/prefix.                                                                                   |
 | `AWS_SECRET_ACCESS_KEY` | Corresponding secret key.                                                                                            |
+
+Hosting platforms that already supply the generic names `S3_BUCKET`,
+`S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` need
+no renaming: each is used when the corresponding `FLEET_S3_BUCKET`,
+`FLEET_S3_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
+is unset, is validated the same way, and is handed to Litestream under the AWS
+name. Setting both names of a pair to different values refuses startup.
 
 Give the S3 credentials List/Get/Put/Delete permissions for the selected bucket
 and prefix, including multipart-upload permissions required by the provider.
@@ -92,6 +100,17 @@ bun --env-file=deployment.env run access:allow owner@example.org
 ```
 
 Use the same checkout/environment and working-file path as the running service.
+Where nothing can run beside the service (container hosting), the admin token
+holder authorizes the owner over HTTP instead:
+
+```sh
+curl -fsS -X PUT -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+  https://fleet.example.org/v1/access/owner@example.org
+```
+
+`GET /v1/access` lists allowed emails and `DELETE /v1/access/:email` removes one
+(the final account cannot be removed). These routes require the admin token or an
+allowed browser session and are recorded in the access audit.
 First browser sign-in never grants access automatically. Fleet owns its opaque,
 SQLite-backed sessions and email allowlist; the provider owns user authentication.
 Provider errors refuse sign-in and never select another provider or fixture user.
@@ -129,14 +148,18 @@ The working file defaults to `/var/lib/fleet/fleet.db`. Its directory is writabl
 without a persistent volume: ordinary container restarts retain it, and a newly
 created container restores from S3. A mounted directory must also be writable by
 the container user. Allow at least 60 seconds for shutdown and a startup grace
-covering both restore and initial sync (60 seconds each by default). Configure
-one replica with **stop-before-start deployment**, including rollback; ordinary
-rolling deployment can corrupt the replica by running two writers concurrently.
+covering both restore and initial sync (60 seconds each by default). Rolling and
+overlapping deployments are supported: the new container asks the old one to hand
+over (see [Writer ownership](#writer-ownership)). Run exactly one replica of the
+service; autoscaling adds standbys, not capacity. On Railway, set
+`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60` so a stop without a successor can finish
+its final sync instead of being killed immediately.
 
 `.github/workflows/publish.yml` builds and tests the Linux image on pull requests.
 The container check uses disposable Moto S3 storage to exercise readiness,
-graceful shutdown, restart persistence, fresh-container restore, denied writes
-and refusal to start without configuration. Trusted main pushes call workspace's
+graceful shutdown, restart persistence, fresh-container restore (configured with
+the generic `S3_*` names), an overlapping rolling hand-over, denied writes and
+refusal to start without configuration. Trusted main pushes call workspace's
 reusable publisher for `ghcr.io/crvouga/chrisvouga-fleet-api:<commit-sha>` and
 `:latest`. Successful publication dispatches that commit to workspace's managed
 `fleet-api` service. Hosting, secrets and DNS remain OpenTofu-owned in the
@@ -154,11 +177,45 @@ Put your HTTPS reverse proxy in front of port 8080 for remote browser access.
 Monitor `/health` and Litestream's logs/replica freshness. `/health` checks the
 controller/database, not ongoing S3 replication; Litestream retries transient outages.
 
-Stop the old writer before starting a replacement. Preserve the complete local
-directory across ordinary restarts, including the WAL/SHM and Litestream metadata.
-To replace a lost host, use the same environment/bucket/prefix with an empty
-writable directory. Do not copy just a live `.db` file. Never run a restore drill
-alongside the original writer against the same prefix.
+Preserve the complete local directory across ordinary restarts, including the
+WAL/SHM, Litestream metadata and the `.generation` marker. To replace a lost host,
+use the same environment/bucket/prefix with an empty writable directory. Do not
+copy just a live `.db` file. Run restore drills against a copy under another prefix.
+
+### Writer ownership
+
+Every instance must own the replica prefix before it restores or writes. Ownership
+is the object `<prefix>/fleet-owner.json`, changed only with conditional writes
+(`If-None-Match` / `If-Match`), so two instances can never both claim it. Startup
+verifies that the provider honours conditional writes (AWS S3 and Cloudflare R2
+do) and refuses to start otherwise.
+
+Each owner writes its own **generation** of the replica under
+`<prefix>/generations/<n>/` and restores from the previous one, so even a
+misbehaving former owner can never overwrite the current replica. A replica
+written directly under `<prefix>` by earlier Fleet versions is generation 0 and is
+restored automatically on first start.
+
+- **Rolling deploy.** A new instance asks the owner to hand over. The owner answers
+  `503` with `Retry-After` to everything but `/health` and static assets, stops the worker, performs an
+  explicit final sync, and releases ownership reserved for the requester, which
+  restores and starts listening. The old instance stays up as a standby that
+  only takes released or expired ownership, and exits on SIGTERM.
+- **Crash.** The owner renews every `FLEET_OWNERSHIP_RENEW_SECONDS` (default 5).
+  A waiting instance takes over once the record has stayed unchanged for
+  `FLEET_OWNERSHIP_EXPIRE_SECONDS` (default 30, minimum 15, at least six renewals)
+  by its own clock. Recent
+  unreplicated writes (about one second) can be lost.
+- **Fencing.** An owner that cannot renew for two thirds of the expiry (timed
+  from before its last successful request) stops serving at least five seconds
+  before anyone may take over. A paused or partitioned owner
+  that resumes after a takeover refuses writes, stops its worker and becomes a standby.
+- **Local file.** The working file is kept only when its `.generation` marker
+  shows it continues the generation being restored; otherwise it is moved to
+  `fleet.db.superseded` (never deleted) and restored fresh.
+
+Earlier generations are retained in the bucket; remove old ones manually if
+storage matters (never the current generation or `fleet-owner.json`).
 
 Replication is asynchronous (one-second interval). Abrupt host loss may lose
 recent writes; S3 outages widen this window. A graceful stop lets Litestream
@@ -167,15 +224,16 @@ lifecycle rules that independently delete active replica objects.
 
 ## Troubleshooting
 
-| Failure stage                   | What to fix                                                                                                                                                                                                    |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configuration                   | Set the named settings in `deployment.env`, correct their format, and include `--env-file=deployment.env`. Removed backend settings must be unset, including blank ones.                                       |
-| Runtime / Litestream            | Install Bun 1.4.4 and Litestream 0.5.17; correct PATH or `FLEET_LITESTREAM_BIN`.                                                                                                                               |
-| Assets                          | Run `bun install --frozen-lockfile` and `bun run build`; make the built assets readable by the service user.                                                                                                   |
-| Filesystem                      | Fix directory/file ownership and write access, free disk space, or choose another `FLEET_DATABASE_PATH`.                                                                                                       |
-| Restore / initial replica write | Check endpoint, region, bucket/prefix, credential validity, network connectivity and List/Get/Put/Delete permissions. Read the preceding Litestream error. Startup never falls back to unreplicated operation. |
-| SQLite / schema                 | Stop other writers. Preserve corrupt files before restoring. If the schema is newer, deploy the matching newer Fleet version; never lower the schema version manually.                                         |
-| Listen                          | Free `PORT` or choose an unused unprivileged port; stop the previous instance.                                                                                                                                 |
+| Failure stage                   | What to fix                                                                                                                                                                                                                                                                   |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration                   | Set the named settings in `deployment.env`, correct their format, and include `--env-file=deployment.env`. Removed backend settings must be unset, including blank ones.                                                                                                      |
+| Runtime / Litestream            | Install Bun 1.4.4 and Litestream 0.5.17; correct PATH or `FLEET_LITESTREAM_BIN`.                                                                                                                                                                                              |
+| Assets                          | Run `bun install --frozen-lockfile` and `bun run build`; make the built assets readable by the service user.                                                                                                                                                                  |
+| Filesystem                      | Fix directory/file ownership and write access, free disk space, or choose another `FLEET_DATABASE_PATH`.                                                                                                                                                                      |
+| Ownership                       | The provider refused a conditional write: check Put/Get/Delete permissions, endpoint and credentials, or use a provider with conditional writes. An unreadable `fleet-owner.json` means another Fleet version or tool wrote it; never delete it while an instance is running. |
+| Restore / initial replica write | Check endpoint, region, bucket/prefix, credential validity, network connectivity and List/Get/Put/Delete permissions. Read the preceding Litestream error. Startup never falls back to unreplicated operation.                                                                |
+| SQLite / schema                 | Stop other writers. Preserve corrupt files before restoring. If the schema is newer, deploy the matching newer Fleet version; never lower the schema version manually.                                                                                                        |
+| Listen                          | Free `PORT` or choose an unused unprivileged port; stop the previous instance.                                                                                                                                                                                                |
 
 `DATABASE_URL`, `FLEET_DB_PREPARE`, `FLEET_DATABASE_URL`,
 `FLEET_DATABASE_AUTH_TOKEN`, and `FLEET_STORAGE_MODE` are removed and rejected.

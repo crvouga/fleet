@@ -1,5 +1,5 @@
 import type { Context } from 'hono';
-import type { BrowserAuth } from './auth/browser-contract';
+import type { AccessStore, BrowserAuth } from './auth/browser-contract';
 
 import type { EnrollmentTokenEntry } from './auth/enrollment-token';
 import type { Store } from './store';
@@ -32,6 +32,8 @@ export interface RevisionSource {
 
 export interface AppDeps {
   readonly browserAuth?: BrowserAuth;
+  /** The browser allowlist, also present while browser login is off. */
+  readonly access?: AccessStore;
   readonly store: Store;
   readonly auth: AdminAuth;
   readonly revisions: RevisionSource;
