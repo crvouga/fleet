@@ -166,6 +166,39 @@ function diskEvents(
   ];
 }
 
+/** The node now runs its assigned role (or base, unassigned), and did not before. */
+function convergedRoleEvents(
+  prev: NodeRow,
+  body: HeartbeatBody
+): DerivedEvent[] {
+  const assigned = prev.role ?? 'base';
+  if (body.role !== assigned || prev.observedRole === body.role) return [];
+  return [
+    {
+      kind: 'role_converged',
+      severity: 'info',
+      message: `now runs the ${assigned} role (${body.closure})`,
+    },
+  ];
+}
+
+/** The node's reconcile loop became blocked; the first issue says why. */
+function blockedEvents(prev: NodeRow, body: HeartbeatBody): DerivedEvent[] {
+  if (body.reconcile?.phase !== 'blocked') return [];
+  if (prev.reconcile?.phase === 'blocked') return [];
+  const why = body.reconcile.issues[0];
+  return [
+    {
+      kind: 'reconcile_blocked',
+      severity: 'warn',
+      message:
+        why === undefined
+          ? 'cannot converge to its desired state'
+          : `cannot converge: ${why}`,
+    },
+  ];
+}
+
 function recoveredEvents(prev: NodeRow): DerivedEvent[] {
   if (prev.offlineNotifiedAt === null) return [];
   return [
@@ -193,5 +226,7 @@ export function deriveReportEvents(
     ...rollbackEvents(prev, body),
     ...unitEvents(prev, body),
     ...diskEvents(prev, body, alertPercent),
+    ...convergedRoleEvents(prev, body),
+    ...blockedEvents(prev, body),
   ];
 }

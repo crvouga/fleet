@@ -7,9 +7,9 @@ through the operating system's own permission prompt.
 """
 import datetime
 import hmac
+import html
 import json
 import os
-import re
 import secrets
 import shutil
 import socketserver
@@ -18,6 +18,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -45,13 +46,6 @@ PLAN_TTL = 15 * 60
 
 OS_LABEL = {"Darwin": "macOS"}
 
-# One entry per role in decide.ROLES (the active roles in roles.json);
-# tests/test_roles.py fails when the two differ.
-ROLE_INFO = {
-    "ci": ("CI runner", "Runs GitHub Actions jobs for the repository."),
-    "devbox": ("Remote devbox", "SSH development machine with persistent workspace and development tools."),
-}
-
 # A job moves forward only. Anything else is a bug and stops loudly.
 TRANSITIONS = {
     "idle": ("downloading",),
@@ -75,19 +69,6 @@ def installer_urls():
     return decide.installer_urls()
 
 
-def lookup_token_http(token, role):
-    """decide.lookup_token without curl."""
-    url = f"{decide.vault_addr()}/v1/sys/wrapping/lookup"
-    request = urllib.request.Request(url, data=json.dumps({"token": token}).encode(), headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=20) as reply:
-            return decide.lookup_verdict(role, reply.status, "", json.loads(reply.read().decode("utf-8", "replace")).get("data") or {})
-    except urllib.error.HTTPError as exc:
-        return decide.lookup_verdict(role, exc.code, f"HTTP {exc.code}", None)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        return decide.lookup_verdict(role, None, str(getattr(exc, "reason", exc)), None)
-
-
 class Job:
     def __init__(self):
         self.attempt = secrets.token_hex(8)
@@ -103,10 +84,9 @@ class Job:
         self.log = []
         self.result = None
         self.mode = None
-        self.role = None
         self.step = None
         self.changed = False  # the privileged helper may have changed this computer
-        self.approval = None  # {"url", "deadline"} while GitHub approval is awaited
+        self.approval = None  # {"url", "deadline"} reserved for controller approval status
         self.scratch = None  # the folder shared with the helper, once there is one
         self.cancel = threading.Event()
         self.lock = threading.Lock()
@@ -152,7 +132,7 @@ class Job:
 
     def snapshot(self):
         with self.lock:
-            return {"version": VERSION, "state": self.state, "step": self.step, "mode": self.mode, "role": self.role, "percent": self.percent,
+            return {"version": VERSION, "state": self.state, "step": self.step, "mode": self.mode, "percent": self.percent,
                     "attempt": self.attempt, "started_at": self.started_at,
                     "elapsed": round(self.elapsed if self.elapsed is not None else time.monotonic() - self.started, 1),
                     "timeline": list(self.timeline), "checks": list(self.checks),
@@ -170,14 +150,27 @@ class Wizard:
         self.plan = None
         self.job = Job()
         self.lock = threading.Lock()
-        self.approved = {}  # role -> enrollment token approved in this session, reused by a retry
+        self.source = None
         decide.NET["probe"] = self.probe_installer
-        decide.NET["lookup"] = lookup_token_http
 
     # ---- facts -------------------------------------------------------------
 
+    def installer_urls(self):
+        return (self.source, self.source + '.sha256') if self.source else installer_urls()
+
+    def set_source(self, origin):
+        decide.invariant(self.job.snapshot()['state'] in ('idle', 'done', 'failed', 'cancelled'), 'An installation is already running.')
+        parsed = urllib.parse.urlsplit(str(origin).strip())
+        valid = parsed.scheme == 'https' or (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost', '::1'))
+        decide.invariant(valid and parsed.hostname and not parsed.username and not parsed.password
+                         and parsed.path in ('', '/') and not parsed.query and not parsed.fragment,
+                         'Enter your Fleet app HTTPS origin.', 'Use an origin such as https://fleet.example.org; loopback HTTP is allowed for local testing.')
+        self.source = str(origin).strip().rstrip('/') + '/installers/assets/fleet-installer.iso'
+        self.plan = None
+        return {'configured': True}
+
     def probe_installer(self):
-        return imaging.probe(installer_urls()[0])
+        return imaging.probe(self.installer_urls()[0])
 
     def disks(self):
         try:
@@ -208,14 +201,21 @@ class Wizard:
     def scan(self):
         disks, disk_error = self.disks()
         internal = decide.plan_disks(disks, "install") if not disk_error else {"ok": False, "next": disk_error}
-        error, size = imaging.probe(installer_urls()[0])
+        source_required = False
+        try:
+            error, size = imaging.probe(self.installer_urls()[0])
+        except decide.Invariant:
+            source_required = True
+            error, size = 'Enter your Fleet app address to select an installer source.', None
         node = decide.read_kv(os.environ.get("FLEET_NODE_CONF", "/etc/fleet/node.conf"))
         return {
+            "source_required": source_required,
             "version": VERSION,
             "os": OS_LABEL.get(self.os_name, self.os_name),
             "arch": decide.machine_arch(),
             "admin": elevate.is_admin(self.os_name),
-            "roles": [{"id": role, "title": ROLE_INFO[role][0], "blurb": ROLE_INFO[role][1]} for role in decide.ROLES],
+            # The role this computer runs as a Fleet node, shown only: the
+            # installer installs base and the role is assigned in Fleet.
             "node_role": decide.node_role(node) or None,
             "usb": self.usb_choices(disks),
             "internal": {"ok": internal["ok"], "plain": internal.get("plain"), "id": internal.get("disk_id")},
@@ -236,17 +236,15 @@ class Wizard:
                 decide.invariant(False, str(exc), "Check the Wi-Fi network name and password.")
         mode = body.get("mode")
         decide.invariant(mode in ("usb", "here"), "the plan request names an unknown mode", mode=mode)
-        role = body.get("role") or None
         reinstall = body.get("reinstall", False)
         decide.invariant(isinstance(reinstall, bool), "reinstall must be a boolean")
         decide.invariant(not reinstall or mode == "here", "a hard reinstall must target this computer")
-        ssh_key = decide.validate_ssh_key(body.get("ssh_key")) if mode == "here" and role == "devbox" else None
         token = (body.get("token") or "").strip() or None
-        if role is not None:
-            decide.invariant(role in decide.ROLES, "the plan request names an unknown role", role=role)
         if token is not None:
+            decide.invariant(mode == "here", "an enrollment token is carried only when this computer installs itself",
+                             "For a USB, put enrollment.token on a separate FLEET-KEY volume instead.")
             decide.invariant(len(token) <= TOKEN_MAX and decide.ENROLL_RE.fullmatch(token) is not None,
-                             "that does not look like an enrollment token", "Paste the token exactly as `just enroll` printed it.")
+                             "that does not look like an enrollment token", "Paste the token exactly as your Fleet operator gave it.")
         disks, disk_error = self.disks()
         decide.invariant(not disk_error, "could not list the disks", disk_error or "")
         directory = decide.state_dir()
@@ -254,8 +252,8 @@ class Wizard:
             choices = [d for d in self.usb_choices(disks) if d["id"] == body.get("disk_id")]
             decide.invariant(len(choices) == 1, "the USB disk is not present uniquely", "Unplug other identical sticks, press Rescan, and choose it again.", disk_id=body.get("disk_id"))
             chosen = choices[0]
-            findings = decide.preflight(self.os_name, None, "media", None, directory, need_root=False)
-            error, size = imaging.probe(installer_urls()[0])
+            findings = decide.preflight(self.os_name, "media", None, directory, need_root=False)
+            error, size = imaging.probe(self.installer_urls()[0])
             if not chosen["size"] or size and chosen["size"] < imaging.padded(size):
                 findings.append(decide.finding("usb-size", "fail", f"the USB disk holds {chosen['size'] // 10**9} GB, the installer needs {size // 10**9 + 1} GB",
                                                "Use a larger USB disk."))
@@ -265,18 +263,18 @@ class Wizard:
             summary = f"This erases the USB disk {chosen['plain']} and writes the installer to it. Nothing else on this computer changes."
             summary += " Available Wi-Fi settings are saved on the USB for automatic connection. Keep this USB private: it can contain the network password."
         else:
-            decide.invariant(role is not None, "choose what kind of node this computer should become")
             internal = decide.plan_disks(disks, "install")
             blockers = self.here_blockers(disks, internal)
             decide.invariant(not blockers, "this computer cannot install itself", " ".join(blockers))
-            findings = decide.preflight(self.os_name, role, "install", token, directory, need_root=False, ssh_key=ssh_key,
-                                        auto_enroll=decide.enroll_enabled(), disk_path=internal["path"],
+            findings = decide.preflight(self.os_name, "install", token, directory, need_root=False,
+                                        disk_path=internal["path"],
                                         iso_path=imaging.cache_dir(self.os_name) / "fleet-installer.iso")
             findings = preparation.review_findings(self.os_name, findings)
             erase, disk_id, target = internal["plain"], internal["disk_id"], internal["path"]
-            summary = f"This erases {internal['plain']}, including this computer's operating system and every file on it, and installs a {ROLE_INFO[role][0]}."
+            summary = (f"This erases {internal['plain']}, including this computer's operating system and every file on it, and installs a Fleet node. "
+                       "Approve it in the Fleet app; its role is assigned there.")
             if reinstall:
-                summary = "Hard reinstall: replace the existing installation, even if it already has this role. " + summary
+                summary = "Hard reinstall: replace the existing installation. " + summary
             if self.os_name == "Windows":
                 summary += " Windows preparation, boot setup and restart are automatic. Back up your files and save your BitLocker recovery key on another device before continuing."
             summary += " The installer will prepare the required tools, repeat its checks, install and restart automatically."
@@ -290,7 +288,7 @@ class Wizard:
         else:
             network = None
         plan = {
-            "id": secrets.token_hex(8), "mode": mode, "role": role, "reinstall": reinstall, "token": token, "ssh_key": ssh_key, "disk_id": disk_id, "path": target,
+            "id": secrets.token_hex(8), "mode": mode, "reinstall": reinstall, "token": token, "disk_id": disk_id, "path": target,
             "wifi": wifi,
             "erase": erase, "summary": summary, "findings": findings, "network": network, "ready": not problems, "created": time.time(),
         }
@@ -298,8 +296,8 @@ class Wizard:
             decide.invariant(self.job.snapshot()["state"] in ("idle", "done", "failed", "cancelled"),
                              "a job is already running", "Wait for the current job to finish.")
             self.plan = plan
-        public = {k: v for k, v in plan.items() if k not in ("token", "ssh_key", "wifi", "path", "created")}
-        decide.log(f"plan {plan['id']} mode={mode} role={role} ready={plan['ready']} erase={erase}")
+        public = {k: v for k, v in plan.items() if k not in ("token", "wifi", "path", "created")}
+        decide.log(f"plan {plan['id']} mode={mode} ready={plan['ready']} erase={erase}")
         return public
 
     # ---- run ---------------------------------------------------------------
@@ -316,7 +314,6 @@ class Wizard:
             decide.invariant(self.job.snapshot()["state"] in ("idle", "done", "failed", "cancelled"), "a job is already running")
             self.job = Job()
             self.job.mode = plan["mode"]
-            self.job.role = plan["role"]
             self.job.checks = [diagnostics.check_snapshot("review", plan["findings"])]
             self.job.move("downloading")
             job = self.job
@@ -326,12 +323,12 @@ class Wizard:
 
     def run_job(self, job, plan):
         try:
-            iso_url, sum_url = installer_urls()
+            iso_url, sum_url = self.installer_urls()
             job.note("Looking up the installer checksum", step="checksum")
             def release():
                 checksum = imaging.fetch_checksum(sum_url)
                 if plan['mode'] == 'here':
-                    decide.check_release_readiness(plan['role'], checksum, iso_url)
+                    decide.check_release_readiness(checksum, iso_url)
                 return checksum
             target = imaging.cache_dir(self.os_name) / "fleet-installer.iso"
 
@@ -349,11 +346,8 @@ class Wizard:
                 job.image = {"sha256": sha, "bytes": target.stat().st_size}
             job.note("Download verified", 100)
             if plan["mode"] == "here":
-                job.note("Checking the installer for this role", step="readiness")
-                decide.check_installer_readiness(target, plan["role"])
-            if plan["mode"] == "here" and not plan["token"] and decide.enroll_enabled():
-                job.note("Waiting for GitHub approval", step="enroll")
-                plan = self.enroll(job, plan)
+                job.note("Checking the installer's readiness", step="readiness")
+                decide.check_installer_readiness(target)
             job.move("working")
             self.run_helper(job, plan, target, sha)
         except imaging.Cancelled:
@@ -366,42 +360,6 @@ class Wizard:
             decide.log(traceback.format_exc(), "ERROR")
             self.fail(job, f"{type(exc).__name__}: {exc}", "Read the log, then run the wizard again.",
                       details={"error": diagnostics.exception_details(exc)})
-
-    def enroll(self, job, plan):
-        """Ask the repository owner to approve this node on GitHub. Nothing has
-        been erased, so a refusal or a timeout ends the job cleanly."""
-        lookup = decide.NET.get("lookup", lookup_token_http)
-        earlier = self.approved.get(plan["role"])
-        if earlier is not None:
-            # A retry after a failure that did not use the token: no second GitHub approval.
-            if lookup(earlier, plan["role"])["status"] != "fail":
-                job.note("Using the approval GitHub gave earlier in this session.")
-                return {**plan, "token": earlier}
-            self.approved.pop(plan["role"], None)
-        deadline = time.time() + int(os.environ.get("FLEET_ENROLL_WAIT") or decide.ENROLL_WAIT)
-
-        def notify(message, *args, **kwargs):
-            # The approval address becomes a link with a countdown on the page.
-            found = re.search(r"https://github\.com/\S+", str(message))
-            with job.lock:
-                if found and "open this address" in str(message):
-                    job.approval = {"url": found.group(0), "deadline": deadline, "received": False}
-                elif job.approval and "request was received" in str(message):
-                    job.approval["received"] = True
-            job.note(message, *args, **kwargs)
-        try:
-            token, error = decide.self_enroll(plan["role"], notify=notify, cancel=job.cancel.is_set)
-        finally:
-            with job.lock:
-                job.approval = None
-        if error == "cancelled":
-            raise imaging.Cancelled()
-        decide.invariant(token is not None, f"this computer was not approved ({error})",
-                         "Run the wizard again and press 'Submit new issue' on the GitHub page, or paste an enrollment token.")
-        verdict = lookup(token, plan["role"])
-        decide.invariant(verdict["status"] != "fail", f"the approval token is not usable ({verdict['detail']})", verdict["fix"])
-        self.approved[plan["role"]] = token
-        return {**plan, "token": token}
 
     def cancel(self):
         """Cancel the download, or withdraw the request while the permission prompt is still
@@ -454,7 +412,7 @@ class Wizard:
         handed_off = False
         try:
             request = {"attempt": job.attempt, "action": "write-usb" if plan["mode"] == "usb" else "install-here", "iso": str(iso), "sha256": sha,
-                       "disk_id": plan["disk_id"], "path": plan["path"], "role": plan["role"], "reinstall": plan["reinstall"], "token": plan["token"], "ssh_key": plan["ssh_key"], "wifi": plan.get("wifi")}
+                       "disk_id": plan["disk_id"], "path": plan["path"], "reinstall": plan["reinstall"], "token": plan["token"], "wifi": plan.get("wifi")}
             fd = os.open(scratch / "request.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as handle:
                 json.dump(request, handle)
@@ -495,7 +453,6 @@ class Wizard:
                 return job.move("cancelled", {**result, "guidance": CANCELLED_GUIDANCE})
             if result["ok"]:
                 decide.invariant(process.returncode == 0, "the helper reported success but exited with an error", code=process.returncode)
-                self.approved.pop(job.role, None)  # used; never offer it again
                 job.move("done", result)
             else:
                 self.fail(job, result.get("message", ""), result.get("fix", ""), result.get("log"), details=result)
@@ -533,14 +490,14 @@ class Wizard:
         problem = body.get("problem")
         decide.invariant(problem is None or isinstance(problem, dict), "the diagnostic problem must be an object")
         problem = {key: str(value)[:PROBLEM_FIELD_MAX] for key, value in (problem or {}).items()
-                   if key in ("message", "fix", "where", "mode", "role") and value is not None}
+                   if key in ("message", "fix", "where", "mode") and value is not None}
         if problem.get("message"):
             problem["guidance"] = diagnostics.guidance(problem["message"], problem.get("fix", ""))
         job = self.job.snapshot()
         with self.lock:
             plan = self.plan
         if plan and job["state"] in ("idle", "done", "failed", "cancelled"):
-            job = {"state": "review", "mode": plan["mode"], "role": plan["role"],
+            job = {"state": "review", "mode": plan["mode"],
                    "message": "Review complete; installation has not started." if plan["ready"] else "The review has failed checks.",
                    "checks": [diagnostics.check_snapshot("review", plan["findings"])]}
         elif job["state"] == "idle":
@@ -613,7 +570,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": refusal})
         try:
             if method == "GET" and path == "/":
-                return self.reply(200, resource("index.html").read_bytes(), "text/html; charset=utf-8")
+                return self.reply(200, resource("index.html").read_bytes().replace(b"__FLEET_REPOSITORY__", html.escape(decide.REPO, quote=True).encode()), "text/html; charset=utf-8")
             if method == "GET" and path in ("/admin.css", "/theme.js"):
                 name, kind = ("admin.css", "text/css; charset=utf-8") if path == "/admin.css" else ("theme.js", "text/javascript; charset=utf-8")
                 return self.reply(200, resource(name).read_bytes(), kind)
@@ -621,6 +578,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, self.wizard.scan())
             if method == "GET" and path == "/api/job":
                 return self.reply(200, self.wizard.job.snapshot())
+            if method == "POST" and path == "/api/source":
+                return self.reply(200, self.wizard.set_source(self.body().get("origin", "")))
             if method == "POST" and path == "/api/plan":
                 return self.reply(200, self.wizard.make_plan(self.body()))
             if method == "POST" and path == "/api/run":

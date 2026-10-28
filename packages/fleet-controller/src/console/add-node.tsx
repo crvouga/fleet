@@ -6,7 +6,6 @@ import {
   Anchor,
   Badge,
   Button,
-  Code,
   Group,
   NativeSelect,
   Paper,
@@ -43,7 +42,7 @@ export function AddNode({ empty = false }: { empty?: boolean }) {
               'Download the installer',
               'Run it on the machine',
               'Choose a role',
-              'Press Submit new issue',
+              'Approve in Fleet',
             ].map((title, index) => (
               <Group key={title} wrap="nowrap" align="flex-start">
                 <Badge circle variant="light" size="lg">
@@ -59,7 +58,7 @@ export function AddNode({ empty = false }: { empty?: boolean }) {
                         'Choose the computer that will run the installer below.',
                         'The local wizard checks hardware and reviews the exact disk.',
                         `Select ${ACTIVE_ROLES.join(' or ')}.`,
-                        'The installer opens a prefilled GitHub issue. Submit it as the repository owner, then review Pending approvals.',
+                        'The live installer registers with this app. Review and approve the computer under Pending before its disk is erased.',
                       ][index]
                     }
                   </Text>
@@ -189,11 +188,9 @@ function InstallerChoices({ platform }: { platform: string }) {
               Run the native installer in a terminal and open the local address
               it prints. This also supports reinstalling an existing fleet node.
             </Text>
-            <Code block component="code">
-              {
-                "sudo nix --extra-experimental-features 'nix-command flakes' run 'github:crvouga/fleet/main?dir=packages/fleet#fleet-installer' -- --no-browser"
-              }
-            </Code>
+            <Anchor href="/installers/nixos">
+              Show the native installer command
+            </Anchor>
             <Text size="sm" c="dimmed">
               Existing fleet machines already include fleet-installer and
               fleet-node. Do not use a foreign Linux binary on NixOS.

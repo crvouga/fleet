@@ -446,6 +446,18 @@ class WizardCase(unittest.TestCase):
 
 
 class ServerTests(WizardCase):
+    def test_installer_source_is_selected_within_the_wizard_without_github(self):
+        with mock.patch.dict(os.environ, {'FLEET_INSTALLER_URL': '', 'FLEET_CONTROLLER_URL': ''}):
+            status, scan = self.call('GET', '/api/scan')
+            self.assertEqual(status, 200)
+            self.assertTrue(scan['source_required'])
+        status, _ = self.call('POST', '/api/source', {'origin': 'https://fleet.example.org'})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.wizard.installer_urls()[0], 'https://fleet.example.org/installers/assets/fleet-installer.iso')
+        status, _ = self.call('POST', '/api/source', {'origin': 'https://user:password@fleet.example.org'})
+        self.assertEqual(status, 409)
+
+
     def test_wifi_plan_keeps_password_private_and_usb_handoff_reads_back(self):
         import fleet_wifi
         network = {"ssid": "Fixture Wi-Fi", "password": "fixture-wifi-password", "auth": "wpa-psk", "hidden": True}
@@ -956,6 +968,14 @@ class InstallHereTests(WizardCase):
         self.addCleanup(patch.stop)
         decide.NET["lookup"] = lambda token, role: decide.finding("enrollment", "ok", "token is valid")
 
+    def test_privileged_handoff_uses_the_verified_image_without_source_environment(self):
+        chosen = decide.plan_disks([INTERNAL], 'install')
+        request = {'role': 'ci', 'iso': str(self.iso), 'sha256': imaging.sha256_of(self.iso), 'disk_id': chosen['disk_id']}
+        with mock.patch.dict(os.environ, {'FLEET_INSTALLER_URL': '', 'FLEET_CONTROLLER_URL': ''}):
+            helper.install_here(request, helper.Progress(self.root))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(self.calls[0]['token'])
+
     def test_converting_this_machine_hands_the_verified_image_to_the_installer(self):
         _status, scan = self.call("GET", "/api/scan")
         self.assertEqual(scan["here_blockers"], [])
@@ -974,35 +994,7 @@ class InstallHereTests(WizardCase):
         log = Path(decide.LOG["path"]).read_text()
         self.assertNotIn("hvs.CAESIwrapped", log)
 
-    def _enrolling_wizard(self, wait="20"):
-        from enroll_fakes import FakeGitHub
-        github = FakeGitHub()
-        self.addCleanup(github.close)
-        patch = mock.patch.dict(os.environ, {"FLEET_GITHUB_API": github.url, "FLEET_NO_BROWSER": "1", "FLEET_ENROLL_POLL": "1", "FLEET_ENROLL_WAIT": wait})
-        patch.start()
-        self.addCleanup(patch.stop)
-        os.environ.pop("FLEET_NO_ENROLL", None)
-        self.addCleanup(os.environ.__setitem__, "FLEET_NO_ENROLL", "1")
-        return github
 
-    def _approve_when_asked(self, github, answer=None):
-        """The owner's click, once the wizard has shown the link in its job log."""
-        from urllib.parse import parse_qs, urlparse
-        for _ in range(100):
-            job = self.call("GET", "/api/job")[1]
-            link = next((line[line.index("https://"):] for line in job["log"] if "issues/new?" in line), None)
-            if link:
-                # The page shows it as a link with a deadline, not only as a log line.
-                self.assertEqual(job["approval"]["url"], link.strip())
-                self.assertGreater(job["approval"]["deadline"], time.time())
-                self.assertIsNone(job["percent"], "a new step does not inherit the download's 100%")
-                break
-            time.sleep(0.2)
-        self.assertTrue(link, "the wizard never showed the approval link")
-        query = parse_qs(urlparse(link.strip()).query)
-        _, public = decide.parse_enroll_request(query["title"][0], query["body"][0])
-        number = github.open_issue(query["title"][0], query["body"][0])
-        github.comment(number, answer or "fleet-sealed: " + decide.seal(json.dumps({"role": "ci", "token": "hvs.CAESIapproved"}).encode(), public))
 
     def test_the_review_names_the_wifi_network_but_never_its_password(self):
         _status, scan = self.call("GET", "/api/scan")
@@ -1013,55 +1005,15 @@ class InstallHereTests(WizardCase):
         self.assertEqual(plan["network"], {"ssid": "Fixture Wi-Fi", "source": "entered"})
         self.assertNotIn("fixture-wifi-password", json.dumps(plan))
 
-    def test_converting_without_a_token_waits_for_the_owner_on_github(self):
-        github = self._enrolling_wizard()
-        _status, scan = self.call("GET", "/api/scan")
-        status, plan = self.call("POST", "/api/plan", {"mode": "here", "role": "ci", "disk_id": scan["internal"]["id"]})
-        self.assertEqual(status, 200, plan)
-        self.assertTrue(plan["ready"], plan["findings"])
-        self.assertTrue(any(f["name"] == "enrollment" and "approve" in f["detail"] for f in plan["findings"]), plan["findings"])
-        self.assertEqual(self.run_plan(plan)[0], 200)
-        self._approve_when_asked(github)
-        job = self.wait_job()
-        self.assertEqual(job["state"], "done", job)
-        self.assertEqual(self.calls[0]["token"], "hvs.CAESIapproved")
-        self.assertNotIn("hvs.CAESIapproved", json.dumps(job))
-        self.assertNotIn("hvs.CAESIapproved", Path(decide.LOG["path"]).read_text())
-
-    def test_a_refused_approval_ends_the_job_before_anything_is_erased(self):
-        github = self._enrolling_wizard()
-        _status, scan = self.call("GET", "/api/scan")
-        _status, plan = self.call("POST", "/api/plan", {"mode": "here", "role": "ci", "disk_id": scan["internal"]["id"]})
-        self.run_plan(plan)
-        self._approve_when_asked(github, answer="fleet-error: Vault has no age key for the ci role. Run `just setup`.")
-        job = self.wait_job()
-        self.assertEqual(job["state"], "failed", job)
-        self.assertIn("just setup", job["result"]["message"])
-        self.assertEqual(self.calls, [])
-
-    def test_no_approval_in_time_ends_the_job_before_anything_is_erased(self):
-        self._enrolling_wizard(wait="2")
-        _status, scan = self.call("GET", "/api/scan")
-        _status, plan = self.call("POST", "/api/plan", {"mode": "here", "role": "ci", "disk_id": scan["internal"]["id"]})
-        self.run_plan(plan)
-        job = self.wait_job()
-        self.assertEqual(job["state"], "failed", job)
-        self.assertIn("nobody approved", job["result"]["message"])
-        self.assertEqual(self.calls, [])
-
-    def test_cancel_stops_the_wait_for_approval(self):
-        self._enrolling_wizard()
-        _status, scan = self.call("GET", "/api/scan")
-        _status, plan = self.call("POST", "/api/plan", {"mode": "here", "role": "ci", "disk_id": scan["internal"]["id"]})
-        self.run_plan(plan)
-        for _ in range(100):
-            if any("issues/new?" in line for line in self.call("GET", "/api/job")[1]["log"]):
-                break
-            time.sleep(0.2)
-        self.assertEqual(self.call("POST", "/api/cancel", {})[0], 200)
-        job = self.wait_job()
-        self.assertEqual(job["state"], "cancelled", job)
-        self.assertEqual(self.calls, [])
+    def test_normal_install_does_not_open_github_or_wait_for_an_issue(self):
+        with mock.patch.object(decide.webbrowser, 'open', side_effect=AssertionError('GitHub enrollment must not run')):
+            _status, scan = self.call('GET', '/api/scan')
+            status, plan = self.call('POST', '/api/plan', {'mode': 'here', 'role': 'ci', 'disk_id': scan['internal']['id']})
+            self.assertEqual(status, 200, plan)
+            self.assertEqual(self.run_plan(plan)[0], 200)
+            job = self.wait_job()
+            self.assertEqual(job['state'], 'done', job)
+            self.assertIsNone(self.calls[0]['token'])
 
     def test_another_helper_cannot_replace_the_image_during_a_boot_handoff(self):
         state = Path(os.environ["FLEET_STATE"])

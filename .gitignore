@@ -63,3 +63,6 @@ data/
 *.sqlite
 *.sqlite-*
 .litestream*
+
+# Per-checkout local development lifecycle state (includes a private control token).
+.fleet-local/

@@ -45,22 +45,23 @@ FALLBACK_SIZE = (128, 48)
 QR_CAPACITY = {10: 271, 11: 321, 12: 367, 13: 425, 14: 458, 15: 520, 16: 586, 17: 644, 18: 718, 19: 792,
                20: 858, 21: 929, 22: 1003, 23: 1091, 24: 1171, 25: 1273}
 REPORT_NOTE = "(cut to fit the code; fleet-report --full has the rest)"
-# (id, title, what the person does). "{role}" is the role being installed.
+# (id, title, what the person does). The installer always installs base; the
+# role is assigned in Fleet afterwards.
 STEPS = (
     ("network", "Connect to the network",
      "Nothing to do yet. Keep this computer near the Wi-Fi it used before."),
     ("approval", "Read this node's approval",
-     "Nothing to do. This uses the approval from the GitHub enrollment issue."),
-    ("checks", "Check Fleet, the update cache and GitHub",
+     "Approve this node under Pending in the Fleet app. Nothing is erased until approval succeeds."),
+    ("checks", "Check Fleet and the update cache",
      "Nothing to do. This usually takes less than two minutes."),
     ("disk", "Find the internal disk",
      "Nothing to do. This only looks at the disks."),
     ("erase", "Erase the internal disk",
      "Do not turn the computer off from now on."),
-    ("install", "Install the {role} system",
+    ("install", "Install the Fleet base system",
      "Do not turn the computer off. This usually takes 5 to 20 minutes; this screen updates every 30 seconds."),
-    ("restart", "Restart into the new {role} node",
-     "Nothing to do. Remove any USB stick. The node appears in Fleet a few minutes after it starts."),
+    ("restart", "Restart into the new Fleet node",
+     "Nothing to do. Remove any USB stick. The node appears in Fleet a few minutes after it starts; assign its role there."),
 )
 STEP_IDS = tuple(step[0] for step in STEPS)
 REDRAWN_STEPS = ("network", "checks", "erase", "install")
@@ -104,28 +105,19 @@ ADVICE = (
     (r"FLEET_API_UNAVAILABLE",
      "Your Fleet controller cannot be reached.",
      ["Wait; the installer tries again by itself.", "Check your Fleet controller on a phone. If it is down, report it."]),
-    (r"FLEET_GITHUB_UNAVAILABLE",
-     "GitHub cannot be reached or is limiting requests.",
-     ["Wait; the installer tries again by itself."]),
-    (r"FLEET_GITHUB_REGISTRATION|FLEET_GITHUB_KEY|FLEET_GITHUB_SCOPE",
-     "GitHub refused to register this computer as a CI runner.",
-     ["The repository owner checks the runner GitHub App installation and its repository access.",
-      "Then open the Fleet installer in the original system again."]),
     (r"FLEET_APPROVAL_REQUIRED",
      "Fleet has not approved this computer.",
      [f"Open {FLEET_NODES}, approve this computer under Pending.", "Then open the Fleet installer in the original system again."]),
-    (r"enrollment token|FLEET_ENROLLMENT|did not hold an age key",
-     "The one-time approval was refused, expired or already used.",
-     ["Open the Fleet installer in the original system again; it asks for a fresh approval on GitHub."]),
+    (r"enrollment token|FLEET_ENROLLMENT",
+     "Fleet did not accept the enrollment token.",
+     ["Replace or remove the enrollment token, then open the Fleet installer in the original system again.",
+      f"Without a token, approve this computer under Pending at {FLEET_NODES}."]),
     (r"FLEET_NETWORK_WAIT_EXPIRED",
      "The checks before erasing were still not ready when the wait ran out.",
      ["Open the Fleet installer in the original system again to retry.", "Report it with the code: it says which check was not ready."]),
-    (r"FLEET_ROLE_SECRETS|FLEET_ROLE_KEY|FLEET_PLATFORM_NOT_READY|FLEET_METADATA|FLEET_LOCAL_CLOSURE_UNAVAILABLE|FLEET_BOOTSTRAP_INVALID|FLEET_CACHE_UNCONFIGURED|FLEET_API_UNCONFIGURED|FLEET_GITHUB_UNCONFIGURED",
-     "The published installer is not ready for this kind of node. A maintainer has to fix it.",
+    (r"FLEET_PLATFORM_NOT_READY|FLEET_METADATA|FLEET_LOCAL_CLOSURE_UNAVAILABLE|FLEET_BOOTSTRAP_INVALID|FLEET_CACHE_UNCONFIGURED|FLEET_API_UNCONFIGURED",
+     "The published installer is not ready. A maintainer has to fix it.",
      ["Report it with the QR code. Nothing on this computer needs to change."]),
-    (r"public key|devbox",
-     "A devbox needs an SSH public key before anything is erased.",
-     ["Use your .pub file in the Fleet installer, or put devbox.pub on a FLEET-KEY USB stick."]),
     (r"UEFI|x86-64",
      "This computer did not start in UEFI mode.",
      ["Turn on UEFI and turn off legacy/CSM boot in the firmware settings."]),
@@ -196,11 +188,6 @@ def cmdline_value(name):
     return values[-1] if values else ""
 
 
-def role():
-    value = cmdline_value("fleet.role")
-    return value if value in decide.ROLES else "unknown"
-
-
 def started_from():
     origin = cmdline_value("fleet.from")
     if origin in ("windows", "linux"):
@@ -226,7 +213,7 @@ def revision():
     manifest = env_path("FLEET_MANIFEST", "/iso/fleet-install-manifest")
     for line in read_text(manifest, 8192).splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[0] == role():
+        if len(parts) == 2 and parts[0] == "base":
             text = read_text(Path(parts[1]) / "etc/fleet/revision", 128).strip()
             if re.fullmatch(r"[0-9a-f]{7,40}|unknown", text):
                 return text
@@ -275,7 +262,7 @@ def advice(text, data=None):
 def step_title(step_id):
     for number, (ident, title, _) in enumerate(STEPS, 1):
         if ident == step_id:
-            return number, title.format(role=role())
+            return number, title
     return 0, "Starting"
 
 
@@ -315,7 +302,7 @@ def rule(char="=", width=WIDTH):
 
 
 def header(data, title=None, width=WIDTH):
-    title = title or f"FLEET INSTALLER: making this computer a {role()} node"
+    title = title or "FLEET INSTALLER: making this computer a Fleet node"
     started = data.get("started")
     clock = minutes(time.time() - started) if started else ""
     return [rule(width=width), " " + title.ljust(width - len(clock) - 2) + clock, rule(width=width)]
@@ -329,7 +316,7 @@ def checklist(data, mark="[>]"):
     for number, (ident, title, _) in enumerate(STEPS, 1):
         position = STEP_IDS.index(ident)
         box = "[x]" if position < index or done_all else mark if position == index else "[ ]"
-        row = f"  {box} {number}. {title.format(role=role())}"
+        row = f"  {box} {number}. {title}"
         if ident == "erase" and position > index and not erased():
             row = row.ljust(36) + "<- the first step that changes the disk"
         rows.append(row)
@@ -339,7 +326,7 @@ def checklist(data, mark="[>]"):
 def disk_text(data):
     """The one line that says whether anything has been erased. Every screen has it."""
     if data.get("outcome") == "installed":
-        return f"Erased, and the new {role()} system is installed on it."
+        return "Erased, and the new Fleet system is installed on it."
     if data.get("step") == "erase" and not data.get("outcome"):
         return "ERASING NOW. Everything on the internal disk is being removed. Do not turn the computer off."
     if erased():
@@ -437,12 +424,12 @@ def screen_wait(data):
 
 def screen_done(data):
     lines = [*header(data), *checklist(data), rule("-"), *labeled("DISK", disk_text(data)), rule("-"),
-             *labeled("NOW", f"Installed. Restarting into the new {role()} node now."),
+             *labeled("NOW", "Installed. Restarting into the new Fleet node now."),
              *labeled("ACTIONS", "Nothing else to do. Remove any USB stick. If the computer starts this installer "
                                  "again, remove the stick and restart."),
-             *labeled("NEXT", f"After the restart this screen shows the node's own status: READY once it is "
-                              f"{'online with its runners in GitHub' if role() == 'ci' else 'reporting to Fleet'}, or what is "
-                              f"wrong and a code to report it. The node appears in Fleet at {FLEET_NODES} a few minutes later.")]
+             *labeled("NEXT", "After the restart this screen shows the node's own status: READY once it is "
+                              "reporting to Fleet, or what is wrong and a code to report it. The node appears in Fleet at "
+                              f"{FLEET_NODES} a few minutes later; assign its role there.")]
     return lines
 
 
@@ -462,8 +449,8 @@ def stop_text(data, width):
     if erased():
         summary = "Installation failed after the internal disk was erased."
         steps = ["Report it now with the code. Do not try to start the original system: it was erased.",
-                 "Then make an install USB with the Fleet installer on another computer, start this computer "
-                 f"from it and choose {role()}."]
+                 "Then make an install USB with the Fleet installer on another computer and start this computer "
+                 "from it."]
     else:
         summary, steps = advice(why, data)
     net = network_trouble(data, why)
@@ -496,7 +483,7 @@ def compact_checklist(data):
     for number, (ident, title, _) in enumerate(STEPS, 1):
         position = STEP_IDS.index(ident)
         box = "[x]" if position < index else "[!]" if position == index else "[ ]"
-        rows.append(f"  {box} {number}. {title.format(role=role())}")
+        rows.append(f"  {box} {number}. {title}")
     return rows
 
 
@@ -714,7 +701,7 @@ def report_lines(full):
         # Every character costs QR modules. The title carries the FLEET_* code.
         number, _ = step_title(data.get("step"))
         where = "after-erase" if erased() else "before-erase"
-        summary = [f"{role()} {revision()[:8]} {started_from()} {data.get('outcome') or 'running'}-{where} "
+        summary = [f"base {revision()[:8]} {started_from()} {data.get('outcome') or 'running'}-{where} "
                    f"exit={data.get('status', '-')} step={number}/{len(STEPS)} t={elapsed} tries={data.get('attempt', 1)}"]
         last = data.get("lastWait") or ""
         if not network_trouble(data, why):  # otherwise the net line below says it better
@@ -730,7 +717,6 @@ def report_lines(full):
     out = [
         "Source: live installer screen (packages/fleet/scripts/fleet-auto.sh, fleet-install.sh, live_console.py)",
         f"Started from: {started_from()}{handoff_tags()}",
-        f"Role: {role()}",
         f"Revision: {revision()}",
         f"Step: {step_label(data)}",
         f"Outcome: {outcome_text(data)}",

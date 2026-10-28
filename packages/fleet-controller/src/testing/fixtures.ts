@@ -3,6 +3,7 @@ import type {
   HeartbeatBody,
   HeartbeatPoint,
   NodeRow,
+  ObservedRole,
   Role,
 } from '../types';
 
@@ -24,12 +25,13 @@ export interface BodyOptions extends Partial<
 /** A complete heartbeat body with sensible values, overridden field by field. */
 export function heartbeatBody(
   id: string,
-  role: Role,
+  role: ObservedRole,
   hostname: string,
   over: BodyOptions = {}
 ): HeartbeatBody {
   const { cpu, memory, disk, sync, agent, ...rest } = over;
   return {
+    closure: role,
     capabilities: [],
     revision: null,
     bootId: `boot-${id.slice(0, 8)}`,
@@ -42,7 +44,7 @@ export function heartbeatBody(
     runners: null,
     events: [],
     ...rest,
-    v: 1,
+    v: 2,
     nodeId: id,
     role,
     hostname,
@@ -50,13 +52,16 @@ export function heartbeatBody(
     memory: { totalMiB: 32000, availableMiB: 20000, ...memory },
     disk: { nixUsedPercent: 40, bootUsedPercent: 12, ...disk },
     sync: { rolledBack: false, healthFailure: null, paused: false, ...sync },
-    agent: { version: '1', configRevision: null, ...agent },
+    agent: { version: '2', desiredRevision: null, ...agent },
   };
 }
 
 export interface NodeOptions {
   readonly short: string;
-  readonly role?: Role;
+  /** The assigned role; null for an unassigned node. Defaults to ci. */
+  readonly role?: Role | null;
+  /** What the node reports it runs. Defaults to the assigned role, or base. */
+  readonly observedRole?: ObservedRole | null;
   readonly hostname?: string;
   readonly approval?: NodeRow['approval'];
   readonly displayName?: string | null;
@@ -78,28 +83,35 @@ export function nodeRow(options: NodeOptions): NodeRow {
     intervalSeconds = 60,
     hostname: hostnameOption,
     approval = 'approved',
+    observedRole = role ?? 'base',
     ...direct
   } = options;
   const id = nodeId(short);
-  const hostname = hostnameOption ?? `${role}-${short}`;
-  const body = heartbeatBody(id, role, hostname, bodyOptions);
+  const hostname = hostnameOption ?? `${role ?? 'node'}-${short}`;
+  const body = heartbeatBody(id, observedRole ?? 'base', hostname, bodyOptions);
+  const reported = observedRole !== null;
   return {
     displayName: null,
     note: null,
     labels: [],
-    enrolledVia: 'role-token',
+    enrolledVia: 'enrollment-token',
     firstSeenAt: new Date('2026-09-01T08:00:00.000Z'),
     lastSeenAt: null,
     heartbeatIntervalSeconds: intervalSeconds,
     ...direct,
     id,
     role,
+    observedRole,
+    observedClosure: reported ? body.closure : null,
+    ageRecipient: body.ageRecipient ?? null,
+    hardware: body.hardware ?? null,
+    reconcile: body.reconcile ?? null,
     hostname,
     approval,
     facts: body as unknown as Record<string, unknown>,
     revision: body.revision,
     agentVersion: body.agent.version,
-    configRevision: body.agent.configRevision,
+    appliedRevision: body.agent.desiredRevision,
     remoteAddr: '192.168.1.20',
     approvedAt:
       approval === 'approved' ? new Date('2026-09-01T08:05:00.000Z') : null,

@@ -1,3 +1,5 @@
+> Historical validation record. Current enrollment and downloads are app-owned; follow CONFIGURATION.md. The former GitHub-issue workflow is removed.
+
 # Validation record
 
 > Historical evidence below includes the former infrastructure and PostgreSQL deployment.

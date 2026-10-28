@@ -110,8 +110,8 @@ def selftest():
         check("page is served", status == 200 and b"Fleet installer" in body, str(status))
         status, body = call(port, wizard.secret, "GET", "/api/scan")
         scan = json.loads(body) if status == 200 else {}
-        check("scan answers", status == 200 and scan.get("roles") and scan["release"]["ok"], f"{status} {body[:200]!r}")
-        check("roles match the fleet", [r["id"] for r in scan["roles"]] == list(decide.ROLES))
+        check("scan answers", status == 200 and "internal" in scan and scan["release"]["ok"], f"{status} {body[:200]!r}")
+        check("the installer offers no role", "roles" not in scan)
         check("wrong token refused", call(port, wizard.secret, "GET", "/api/scan", token=False)[0] == 403)
         check("foreign host refused", call(port, wizard.secret, "GET", "/api/scan", host="evil.example")[0] == 403)
         check("run without a plan refused", call(port, wizard.secret, "POST", "/api/run", {"plan_id": "x", "ack": True})[0] == 409)

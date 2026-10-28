@@ -39,7 +39,18 @@ export interface BrowserAuth {
   logout(c: Context): Promise<void>;
   readonly access: AccessStore;
 }
-export interface RelayConfig {
+/** Trusted adapter: exchange returns only cryptographically validated OIDC claims. */
+export interface IdentityProvider {
+  authorize(state: string, nonce: string, verifier: string): Promise<string>;
+  exchange(
+    url: URL,
+    state: string,
+    nonce: string,
+    verifier: string
+  ): Promise<Record<string, unknown>>;
+}
+
+export interface OidcConfig {
   readonly issuer: string;
   readonly clientId: string;
   readonly origin: string;

@@ -13,6 +13,9 @@
     secretsFile = if settings.secretsFile == null then null else toString settings.secretsFile;
     requiredSecrets = builtins.attrNames config.sops.secrets;
     github = settings.github or null;
+    # The installer reads installBlocked of the base closure only (the single
+    # `blocked` list in /fleet-readiness.json). Role-specific blockers apply to
+    # the running node and are reported by it, never checked at install time.
     installBlocked = metadata.blocked;
     blocked = (if settings.role == "ci" && (settings.secretsFile == null || (settings.github.appId or "") == "") then [
       "FLEET_RUNNERS_UNCONFIGURED: configure your GitHub App, repositories and encrypted role credentials before installing a CI node."
@@ -21,7 +24,7 @@
     ]);
   };
 in {
-  # Public configuration only. Credentials remain in the wrapped document and
-  # role-encrypted secrets; both are checked privately before disk erasure.
+  # Public configuration only. Role secrets stay encrypted to the nodes Fleet
+  # assigned the role; the node checks them, not the installer.
   environment.etc."fleet/bootstrap.json".text = builtins.toJSON metadata;
 }

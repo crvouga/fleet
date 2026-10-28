@@ -1,3 +1,4 @@
+import { ENROLLMENT_TOKEN_PATTERN } from '../auth/enrollment-token';
 import { NODE_ID_PATTERN, NODE_SECRET_PATTERN } from '../auth/node-credential';
 import {
   isRecord,
@@ -5,14 +6,16 @@ import {
   requireString,
   type Problems,
 } from '../domain/heartbeat-fields';
-import { ACTIVE_ROLES, isActiveRole, type ActiveRole } from '../types';
 
+/**
+ * `POST /v1/nodes/register`. A node does not name a role: `role` and
+ * `roleToken` from older agents are ignored, never stored.
+ */
 export interface RegisterBody {
   readonly nodeId: string;
-  readonly role: ActiveRole;
   readonly hostname: string;
   readonly secret: string;
-  readonly roleToken: string | undefined;
+  readonly enrollmentToken: string | undefined;
 }
 
 export type RegisterResult =
@@ -20,7 +23,7 @@ export type RegisterResult =
   | { readonly ok: false; readonly errors: readonly string[] };
 
 const HOSTNAME = /^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$/;
-const MAX_ROLE_TOKEN = 512;
+const MAX_ENROLLMENT_TOKEN = 512;
 
 export function validateRegister(input: unknown): RegisterResult {
   if (!isRecord(input))
@@ -38,23 +41,20 @@ export function validateRegister(input: unknown): RegisterResult {
     max: 64,
     pattern: NODE_SECRET_PATTERN,
   });
-  const roleToken = readString(problems, 'roleToken', input['roleToken'], {
-    max: MAX_ROLE_TOKEN,
-  });
-  const role = input['role'];
-  // A retired role keeps its rows, but no new machine may enroll as one.
-  if (!isActiveRole(role))
-    problems.list.push(`role must be one of: ${ACTIVE_ROLES.join(', ')}`);
-  if (problems.list.length > 0 || !isActiveRole(role))
-    return { ok: false, errors: problems.list };
+  const enrollmentToken = readString(
+    problems,
+    'enrollmentToken',
+    input['enrollmentToken'],
+    { max: MAX_ENROLLMENT_TOKEN, pattern: ENROLLMENT_TOKEN_PATTERN }
+  );
+  if (problems.list.length > 0) return { ok: false, errors: problems.list };
   return {
     ok: true,
     value: {
       nodeId,
-      role,
       hostname,
       secret,
-      roleToken: roleToken ?? undefined,
+      enrollmentToken: enrollmentToken ?? undefined,
     },
   };
 }

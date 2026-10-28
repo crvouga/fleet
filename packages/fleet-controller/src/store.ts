@@ -14,12 +14,16 @@ import type {
 
 export interface RegisterInput {
   readonly id: string;
-  readonly role: Role;
   readonly hostname: string;
   /** sha256 of the node's own secret, hex. The secret is never stored. */
   readonly secretHash: string;
-  /** approved when the node proved its role's shared key, else pending. */
+  /** approved when the node presented a valid enrollment token, else pending. */
   readonly approval: 'pending' | 'approved';
+  /**
+   * The role named by the enrollment token. Assigned only when the node has
+   * no assigned role; registration never clears or replaces one.
+   */
+  readonly tokenRole: Role | null;
   readonly enrolledVia: EnrolledVia;
   readonly remoteAddr: string | null;
 }
@@ -73,6 +77,12 @@ export interface Store {
   setApproval(
     id: string,
     approval: Approval,
+    actor: string
+  ): Promise<NodeRow | null>;
+  /** Assign (or with null, unassign) the role; records `role_assigned` when it changes. */
+  assignRole(
+    id: string,
+    role: Role | null,
     actor: string
   ): Promise<NodeRow | null>;
   deleteNode(id: string, actor: string): Promise<boolean>;

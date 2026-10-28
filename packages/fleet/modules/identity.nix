@@ -12,12 +12,14 @@ in {
       message = "Hostnames are assigned at boot. Leave networking.hostName empty.";
     }
     {
-      assertion = builtins.elem settings.role roles.active;
-      message = "settings.role must be an active role in roles.json, not a machine.";
+      # base is the role-less system every machine installs; the controller
+      # assigns a role afterwards (ARCHITECTURE.md).
+      assertion = settings.role == roles.base.role || builtins.elem settings.role roles.active;
+      message = "settings.role must be base or an active role in roles.json, not a machine.";
     }
     {
       assertion = lib.any (closure: closure.attr == settings.flakeAttr && closure.role == settings.role) roles.closures;
-      message = "settings.flakeAttr must be a closure that roles.json gives to this role.";
+      message = "settings.flakeAttr must be base or a closure that roles.json gives to this role.";
     }
     {
       assertion = cap.slotMax >= 1 && cap.slotMax <= 64
@@ -39,7 +41,7 @@ in {
   # dbus, so this is not before sysinit. Journald may already be running.
   # SSH, metrics, and runner registration wait for this unit.
   systemd.services.node-identity = {
-    description = "Name this machine from its role, capabilities, and stable id";
+    description = "Name this machine from its running role, capabilities, and stable id";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-udevd.service" "dbus.service" ];
     requires = [ "dbus.service" ];

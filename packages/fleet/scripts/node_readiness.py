@@ -26,9 +26,11 @@ def collect_issues(paths, identity, run, credential, settings):
     metadata = document(paths.etc / 'bootstrap.json')
     if not isinstance(metadata, dict) or metadata.get('version') != 1:
         return ['FLEET_READINESS_UNKNOWN: this image does not report integration readiness.']
+    # An enrollment token (credential) is optional: without one a person
+    # approves the node in the dashboard, which is not a readiness problem.
+    # What blocks convergence to the assigned role (secrets gate, registry,
+    # rollback) is reported separately as reconcile.issues by fleet-sync.
     result = list(metadata.get('blocked') or [])
-    if not credential:
-        result.append('FLEET_RECOVERY_CREDENTIAL_MISSING: automatic re-enrollment is unavailable.')
     if settings.get('sync.paused') is True:
         result.append('FLEET_UPDATES_PAUSED: automatic updates are paused in Fleet settings.')
     code, timer = run([paths.systemctl, 'is-active', 'fleet-sync.timer'], 5)

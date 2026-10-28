@@ -2,11 +2,12 @@ import { StartupError, databaseFailure } from './startup-error';
 import { createLogger, errorDetails, type Logger } from '@pkgs/logger';
 
 import { createController } from './app';
-import { FleetAdminAuth } from './auth/admin-auth';
 import { createDb } from './db/client';
 import { SqliteStore } from './db/sqlite-store';
 import { SqliteAccessStore } from './db/access-store';
-import { FleetBrowserAuth } from './auth/browser-auth';
+import { createDefaultAuth, resolveAuth } from './auth/composition';
+import type { AuthFactory, AuthServices, AuthContext } from './auth/contracts';
+import type { Store } from './store';
 import type { AppDeps } from './deps';
 import {
   ConfigurationError,
@@ -14,15 +15,17 @@ import {
   type ControllerEnv,
 } from './env';
 import { startJobs } from './jobs/scheduler';
-import { GithubRevisionSource } from './revisions/github';
 import { mountUi } from './routes/ui';
 import { localResponse } from './local-response';
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
 export interface ControllerOptions {
-  /** Local development uses the live store without duplicating deployed jobs. */
-  readonly local?: boolean;
+  /** Bind loopback; true disables live jobs, 'emulated' runs jobs on isolated data. */
+  readonly local?: boolean | 'emulated';
+  /** Trusted server-side adapter; never selected by request or tenant data. */
+  readonly authFactory?: AuthFactory;
+  readonly fetch?: AuthContext['fetch'];
 }
 
 export interface RunningController {
@@ -30,32 +33,17 @@ export interface RunningController {
   stop(): Promise<void>;
 }
 
-/** Wires the real database, relay authentication, GitHub lookup and clock into AppDeps. */
+/** Business dependencies receive auth interfaces, not concrete provider classes. */
 export function buildDeps(
   env: ControllerEnv,
-  store: SqliteStore,
-  log: Logger,
-  browserAuth?: FleetBrowserAuth
+  store: Store,
+  auth: AuthServices,
+  now: () => Date
 ): AppDeps {
-  const now = () => new Date();
   return {
     store,
-    ...(browserAuth ? { browserAuth } : {}),
-    auth: new FleetAdminAuth({
-      env,
-      now,
-      fetch,
-      log,
-      ...(browserAuth && env.relay
-        ? { browser: browserAuth, publicOrigin: env.relay.origin }
-        : {}),
-    }),
-    revisions: new GithubRevisionSource({
-      repo: env.githubRepo,
-      fetch,
-      now,
-      log,
-    }),
+    ...auth,
+    revisions: { latest: async () => env.targetRevision ?? null },
     env,
     now,
   };
@@ -70,10 +58,15 @@ export async function startController(
   const db = await createDb(env.storage);
   try {
     const store = new SqliteStore(db);
-    const browser = env.relay
-      ? new FleetBrowserAuth(new SqliteAccessStore(db), env.relay)
-      : undefined;
-    const deps = buildDeps(env, store, log, browser);
+    const now = () => new Date();
+    const auth = resolveAuth(options.authFactory ?? createDefaultAuth, {
+      adminToken: env.adminToken,
+      access: new SqliteAccessStore(db),
+      ...(env.oidc ? { oidc: env.oidc } : {}),
+      fetch: options.fetch ?? fetch,
+      now,
+    });
+    const deps = buildDeps(env, store, auth, now);
     const app = createController(deps, { log });
     mountUi(app, deps);
     await store.health();
@@ -82,12 +75,24 @@ export async function startController(
       port: env.port,
       fetch: async (request, bunServer) => {
         const response = await app.fetch(request, { server: bunServer });
-        return options.local ? localResponse(response, request) : response;
+        return options.local
+          ? localResponse(
+              response,
+              request,
+              options.local === 'emulated' ? 'emulated' : 'managed'
+            )
+          : response;
       },
     });
-    const jobs = options.local
-      ? undefined
-      : startJobs({ store, now: deps.now, fetch, log });
+    const jobs =
+      options.local === true
+        ? undefined
+        : startJobs({
+            store,
+            now: deps.now,
+            fetch: options.fetch ?? fetch,
+            log,
+          });
     log.info('fleet controller listening', { port: listener.port });
     return {
       port: listener.port ?? env.port,

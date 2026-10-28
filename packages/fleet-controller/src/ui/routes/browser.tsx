@@ -45,7 +45,7 @@ export function registerBrowser(app: Hono, deps: AppDeps): void {
   });
   app.post('/login', (c) =>
     c.text(
-      'Password sign-in has been removed. Use Google through the authentication relay.',
+      'Use the OpenID Connect sign-in configured for this Fleet deployment.',
       410
     )
   );

@@ -13,3 +13,10 @@ Installers, bootstrap and USB writes are destructive. Before running them obtain
 Never commit secrets, age private keys, state or plans. Role secrets use separate SOPS recipients. Keep local fixture servers on loopback, production browser login on validated OIDC code + S256 PKCE, and the initial allowlist owner-managed. Never expose unauthenticated VNC/CDP.
 
 Service logs use the included `@pkgs/logger` observability contract. Never log credentials, SQL parameters or OAuth payloads.
+
+Local agent workspaces use `bun run local:setup`, `bun run local`,
+`bun run local:status`, and `bun run local:stop`. Default local runs use explicit
+loopback Mockingbird OIDC/S3 emulators, real SQLite/Litestream, and separate ports/state per checkout. Never seed demo fleet data in the normal local run. See LOCAL_DEVELOPMENT.md.
+Keep `.fleet-local/` private and ignored. App hooks must call shared package
+scripts; never copy another checkout's secrets or kill processes by port/PID.
+Managed `bun run dev:managed` must continue requiring real operator configuration.

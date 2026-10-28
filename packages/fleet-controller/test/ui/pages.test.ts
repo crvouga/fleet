@@ -79,11 +79,9 @@ describe('overview', () => {
     const { app } = setup();
     const page = await html(app, '/');
     expect(page).toContain('Add your first node');
-    expect(page).toContain(
-      'https://github.com/crvouga/fleet/releases/tag/fleet-installer'
-    );
+    expect(page).toContain('/installers/release');
     expect(page).toContain('Choose a role');
-    expect(page).toContain('Submit new issue');
+    expect(page).toContain('Approve in Fleet');
     expect(page).toContain('href="/add"');
   });
 

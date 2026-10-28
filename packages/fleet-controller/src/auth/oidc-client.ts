@@ -1,24 +1,24 @@
 import * as oidc from 'openid-client';
-import type { RelayConfig } from './browser-contract';
+import type { OidcConfig, IdentityProvider } from './browser-contract';
 
-export interface RelayClient {
-  authorize(state: string, nonce: string, verifier: string): Promise<string>;
-  exchange(
-    url: URL,
-    state: string,
-    nonce: string,
-    verifier: string
-  ): Promise<Record<string, unknown>>;
+function requireLoopback(config: OidcConfig) {
+  for (const value of [config.issuer, config.origin]) {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1')
+      throw new Error('Emulated OIDC must stay on HTTP loopback');
+  }
 }
 
 /** Public client, code + S256 PKCE only. Discovery/JWT validation is library-owned. */
-export function relayClient(
-  config: RelayConfig,
+export function createOidcClient(
+  config: OidcConfig,
   customFetch: (
     input: RequestInfo | URL,
     init?: RequestInit
-  ) => Promise<Response> = fetch
-): RelayClient {
+  ) => Promise<Response>,
+  allowLoopbackHttp = false
+): IdentityProvider {
+  if (allowLoopbackHttp) requireLoopback(config);
   let pending: Promise<oidc.Configuration> | undefined;
   function provider(): Promise<oidc.Configuration> {
     pending ??= oidc
@@ -28,7 +28,10 @@ export function relayClient(
         undefined,
         undefined,
         {
-          execute: [oidc.enableNonRepudiationChecks],
+          execute: [
+            oidc.enableNonRepudiationChecks,
+            ...(allowLoopbackHttp ? [oidc.allowInsecureRequests] : []),
+          ],
           [oidc.customFetch]: (url, init) =>
             customFetch(url, {
               ...init,
@@ -43,7 +46,7 @@ export function relayClient(
       )
       .catch(() => {
         pending = undefined;
-        throw new Error('Authentication relay unavailable');
+        throw new Error('Identity provider unavailable');
       });
     return pending;
   }

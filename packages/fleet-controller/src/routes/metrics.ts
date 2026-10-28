@@ -8,6 +8,7 @@ import { adminRoute } from './guards';
 import { loadViews } from './node-views';
 import { resourceMetrics } from './resource-metrics';
 
+const UNASSIGNED = 'unassigned';
 const STATUSES: readonly NodeStatus[] = [
   'online',
   'stale',
@@ -31,15 +32,20 @@ function labels(pairs: Readonly<Record<string, string>>): string {
   return `{${body.join(',')}}`;
 }
 
+/** The assigned role as a label; `unassigned` when a person has not chosen one. */
+export function roleLabel(view: Pick<NodeView, 'role'>): string {
+  return view.role ?? UNASSIGNED;
+}
+
 function countsByStatusAndRole(views: readonly NodeView[]): string[] {
   const lines = [
-    '# HELP fleet_nodes Nodes by status and role.',
+    '# HELP fleet_nodes Nodes by status and assigned role.',
     '# TYPE fleet_nodes gauge',
   ];
   for (const status of STATUSES) {
-    for (const role of ROLES) {
+    for (const role of [...ROLES, UNASSIGNED]) {
       const count = views.filter(
-        (v) => v.status === status && v.role === role
+        (v) => v.status === status && roleLabel(v) === role
       ).length;
       lines.push(`fleet_nodes${labels({ status, role })} ${count}`);
     }
@@ -55,7 +61,16 @@ function perNode(views: readonly NodeView[]): string[] {
   ];
   for (const v of reporting) {
     lines.push(
-      `fleet_node_up${labels({ node: v.hostname, role: v.role })} ${v.status === 'online' ? 1 : 0}`
+      `fleet_node_up${labels({ node: v.hostname, role: roleLabel(v) })} ${v.status === 'online' ? 1 : 0}`
+    );
+  }
+  lines.push(
+    '# HELP fleet_node_converged 1 when an approved node runs its desired state.',
+    '# TYPE fleet_node_converged gauge'
+  );
+  for (const v of reporting) {
+    lines.push(
+      `fleet_node_converged${labels({ node: v.hostname, role: roleLabel(v) })} ${v.convergence === 'converged' ? 1 : 0}`
     );
   }
   lines.push(

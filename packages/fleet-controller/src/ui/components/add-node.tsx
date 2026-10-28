@@ -27,8 +27,8 @@ const STEPS: readonly Step[] = [
     body: 'Pick what the machine is for. You can see the roles below.',
   },
   {
-    title: 'Press Submit new issue',
-    body: 'The installer opens a prefilled GitHub issue. Submitting it asks to join the fleet. Then approve the machine under Pending.',
+    title: 'Approve in Fleet',
+    body: 'The live installer registers with this app. Review and approve it under Pending before its disk is erased.',
   },
 ];
 

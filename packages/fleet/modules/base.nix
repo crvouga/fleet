@@ -163,6 +163,40 @@ in {
       mv "$dest.next" "$dest"
     '';
   };
+  # Every node has its own age identity, generated here on first boot and
+  # never copied off the machine. The controller learns only age.pub (the
+  # heartbeat's ageRecipient); the operator makes it a recipient of the role
+  # file the controller assigned (ARCHITECTURE.md). A key an older installer
+  # placed is kept as is. sops-nix decrypts during activation of a role
+  # closure, so the identity must exist before the first switch away from base.
+  systemd.services.fleet-age-identity = {
+    description = "Create this node's own age identity";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "fleet-agent.service" "fleet-sync.service" ];
+    unitConfig.RequiresMountsFor = "/nix/fleet-state";
+    path = [ pkgs.age pkgs.coreutils ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; UMask = "0077"; };
+    script = ''
+      set -eu
+      dir=/nix/fleet-state/secrets
+      install -d -m 0700 "$dir"
+      if [ ! -s "$dir/age.key" ]; then
+        age-keygen -o "$dir/age.key.next" 2>/dev/null
+        chmod 0600 "$dir/age.key.next"
+        mv "$dir/age.key.next" "$dir/age.key"
+      fi
+      recipient=$(age-keygen -y "$dir/age.key")
+      case "$recipient" in
+        age1*) ;;
+        *) echo 'fleet-age-identity: age.key does not hold one X25519 identity' >&2; exit 1 ;;
+      esac
+      if [ "$(cat "$dir/age.pub" 2>/dev/null || true)" != "$recipient" ]; then
+        printf '%s\n' "$recipient" > "$dir/age.pub.next"
+        chmod 0644 "$dir/age.pub.next"
+        mv "$dir/age.pub.next" "$dir/age.pub"
+      fi
+    '';
+  };
   # Age key path and sops file only. Role modules declare their own secrets.
   # A CI runner and a web server must not be given the same key or file.
   sops = lib.mkIf (settings.secretsFile != null) {

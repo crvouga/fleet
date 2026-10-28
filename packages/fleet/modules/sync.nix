@@ -8,8 +8,11 @@
   tools = import ./fleet-tools.nix { inherit lib pkgs; };
 in {
   # comin is not in nixpkgs at the pinned revision 7c8764b7, so this timer is
-  # the pull agent. It fetches main and switches nixosConfigurations.<flakeAttr>
-  # using upstream substitutes and bounded local builds for missing paths.
+  # the pull agent. It fetches main and converges to the assigned closure in
+  # /nix/fleet-state/target (written by fleet-agent from the controller's
+  # desired state, or by fleet-target in local mode), else to this image's own
+  # nixosConfigurations.<flakeAttr>, using upstream substitutes and bounded
+  # local builds for missing paths (ARCHITECTURE.md).
   assertions = [
     {
       assertion = repo.branch == "main";
@@ -17,7 +20,7 @@ in {
     }
     {
       assertion = auth == "none" || settings.secretsFile != null;
-      message = "repo.auth needs this role's secretsFile. CI and web must not share that file or its age key.";
+      message = "repo.auth needs this role's secretsFile. Roles must not share that file. The role-less base closure has no secrets, so it can only follow a repository with repo.auth = \"none\".";
     }
   ];
   environment.systemPackages = [
@@ -25,7 +28,7 @@ in {
       exec ${pkgs.bash}/bin/bash ${../scripts/fleet-sync.sh} "$@"
     '')
   ];
-  environment.etc."fleet/git-known-hosts".source = ./github-known-hosts;
+  environment.etc."fleet/git-known-hosts".text = settings.repo.sshKnownHosts or "";
   environment.etc."fleet/sync.env".text = ''
     ROLE=${lib.escapeShellArg settings.role}
     FLAKE_ATTR=${lib.escapeShellArg settings.flakeAttr}
@@ -50,13 +53,17 @@ in {
     FLEET_ROLES_PY=${lib.escapeShellArg "${tools.scripts}/fleet_roles.py"}
     FLEETCONF=${lib.escapeShellArg "${tools.fleetconf}/bin/fleetconf"}
     PYTHON=${lib.escapeShellArg "${pkgs.python3}/bin/python3"}
+    TARGET=${lib.escapeShellArg "/nix/fleet-state/target"}
+    AGE_PUB=${lib.escapeShellArg "/nix/fleet-state/secrets/age.pub"}
+    RECONCILE=${lib.escapeShellArg "/run/fleet/reconcile.json"}
+    NODE_CONF=${lib.escapeShellArg "/etc/fleet/node.conf"}
   '';
   sops.secrets = lib.mkIf (settings.secretsFile != null) (lib.mkMerge [
     (lib.mkIf (auth == "ssh") { git-read-key = { mode = "0400"; }; })
     (lib.mkIf (auth == "token") { git-read-token = { mode = "0400"; }; })
   ]);
   systemd.services.fleet-sync = {
-    description = "Pull this role from git";
+    description = "Converge this node to its assigned closure";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     # An updater must finish its current activation and health/rollback checks
@@ -71,6 +78,7 @@ in {
     unitConfig.X-StopOnRemoval = false;
   };
   systemd.timers.fleet-sync = lib.mkIf timerOn {
+    description = "Converge this node to its assigned closure every poll";
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "15s";

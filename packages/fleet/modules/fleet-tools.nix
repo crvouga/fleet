@@ -1,6 +1,6 @@
 # Not a module. A function that returns the node scripts as ONE store path
-# (agent.py, fleetconf.py and cattle.py import each other, so they must sit
-# in the same directory) and the commands built on them. agent.nix, sync.nix,
+# (agent.py, fleetconf.py, cattle.py and fleet_target.py import each other, so
+# they must sit in the same directory) and the commands built on them. agent.nix, sync.nix,
 # identity.nix, base.nix and ci-runner.nix call it, and nothing else.
 { lib, pkgs, apiUrl ? "" }: let
   python = "${pkgs.python3}/bin/python3";
@@ -10,6 +10,7 @@
     cp ${../scripts/fleet_roles.py} "$out/fleet_roles.py"
     cp ${../scripts/fleetconf.py} "$out/fleetconf.py"
     cp ${../scripts/agent.py} "$out/agent.py"
+    cp ${../scripts/fleet_target.py} "$out/fleet_target.py"
     cp ${../scripts/node_readiness.py} "$out/node_readiness.py"
     cp ${../scripts/telemetry.py} "$out/telemetry.py"
     cp ${../scripts/recovery.py} "$out/recovery.py"
@@ -41,6 +42,14 @@ in {
     export PATH=${lib.makeBinPath [ pkgs.iproute2 pkgs.systemd pkgs.coreutils ]}:$PATH
     export FLEET_API_URL="''${FLEET_API_URL-${apiUrl}}"
     exec ${python} ${scripts}/agent.py "$@"
+  '';
+  # fleet-target show|set|clear: the desired state of a node without a
+  # controller. The address is fixed here, not taken from the caller's
+  # environment: with a controller configured the command only shows.
+  target = pkgs.writeShellScriptBin "fleet-target" ''
+    export PATH=${lib.makeBinPath [ pkgs.systemd pkgs.coreutils ]}:$PATH
+    export FLEET_API_URL=${lib.escapeShellArg apiUrl}
+    exec ${python} ${scripts}/fleet_target.py "$@"
   '';
   runnerJob = pkgs.writeShellScriptBin "fleet-runner-job" ''
     exec ${python} ${jobScripts}/runner_job.py "$@"

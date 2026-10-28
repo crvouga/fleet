@@ -49,7 +49,7 @@ describe('sign in', () => {
     );
   });
 
-  test('login uses the relay and never renders Vault credentials', async () => {
+  test('login uses the provider and never renders Vault credentials', async () => {
     const { app } = populated();
     const page = await html(app, '/login?next=/nodes', null);
     expect(page).toContain('OpenID Connect');

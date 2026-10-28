@@ -11,11 +11,10 @@ import { mountUi } from '../../src/routes/ui';
 import { localResponse } from '../../src/local-response';
 import { createTestDeps } from '../../src/testing/test-deps';
 import { databaseAvailable, useDatabase } from '../support/database';
-import { mockBrowserRelay } from '../support/relay';
-import { silent } from '../support/controller';
+import { mockIdentityProvider } from '../support/oidc-provider';
 
 describe.skipIf(!databaseAvailable)(
-  'Google through relay browser journey',
+  'Injected identity-provider browser journey',
   () => {
     const database = useDatabase();
     test('denied person signs out, chooses an allowed account and manages Fleet access', async () => {
@@ -26,7 +25,7 @@ describe.skipIf(!databaseAvailable)(
         fetch: async (request) =>
           localResponse(await app.fetch(request), request),
       });
-      const certificate = mkdtempSync(join(tmpdir(), 'fleet-relay-tls-'));
+      const certificate = mkdtempSync(join(tmpdir(), 'fleet-provider-tls-'));
       const key = join(certificate, 'key.pem'),
         cert = join(certificate, 'cert.pem');
       const generated = Bun.spawnSync([
@@ -43,7 +42,7 @@ describe.skipIf(!databaseAvailable)(
         '-days',
         '1',
         '-subj',
-        '/CN=mock-relay.example',
+        '/CN=mock-provider.example',
       ]);
       expect(generated.exitCode).toBe(0);
       let email = 'denied@example.test';
@@ -57,32 +56,34 @@ describe.skipIf(!databaseAvailable)(
       });
       const config = {
         origin: `http://127.0.0.1:${server.port}`,
-        issuer: `https://mock-relay.example:${upstream.port}/realms/test`,
+        issuer: `https://mock-provider.example:${upstream.port}/realms/test`,
         clientId: 'browser-fixture',
       };
-      const relay = mockBrowserRelay(config);
+      const provider = mockIdentityProvider(config);
       function authorization(url: URL): string {
-        return relay.authorize(url, email);
+        return provider.authorize(url, email);
       }
       const access = new SqliteAccessStore(database().sql);
       await access.allow('admin@example.test', 'test-database-owner');
-      const browserAuth = new FleetBrowserAuth(access, config, relay.client);
+      const browserAuth = new FleetBrowserAuth(
+        access,
+        config,
+        provider.client,
+        () => new Date()
+      );
       const deps = createTestDeps();
       mountUi(app, {
         ...deps,
         browserAuth,
         auth: new FleetAdminAuth({
           env: deps.env,
-          now: deps.now,
-          fetch,
-          log: silent,
           browser: browserAuth,
           publicOrigin: config.origin,
         }),
       });
       const browser = await chromium.launch({
         headless: true,
-        args: ['--host-resolver-rules=MAP mock-relay.example 127.0.0.1'],
+        args: ['--host-resolver-rules=MAP mock-provider.example 127.0.0.1'],
       });
       try {
         const page = await browser.newPage({ ignoreHTTPSErrors: true });
@@ -90,7 +91,9 @@ describe.skipIf(!databaseAvailable)(
         page.setDefaultNavigationTimeout(5000);
         await page.goto(`${config.origin}/login`);
         expect(await page.locator('input[type=password]').count()).toBe(0);
-        await page.getByRole('link', { name: 'Sign in with OpenID Connect' }).click();
+        await page
+          .getByRole('link', { name: 'Sign in with OpenID Connect' })
+          .click();
         await page.waitForURL('**/not-allowed');
         // The URL changes before the page renders; count() does not wait, so
         // a slow runner counted 0. Wait for the heading, then assert there is one.
@@ -100,12 +103,12 @@ describe.skipIf(!databaseAvailable)(
         await page.getByRole('button', { name: 'Sign out' }).click();
         await page.waitForURL('**/login');
         email = 'admin@example.test';
-        await page.getByRole('link', { name: 'Sign in with OpenID Connect' }).click();
+        await page
+          .getByRole('link', { name: 'Sign in with OpenID Connect' })
+          .click();
         await page.waitForURL(config.origin + '/');
         await page.getByRole('link', { name: 'Access', exact: true }).click();
-        await page
-          .getByLabel('Email address')
-          .fill('another@example.test');
+        await page.getByLabel('Email address').fill('another@example.test');
         await page.getByRole('button', { name: 'Allow access' }).click();
         const row = page
           .getByRole('listitem')

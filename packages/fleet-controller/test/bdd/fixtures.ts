@@ -11,9 +11,9 @@ async function authorizeLivePage(page: Page) {
   const token = process.env['FLEET_ADMIN_TOKEN'];
   if (!token)
     throw new Error(
-      'Run live scenarios with vault run --config prd to supply FLEET_ADMIN_TOKEN'
+      'Set FLEET_ADMIN_TOKEN in your environment to run live scenarios'
     );
-  await page.route('https://fleet.example.com/**', async (route) => {
+  await page.route(`${process.env['FLEET_BDD_URL']}/**`, async (route) => {
     await route.continue({
       headers: {
         ...route.request().headers(),

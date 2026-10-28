@@ -13,9 +13,9 @@ export function integrationIssues(view: NodeView, facts: NodeFacts): string[] {
   if (facts.rolledBack)
     issues.push('The node rolled back to its previous system.');
   // The repository no longer builds this role, so the node can never update.
-  if (!isActiveRole(view.role))
+  if (view.role !== null && !isActiveRole(view.role))
     issues.push(
-      `Role ${view.role} is retired in roles.json. Reinstall this machine as one of: ${ACTIVE_ROLES.join(', ')}.`
+      `Role ${view.role} is retired in roles.json. Assign one of: ${ACTIVE_ROLES.join(', ')}.`
     );
   return [...new Set(issues)];
 }

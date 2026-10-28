@@ -19,20 +19,20 @@ monitoring or cached updates work.
 3. On the machine itself, download one file and run it. Nix, a git checkout, `just`, and a second computer are not required.
 
    ```sh
-   curl -fsSL -o fleet-node.sh https://github.com/crvouga/fleet/releases/download/fleet-installer/fleet-node.sh
+   curl -fsSL -o fleet-node.sh "$FLEET_CONTROLLER_URL/installers/assets/fleet-node.sh"
    bash fleet-node.sh
    ```
 
    For no prompts at all: `bash fleet-node.sh ci --yes` (or `devbox`). `--yes` skips only the typed confirmation; a USB, removable, hotplug, or ambiguous disk is still refused. Save the file first; piping it into `bash` is not supported. Otherwise type `ci` or `devbox` when asked. The program names that role and the internal disk. Nothing is erased until you type the line it shows. An empty answer, a wrong line, a timeout, or a USB, removable, hotplug, or ambiguous disk leaves every disk unchanged and prints one next step. A mounted internal disk is allowed when converting the running OS; the RAM installer rechecks the disk before wiping. Run the same command again after a failure or after a finished install. A finished install is not wiped a second time. The age private key is not printed. Do not add a host file, a MAC, a disk path, or a hostname.
 
-   An agent can do this step: `Set this machine up as a fleet <role> node by following https://raw.githubusercontent.com/crvouga/fleet/main/packages/fleet/docs/agent-install.md`. `sudo bash fleet-node.sh doctor <role>` shows the disk and any blocker first and writes nothing.
+   An agent can do this step: `Set this machine up as a fleet <role> node by following the embedded runbook from `bash fleet-node.sh guide``. `sudo bash fleet-node.sh doctor <role>` shows the disk and any blocker first and writes nothing.
 
-4. For a role whose secrets are encrypted to a shared key, nothing to do: the installer opens a GitHub issue; press **Submit new issue** as the repository owner. (Or pass a single-use enrollment token yourself, or use `--no-enroll`.) Before that works for the first time, the owner has run `just setup` once and applied the vault root. `bash fleet-node.sh ci --yes --token-file token` (see the enrollment paragraph in [AGENTS.md](../AGENTS.md)). Or plug in a filesystem labeled `FLEET-KEY` before the install reboots. An existing `<role>.age` on it is the key for this role. An empty volume receives the new key so the next node of the role can decrypt the same file. Two roles never share a key.
+4. Approve the computer under **Pending** in your Fleet app. The live installer registers directly and waits before disk changes. Shared encrypted role secrets require the matching `<role>.age` on a private filesystem labeled `FLEET-KEY` (or an explicit optional wrapped token). Role-key transfer and node approval are separate; no GitHub issue or workflow is involved.
 5. A machine with no operating system cannot download. On a computer that already has one, use the wizard or run `bash fleet-node.sh flash` and boot that USB disk from the firmware one-time menu. `flash` refuses an internal disk. Choose ci or devbox and press Enter. The UEFI menu waits for your choice; every entry erases the internal disk. A devbox asks for an SSH public key before wiping.
 6. If the firmware would boot the stick again, pull it when the console says the install finished. The lasting boot order stays network, then the internal disk. The console prints the age public key and `ssh-keygen -lf` of `/nix/fleet-state/ssh/ssh_host_ed25519_key.pub`. Encrypt secrets to that public key from any computer. `sshKeys` in `settings/shared.nix` stays empty until remote read-only access is wanted. The hostname is `<role>[-gpu][-highmem]-<4 hex>` from the hardware id.
-7. Apply the reviewed OpenTofu plan that adds the merge queue and the `Fleet` required check to `main`. Until that plan is applied, GitHub is still on the previous ruleset. Do not push `main` directly.
+7. Configure your own repository protections and required checks through your operator workflow. Fleet does not provision or change GitHub settings.
 
 The private cloud cache is retired. Automatic updates build missing closures
 locally with upstream Nix substitutes; no private publisher is required.
-The current repository is public, so `repo.auth = "none"` is valid. A private
+For a public deployment repository, `repo.auth = "none"` is valid. A private
 repository requires a read credential encrypted separately for each role.

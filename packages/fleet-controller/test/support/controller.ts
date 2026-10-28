@@ -68,7 +68,6 @@ export interface HarnessOptions {
   readonly clock?: Clock;
   readonly env?: Partial<AppEnv>;
   readonly controller?: ControllerAppOptions;
-  readonly fetch?: typeof fetch;
 }
 
 export function testEnv(overrides: Partial<AppEnv> = {}): AppEnv {
@@ -76,7 +75,6 @@ export function testEnv(overrides: Partial<AppEnv> = {}): AppEnv {
     adminToken: ADMIN_TOKEN,
 
     roleTokenHashes: { ci: sha256(CI_ROLE_TOKEN) },
-    githubRepo: 'crvouga/fleet',
     ...overrides,
   };
 }
@@ -92,9 +90,6 @@ export function createHarness(
     auth: new FleetAdminAuth({
       env,
       ...(options.browser ? { browser: options.browser } : {}),
-      now: clock.now,
-      fetch: options.fetch ?? fetch,
-      log: silent,
     }),
     revisions: { latest: async () => null },
     env,

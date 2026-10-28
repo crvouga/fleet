@@ -1,42 +1,36 @@
 import type { Context } from 'hono';
-import { roleTokenValid } from '../auth/role-token';
+import {
+  ENROLLMENT_TOKEN_PATTERN,
+  matchEnrollmentToken,
+} from '../auth/enrollment-token';
 import type { AppDeps } from '../deps';
 import { isRecord } from '../domain/heartbeat-fields';
-import { isActiveRole } from '../types';
 import { controllerError, readJson } from './http';
 
-/** Prove that the installed credential can auto-approve, without registering a
- * node or changing any state. Never echo credentials or approval hashes. */
+/** Prove that an enrollment token can auto-approve, without registering a
+ * node or changing any state. Never echo tokens or their hashes. The role is
+ * informational: the controller assigns it, the installer never compares it. */
 export function enrollmentCheck(deps: AppDeps) {
   return async (c: Context): Promise<Response> => {
     const body = await readJson(c);
     if (!body.ok) return body.response;
     const value = body.value;
-    if (
-      !isRecord(value) ||
-      !isActiveRole(value['role']) ||
-      typeof value['roleToken'] !== 'string' ||
-      value['roleToken'].length > 512
-    )
+    const token = isRecord(value) ? value['enrollmentToken'] : undefined;
+    if (typeof token !== 'string' || !ENROLLMENT_TOKEN_PATTERN.test(token))
       return controllerError(
         c,
         400,
         'invalid_request',
-        'Supply the role and its enrollment credential.'
+        'Supply enrollmentToken: 8 to 512 letters, digits, dots, underscores or dashes.'
       );
-    if (
-      !roleTokenValid(
-        deps.env.roleTokenHashes,
-        value['role'],
-        value['roleToken']
-      )
-    )
+    const entry = matchEnrollmentToken(deps.env.enrollmentTokens, token);
+    if (entry === null)
       return controllerError(
         c,
         401,
         'enrollment_not_ready',
-        'The role credential cannot automatically approve this node. Resolve Fleet/Vault credential configuration before installation.'
+        'The enrollment token cannot automatically approve this node. Check FLEET_ENROLLMENT_TOKENS or approve the node manually in Fleet.'
       );
-    return c.json({ ok: true, role: value['role'] });
+    return c.json({ ok: true, role: entry.role });
   };
 }

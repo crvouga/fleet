@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""Private, bounded integration checks before any destructive installation.
+"""Private, bounded checks before the destructive installation of base.
 
-Only public error codes are printed. No exception, OAuth response, decrypted
-document or credential is ever included in the diagnostic.
+  bootstrap-readiness.py TOPLEVEL TOKEN_FILE
+
+The installer only sets up the node: it checks the platform configuration of
+the base closure (its single `blocked` list), that the closure is available,
+and, when an enrollment token is present, that Fleet accepts it (contract C2).
+In managed mode it then registers the hardware identity without a role and
+waits for approval. Role secrets, SOPS and GitHub runner registration are not
+checked here: the node reports those as reconcile issues once Fleet assigns
+it a role. Only public error codes are printed, never a credential.
 """
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
-from bootstrap_report import BootstrapReporter, ApprovalRefused, ReportUnavailable
+from bootstrap_report import BootstrapReporter, ApprovalRefused, ReportUnavailable, read_token
+
+TOKEN = re.compile(r'[A-Za-z0-9._-]{8,512}')
 
 
 class NotReady(Exception):
@@ -35,18 +42,23 @@ def require(condition, message):
         raise NotReady(message)
 
 
-def check_api(url, role, token):
+def check_api(url, token):
     parsed = urlparse(url)
     require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and
             not parsed.password and not parsed.query and not parsed.fragment,
             'FLEET_API_UNCONFIGURED: the image needs an HTTPS Fleet controller address.')
+    if not token:
+        return  # Registration and explicit app approval authorize this node.
     request = urllib.request.Request(url.rstrip('/') + '/v1/enrollment/check',
-        data=json.dumps({'role': role, 'roleToken': token}).encode(),
+        data=json.dumps({'enrollmentToken': token}).encode(),
         headers={'Content-Type': 'application/json'}, method='POST')
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=20) as reply:
             result = json.loads(reply.read(4097))
-            require(result == {'ok': True, 'role': role}, 'FLEET_API_PROTOCOL: Fleet did not confirm enrollment readiness.')
+            # C2: { ok: true, role: string|null }. The role is the controller's
+            # decision and is never compared here.
+            require(isinstance(result, dict) and result.get('ok') is True,
+                    'FLEET_API_PROTOCOL: Fleet did not confirm enrollment readiness.')
     except urllib.error.HTTPError as error:
         if error.code == 404:
             # A rolling deployment may still expose the old controller. The caller
@@ -55,35 +67,33 @@ def check_api(url, role, token):
             return
         if error.code in (408, 429) or error.code >= 500:
             raise Retryable('FLEET_API_UNAVAILABLE: Fleet is temporarily unavailable; retrying before disk changes.') from None
-        raise NotReady('FLEET_ENROLLMENT_REJECTED: Fleet cannot approve this credential. Repair the role credential or update the Fleet controller before installing.') from None
+        raise NotReady('FLEET_ENROLLMENT_REJECTED: Fleet does not accept this enrollment token. Replace or remove it, then retry. Nothing was erased.') from None
     except (urllib.error.URLError, OSError):
         raise Retryable('FLEET_API_UNAVAILABLE: Fleet could not be reached; retrying before disk changes.') from None
 
 
-def check(toplevel, role, age_file, token_file, run=subprocess.run, api=check_api):
+def check(toplevel, token_file, run=subprocess.run, api=check_api):
     path = Path(toplevel) / 'etc/fleet/bootstrap.json'
     require(path.is_file(), 'FLEET_METADATA_MISSING: update the installer; this image cannot prove integration readiness.')
     metadata = json.loads(path.read_text())
-    require(metadata.get('version') == 1 and metadata.get('role') == role,
-            'FLEET_METADATA_INVALID: the installed role does not match its bootstrap metadata.')
-    blocked = metadata.get('installBlocked', metadata['blocked'])
+    require(metadata.get('version') == 1, 'FLEET_METADATA_INVALID: the installer bootstrap metadata has an unsupported version.')
+    blocked = metadata.get('installBlocked', metadata.get('blocked'))
+    require(isinstance(blocked, list), 'FLEET_METADATA_INVALID: the installer bootstrap metadata has no readiness list.')
     require(not blocked, 'FLEET_PLATFORM_NOT_READY: ' + '; '.join(blocked))
-    token = Path(token_file).read_text().strip() if Path(token_file).is_file() else ''
+    token = read_token(token_file)
     local = metadata.get("approvalMode") == "local"
     require(not local or metadata.get("apiUrl") == "",
             "FLEET_APPROVAL_INVALID: local approval cannot name a remote controller.")
-    require(local or re.fullmatch(r'[A-Za-z0-9._-]{8,512}', token),
-            'FLEET_ENROLLMENT_MISSING: automatic Fleet approval requires an enrolled installer with an controller role credential. Nothing was erased.')
-    require((local and metadata.get('secretsFile') is None) or Path(age_file).is_file(), 'FLEET_ROLE_KEY_MISSING: the enrolled role key is required before installation.')
-    source = metadata.get('secretsFile')
+    require(not token or TOKEN.fullmatch(token),
+            'FLEET_ENROLLMENT_INVALID: the enrollment token is malformed. Replace or remove it. Nothing was erased.')
     if metadata.get('updateMode') == 'local':
         try:
             closure = run(['nix', 'path-info', '--recursive', str(toplevel)],
                           capture_output=True, timeout=30, check=False)
         except (OSError, subprocess.TimeoutExpired):
-            raise NotReady('FLEET_LOCAL_CLOSURE_UNAVAILABLE: the installer could not validate its bundled role closure. Nothing was erased.') from None
+            raise NotReady('FLEET_LOCAL_CLOSURE_UNAVAILABLE: the installer could not validate its bundled base closure. Nothing was erased.') from None
         require(closure.returncode == 0,
-                'FLEET_LOCAL_CLOSURE_UNAVAILABLE: this image is missing its role closure. Rebuild the installer before disk changes.')
+                'FLEET_LOCAL_CLOSURE_UNAVAILABLE: this image is missing its base closure. Rebuild the installer before disk changes.')
     else:
         cache_url = metadata.get('cacheUrl')
         parsed_cache = urlparse(cache_url or '')
@@ -98,55 +108,23 @@ def check(toplevel, role, age_file, token_file, run=subprocess.run, api=check_ap
             raise Retryable('FLEET_CACHE_UNAVAILABLE: update-cache readiness timed out; retrying before disk changes.') from None
         if cached.returncode != 0:
             raise Retryable('FLEET_CACHE_UNAVAILABLE: this revision is not readable with its pinned signing key; check cache publication and connectivity. Retrying before disk changes.')
-    github = metadata.get('github')
-    if source:
-        try:
-            done = run(['sops', '--decrypt', '--output-type', 'json', source],
-                env={**os.environ, 'SOPS_AGE_KEY_FILE': str(age_file)},
-                capture_output=True, timeout=30, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            raise NotReady('FLEET_ROLE_SECRETS: role secrets could not be checked. Nothing was erased.') from None
-        require(done.returncode == 0, 'FLEET_ROLE_SECRETS: the enrolled key cannot decrypt this role. Repair its encrypted secrets before installing.')
-        values = json.loads(done.stdout)
-        require(all(name in values for name in metadata['requiredSecrets']),
-                'FLEET_ROLE_SECRETS: a required role secret is missing from the encrypted document.')
-        if github:
-            require(isinstance(values.get('github-app-key'), str), 'FLEET_GITHUB_KEY: the GitHub App credential is missing.')
-            with tempfile.TemporaryDirectory(prefix='fleet-bootstrap-') as directory:
-                key = Path(directory) / 'app.pem'
-                key.write_text(values['github-app-key'])
-                key.chmod(0o600)
-                targets = github['repositories'] if github['scope'] == 'repository' else [github['organization']]
-                require(bool(targets), 'FLEET_GITHUB_SCOPE: no runner repository or organization is configured.')
-                for target in targets:
-                    try:
-                        result = run([sys.executable, str(Path(__file__).with_name('runner_control.py')), 'register',
-                            github['scope'], target, github['appId'], github['installationId'], str(key),
-                            str(Path(directory) / 'registration')], capture_output=True, timeout=75, check=False)
-                    except (OSError, subprocess.TimeoutExpired):
-                        raise Retryable('FLEET_GITHUB_UNAVAILABLE: retrying GitHub registration readiness before disk changes.') from None
-                    if result.returncode == 75:
-                        raise Retryable('FLEET_GITHUB_UNAVAILABLE: GitHub transport, throttling or server failure; retrying before disk changes.')
-                    # runner_control prints one public line: CODE: what GitHub refused.
-                    said = getattr(result, 'stderr', b'') if result.returncode else b''
-                    said = (said.decode('utf-8', 'replace') if isinstance(said, bytes) else str(said or '')).strip().splitlines()
-                    said = said[-1][:300] if said and said[-1].startswith('FLEET_') else ''
-                    require(result.returncode == 0, (said + f' (target {target}). Nothing was erased.') if said else
-                            'FLEET_GITHUB_REGISTRATION: GitHub rejected runner registration. Check the App installation and repository access before installing.')
     if not local:
-        api(metadata['apiUrl'], role, token)
+        api(metadata['apiUrl'], token)
 
 
 if __name__ == '__main__':
     reporter = None
     try:
-        metadata = json.loads((Path(sys.argv[1]) / "etc/fleet/bootstrap.json").read_text())
+        toplevel, token_file = sys.argv[1:3]
+        metadata = json.loads((Path(toplevel) / "etc/fleet/bootstrap.json").read_text())
         if metadata.get("approvalMode") == "local" and metadata.get("apiUrl") == "":
-            check(*sys.argv[1:])
+            check(toplevel, token_file)
         else:
-            reporter = BootstrapReporter(sys.argv[1], sys.argv[2], sys.argv[4])
+            # Register and wait for approval first, so Fleet shows every later
+            # failure on this node's page.
+            reporter = BootstrapReporter(toplevel, token_file)
             reporter.begin(check_api)
-            check(*sys.argv[1:], api=lambda *args: None)
+            check(toplevel, token_file, api=lambda *args: None)
         if reporter:
             reporter.report('FLEET_INSTALLING: preflight passed; awaiting installation and the first installed-system heartbeat.')
     except (Retryable, ReportUnavailable) as error:

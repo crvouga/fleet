@@ -1,96 +1,98 @@
 #!/usr/bin/env python3
-"""Create the missing per-role age keys and wire them in.
+"""Render .sops.yaml creation rules from the Fleet controller's recipients.
 
-Writes the private keys to the vault root's ignored auto.tfvars.json (the
-`fleet_age_keys` input) and the matching public recipients to .sops.yaml.
-Existing keys are kept, so running it twice changes nothing. Private keys are
-never printed and never written under a tracked path.
+  fleet-keys.py --operator age1... [--operator age1...] [RECIPIENTS.json | -]
 
-Keys are created for the active roles in roles.json. A retired role's existing
-key stays in the input, because the vault root keeps its document until a
-reviewed change deletes the role from the registry.
+Each node creates its own age identity on first boot and reports only the
+public recipient. `GET /v1/recipients` on the controller lists them per
+assigned role: { "roles": { "ci": [{ "nodeId", "hostname", "recipient" }] } }.
+Save that JSON to a file (or pipe it on stdin); this helper prints one
+creation rule per role secrets file in roles.json (secrets/fleet.yaml for ci,
+secrets/devbox.yaml for devbox), each listing the operator recipients given
+with --operator followed by that role's node recipients. A devbox identity is
+never a recipient of the CI file.
+
+It makes no network request, reads no private key and changes nothing: write
+the output to .sops.yaml yourself, then run `sops updatekeys` on each secrets
+file in your own repository and merge it through review.
 """
+import argparse
 import json
-import os
-import subprocess
+import re
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fleet_roles  # noqa: E402  (a sibling file, not an installed package)
 
-REGISTRY = fleet_roles.load()
-ROLES = REGISTRY.view("active")
-# The sops file each active role's recipient encrypts: secrets/fleet.yaml -> fleet.
-FILES = {role.name: Path(role.secrets).stem for role in REGISTRY.roles if role.is_active}
-KNOWN = frozenset(REGISTRY.view("known"))
-HERE = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = Path.home() / ".config" / "fleet" / "fleet-age-keys.auto.tfvars.json"
+RECIPIENT = re.compile(r"^age1[02-9ac-hj-np-z]{58}$")
+INPUT_MAX = 1024 * 1024
 
 
-def generate(tool):
-    text = subprocess.run([tool], check=True, capture_output=True, text=True).stdout
-    secret = next((line.strip() for line in text.splitlines() if line.startswith("AGE-SECRET-KEY-")), "")
-    public = next((line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("# public key:")), "")
-    if not secret or not public.startswith("age1"):
-        raise RuntimeError("age-keygen gave no key")
-    return secret, public
+class Refused(Exception):
+    pass
 
 
-def public_of(tool, secret):
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "key"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(secret + "\n")
-        return subprocess.run([tool, "-y", str(path)], check=True, capture_output=True, text=True).stdout.strip()
+def require(condition, message):
+    if not condition:
+        raise Refused(message)
 
 
-def write_private(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        json.dump(data, handle, indent=2)
-        handle.write("\n")
-    os.replace(temporary, path)
+def node_recipients(document, role):
+    """The validated recipients of one role, in the controller's order."""
+    entries = document["roles"].get(role) or []
+    require(isinstance(entries, list), f"roles.{role} must be a list")
+    found = []
+    for entry in entries:
+        require(isinstance(entry, dict) and isinstance(entry.get("recipient"), str),
+                f"every roles.{role} entry needs a recipient")
+        require(RECIPIENT.fullmatch(entry["recipient"]) is not None,
+                f"roles.{role} has a recipient that is not an age public key")
+        found.append(entry["recipient"])
+    return found
 
 
-def sops_text(publics):
-    lines = ["# One age recipient per active role in roles.json. Roles never share a key.", "creation_rules:"]
-    for role in ROLES:
-        lines += [f"  - path_regex: secrets/{FILES[role]}\\.(yaml|yml|json)$", f"    age: {publics[role]}"]
+def rules(document, operators, registry):
+    require(isinstance(document, dict) and isinstance(document.get("roles"), dict),
+            'the input is not GET /v1/recipients JSON ({"roles": {...}})')
+    require(operators, "give at least one --operator recipient, so you can still decrypt and re-encrypt the files")
+    for value in operators:
+        require(RECIPIENT.fullmatch(value) is not None, "an --operator value is not an age public key (age1...)")
+    lines = ["# Generated by scripts/fleet-keys.py from GET /v1/recipients. One rule per role",
+             "# secrets file: the operator recipients, then the nodes Fleet assigned that role.",
+             "creation_rules:"]
+    for role in registry.view("active"):
+        secrets = fleet_roles.secrets_file(registry, role)
+        if not secrets:
+            continue
+        stem = Path(secrets).stem
+        recipients = list(dict.fromkeys([*operators, *node_recipients(document, role)]))
+        lines += [f"  - path_regex: secrets/{re.escape(stem)}\\.(yaml|yml|json)$",
+                  f"    age: {','.join(recipients)}"]
     return "\n".join(lines) + "\n"
 
 
 def main(argv):
-    out = Path(os.environ.get("FLEET_KEYS_OUT") or DEFAULT_OUT)
-    sops = Path(os.environ.get("FLEET_SOPS") or HERE / ".sops.yaml")
-    tool = os.environ.get("FLEET_AGE_KEYGEN", "age-keygen")
-    keys = {}
-    if out.is_file():
-        keys = dict(json.loads(out.read_text()).get("fleet_age_keys") or {})
-    created = []
-    for role in ROLES:
-        if role not in keys:
-            keys[role], _ = generate(tool)
-            created.append(role)
-    if len(set(keys.values())) != len(keys):
-        print("Two roles share a key. Fix the input by hand.", file=sys.stderr)
-        return 1
-    unknown = sorted(set(keys) - KNOWN)
-    if unknown:
-        # The vault root's validation refuses these too; stop before it does.
-        print("Keys for roles not in roles.json: " + ", ".join(unknown) + ". Remove them from " + str(out) + ".", file=sys.stderr)
-        return 1
-    if created:
-        write_private(out, {"fleet_age_keys": keys})
-    publics = {role: public_of(tool, keys[role]) for role in ROLES}
-    sops.write_text(sops_text(publics))
-    print(f"created: {', '.join(created) or 'none'}", file=sys.stderr)
-    print(f"private keys: {out} (git-ignored, apply with the vault OpenTofu root)", file=sys.stderr)
-    print(f"public recipients: {sops}", file=sys.stderr)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--operator", action="append", default=[], metavar="AGE_RECIPIENT",
+                        help="an operator age public key; repeat for several")
+    parser.add_argument("recipients", nargs="?", default="-", help="GET /v1/recipients JSON file, or - for stdin")
+    args = parser.parse_args(argv)
+    try:
+        if args.recipients == "-":
+            text = sys.stdin.read(INPUT_MAX + 1)
+        else:
+            with open(args.recipients, encoding="utf-8") as handle:
+                text = handle.read(INPUT_MAX + 1)
+        require(len(text) <= INPUT_MAX, "the recipients JSON is larger than 1 MiB")
+        try:
+            document = json.loads(text)
+        except ValueError:
+            raise Refused("the recipients input is not JSON") from None
+        sys.stdout.write(rules(document, args.operator, fleet_roles.load()))
+    except (Refused, OSError) as error:
+        print(f"fleet-keys: {error}", file=sys.stderr)
+        return 2
     return 0
 
 

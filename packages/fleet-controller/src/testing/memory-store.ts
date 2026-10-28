@@ -10,6 +10,7 @@ import type {
   HeartbeatBody,
   HeartbeatPoint,
   NodeRow,
+  Role,
   SettingsHistoryRow,
   SettingsRow,
 } from '../types';
@@ -51,6 +52,7 @@ export class MemoryStore implements Store {
         'info',
         `${row.hostname} registered as ${input.approval}`
       );
+      if (row.role !== null) this.recordRole(row, null, 'enrollment-token');
       return { node: row, created: true };
     }
     // A rejected node stays rejected; anything else takes the approval it earned.
@@ -59,9 +61,12 @@ export class MemoryStore implements Store {
     const approvedNow =
       approval === 'approved' && existing.row.approval !== 'approved';
     existing.secretHash = input.secretHash;
+    const previousRole = existing.row.role;
     existing.row = {
       ...existing.row,
-      role: input.role,
+      // Registration never clears an assigned role; a token only fills an empty one.
+      role:
+        previousRole ?? (approval === 'rejected' ? null : input.tokenRole),
       hostname: input.hostname,
       approval,
       enrolledVia: input.enrolledVia,
@@ -69,6 +74,8 @@ export class MemoryStore implements Store {
       approvedAt: approvedNow ? now : existing.row.approvedAt,
       retiredAt: null,
     };
+    if (previousRole === null && existing.row.role !== null)
+      this.recordRole(existing.row, null, 'enrollment-token');
     return { node: existing.row, created: false };
   }
 
@@ -105,14 +112,19 @@ export class MemoryStore implements Store {
   ): Promise<NodeRow | null> {
     const stored = this.nodes.get(id);
     if (stored === undefined) return null;
+    // Observed state only: a report never changes the assigned role.
     stored.row = {
       ...stored.row,
-      role: body.role,
+      observedRole: body.role,
+      observedClosure: body.closure,
+      ageRecipient: body.ageRecipient ?? null,
+      hardware: body.hardware ?? null,
+      reconcile: body.reconcile ?? null,
       hostname: body.hostname,
       facts: body as unknown as Record<string, unknown>,
       revision: body.revision,
       agentVersion: body.agent.version,
-      configRevision: body.agent.configRevision,
+      appliedRevision: body.agent.desiredRevision,
       remoteAddr,
       lastSeenAt: now,
     };
@@ -195,6 +207,20 @@ export class MemoryStore implements Store {
       'info',
       `${actor} marked ${stored.row.hostname} ${approval}`
     );
+    return stored.row;
+  }
+
+  async assignRole(
+    id: string,
+    role: Role | null,
+    actor: string
+  ): Promise<NodeRow | null> {
+    const stored = this.nodes.get(id);
+    if (stored === undefined) return null;
+    const previous = stored.row.role;
+    if (previous === role) return stored.row;
+    stored.row = { ...stored.row, role };
+    this.recordRole(stored.row, previous, actor);
     return stored.row;
   }
 
@@ -332,6 +358,12 @@ export class MemoryStore implements Store {
     this.nodes.set(row.id, { row, secretHash, points: [...points] });
   }
 
+  /** Test and demo seeding: change fields of a seeded row, keeping its history. */
+  updateSeeded(id: string, change: Partial<NodeRow>): void {
+    const stored = this.nodes.get(id);
+    if (stored !== undefined) stored.row = { ...stored.row, ...change };
+  }
+
   /** Test and demo seeding: store an event with an explicit time. */
   seedEvent(event: EventInput, at: Date): void {
     this.pushEvent(event, at);
@@ -355,6 +387,23 @@ export class MemoryStore implements Store {
     );
   }
 
+  private recordRole(row: NodeRow, previous: Role | null, actor: string) {
+    this.pushEvent(
+      {
+        nodeId: row.id,
+        nodeLabel: row.displayName ?? row.hostname,
+        kind: 'role_assigned',
+        severity: 'info',
+        message:
+          row.role === null
+            ? `${actor} unassigned the ${previous ?? 'previous'} role`
+            : `${actor} assigned the ${row.role} role`,
+        data: { role: row.role, previous, actor },
+      },
+      this.clock()
+    );
+  }
+
   private pushEvent(event: EventInput, at: Date): void {
     this.events.push({
       id: this.nextEventId,
@@ -373,7 +422,12 @@ export class MemoryStore implements Store {
 function blankRow(input: RegisterInput, now: Date): NodeRow {
   return {
     id: input.id,
-    role: input.role,
+    role: input.tokenRole,
+    observedRole: null,
+    observedClosure: null,
+    ageRecipient: null,
+    hardware: null,
+    reconcile: null,
     hostname: input.hostname,
     approval: input.approval,
     displayName: null,
@@ -382,7 +436,7 @@ function blankRow(input: RegisterInput, now: Date): NodeRow {
     facts: {},
     revision: null,
     agentVersion: null,
-    configRevision: null,
+    appliedRevision: null,
     heartbeatIntervalSeconds: 60,
     remoteAddr: input.remoteAddr,
     enrolledVia: input.enrolledVia,

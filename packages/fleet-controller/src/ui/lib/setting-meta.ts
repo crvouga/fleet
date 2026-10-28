@@ -40,6 +40,11 @@ export const SECTION_META: Readonly<
     title: 'CI runners',
     blurb: 'Which repositories a CI node serves and how it is labelled.',
   },
+  devbox: {
+    title: 'Devbox access',
+    blurb:
+      'Who may sign in to a developer machine. Applied only while a node runs the devbox role.',
+  },
   alerts: {
     title: 'Alerts',
     blurb: 'Handled by this controller only; nodes never receive these values.',
@@ -121,6 +126,11 @@ export const SETTING_META: Readonly<Record<string, SettingMeta>> = {
   'runners.extraLabels': {
     label: 'Extra runner labels',
     help: 'Labels added to every runner on the node so workflows can target it. One per line. Labels the image already sets cannot be repeated.',
+  },
+  'devbox.authorizedKeys': {
+    label: 'Authorized SSH keys',
+    unit: 'OpenSSH public key',
+    help: 'Public keys that may log in as the unprivileged dev user, one per line (for example ssh-ed25519 AAAA… you@laptop). No options prefix. Leave empty to inherit from the fleet or role; with no keys anywhere, nobody can log in as dev. Root access is never granted here.',
   },
   'alerts.offlineAfterSeconds': {
     label: 'Offline threshold',

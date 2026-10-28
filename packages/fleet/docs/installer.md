@@ -1,8 +1,8 @@
 # Fleet installer (the wizard)
 
 Download it, open it, choose what to install and confirm the disk. Accept the
-operating system's permission prompt and, for in-place installation, approve
-the GitHub page that opens. Preparation, downloads, verification and installation
+operating system's permission prompt. After the live installer starts, approve
+the computer under Pending in your Fleet app. Preparation, downloads, verification and installation
 then run automatically. No separate doctor command or manual setup checklist
 is required. Windows, macOS and ordinary Linux need no Python or Nix installation.
 On an existing fleet node, run `fleet-installer`; on other NixOS machines, use
@@ -61,12 +61,12 @@ This does not certify a particular physical Wi-Fi adapter or Windows firmware.
 
 ## What happens automatically
 
-| Platform                           | The installer handles                                                                                                            | What still needs a person                                                                          |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Windows x64                        | Hardware/storage checks, one free-space consolidation attempt if needed, verified image, boot setup, restart, NixOS installation | OS permission, GitHub approval, disk confirmation; Secure Boot off if enabled                      |
-| Linux x64                          | Checks, missing `kexec-tools` installation through apt/dnf/zypper/pacman, verified image, kexec, NixOS installation              | OS permission, GitHub approval, disk confirmation; unsupported filesystems or firmware require USB |
-| NixOS x64                          | Native dependencies are bundled; checks, verified image, kexec and installation                                                  | OS permission, GitHub approval and disk confirmation                                               |
-| macOS, Linux ARM64 and NixOS ARM64 | USB discovery, image download, unmounting, writing and read-back verification                                                    | Disk confirmation and OS permission; move the USB to a supported x64 target and boot it there      |
+| Platform                           | The installer handles                                                                                                            | What still needs a person                                                                             |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Windows x64                        | Hardware/storage checks, one free-space consolidation attempt if needed, verified image, boot setup, restart, NixOS installation | OS permission, Fleet app approval, disk confirmation; Secure Boot off if enabled                      |
+| Linux x64                          | Checks, missing `kexec-tools` installation through apt/dnf/zypper/pacman, verified image, kexec, NixOS installation              | OS permission, Fleet app approval, disk confirmation; unsupported filesystems or firmware require USB |
+| NixOS x64                          | Native dependencies are bundled; checks, verified image, kexec and installation                                                  | OS permission, Fleet app approval and disk confirmation                                               |
+| macOS, Linux ARM64 and NixOS ARM64 | USB discovery, image download, unmounting, writing and read-back verification                                                    | Disk confirmation and OS permission; move the USB to a supported x64 target and boot it there         |
 
 All platforms retry transient network failures up to three attempts. Reloading
 the page reconnects to the existing job. It does not start another write or
@@ -85,7 +85,7 @@ CI runner. Prefer enrolled in-place conversion on supported Windows/Linux PCs.
 
 ## 1. Download
 
-Open the [`fleet-installer` release](https://github.com/crvouga/fleet/releases/tag/fleet-installer) and take the file for the computer you are sitting at:
+Open **Add node → Open the installer release** in your Fleet app and take the file for the computer you are sitting at:
 
 | Computer                 | File                                 |
 | ------------------------ | ------------------------------------ |
@@ -99,15 +99,14 @@ Open the [`fleet-installer` release](https://github.com/crvouga/fleet/releases/t
 The computer you run it on does not have to be the computer that becomes the node. To set up a new or blank machine, run the wizard on any other computer and make an install USB.
 
 The wizard downloads the image as verified parts and assembles one ISO locally.
-The parts keep the offline image within GitHub's release asset size limit. Do
+Parts support resumable downloads of the offline image. Do
 not write a `.part-*` file to a USB disk; let the wizard finish the download and
 verification first.
 
 ## 2. Open it
 
 New packaged builds include a public CA bundle in addition to the operating
-system's trusted roots. Each packaged build must verify HTTPS to GitHub, its
-API and its release CDN before publication. A certificate failure stops the
+system's trusted roots. Each packaged build must verify HTTPS against the configured Fleet endpoint or an explicitly selected TLS test origin before publication. A certificate failure stops the
 download; verification is never disabled. If an older build reports
 `CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate`, download
 the latest installer. If it persists, check Windows Update, the computer's clock
@@ -145,30 +144,23 @@ A page opens in your browser. If it does not, copy the address the program print
 ### Windows download verification
 
 After keeping the download in Edge, leave it closed. In PowerShell, compare its
-size and SHA-256 with GitHub's metadata for the exact asset in this repository's
-release. This only reads the file; it does not run or unblock it. Change `$file`
-if your Downloads folder is elsewhere or Edge renamed the file.
+SHA-256 with the matching `.sha256` file served by your Fleet app. This reads the
+file and does not run or unblock it. Set `$origin` to the app you trust:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
+$origin = 'https://fleet.example.org'
 $file = Join-Path $env:USERPROFILE 'Downloads\fleet-installer-windows-x64.exe'
-$release = Invoke-RestMethod 'https://api.github.com/repos/crvouga/fleet/releases/tags/fleet-installer'
-$assets = @($release.assets | Where-Object { $_.name -eq 'fleet-installer-windows-x64.exe' })
-if ($assets.Count -ne 1 -or $assets[0].digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
-    throw 'The release has no unique Windows installer with a SHA-256 digest. Stop and report it.'
-}
-$asset = $assets[0]
+$checksum = Invoke-RestMethod "$origin/installers/assets/fleet-installer-windows-x64.exe.sha256"
+$expected = ($checksum.Trim() -split '\s+')[0]
+if ($expected -notmatch '^[0-9a-fA-F]{64}$') { throw 'No valid published checksum. Stop.' }
 $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-if ((Get-Item -LiteralPath $file).Length -ne $asset.size -or "sha256:$actual" -ne $asset.digest) {
-    throw 'The download does not match the current release. Do not run it; download it again from the release page.'
-}
-Write-Output 'The file matches the current GitHub release. This is an integrity check, not publisher verification.'
+if ($actual -ne $expected) { throw 'The file does not match the published installer. Do not run it.' }
+Write-Output 'The installer checksum matches. This is integrity checking, not publisher verification.'
 ```
 
-The rolling release may change between downloading and checking; a mismatch is
-always a reason to stop and fetch the current file. A matching hash proves only
-that your file matches this repository's release, not that it is safe or signed.
-The public GitHub API can also rate-limit requests; a failed check is not a pass.
+A matching hash proves only that your file matches the app's published bytes,
+not that it is safe or signed. A failed or missing checksum is not a pass.
 Do not use the ISO's `.sha256` file to verify the Windows EXE: they are different
 downloads.
 
@@ -190,7 +182,7 @@ signature is invalid, stop rather than using the reputation-warning instructions
 1. The wizard looks at the computer and says what it can do. If the installer has not been published yet, or there is no internet, it says so here and stops.
 2. Choose one:
    - **Make an install USB stick for another computer.** Works from Windows, macOS, and Linux. Plug in a USB stick (at least 8 GB; everything on it is erased), choose it, review, confirm.
-   - **Turn THIS computer into a node.** On x86-64 Windows (UEFI, GPT, Secure Boot off) and on x86-64 Linux with `kexec`. Choose the kind of node, review, confirm. A GitHub page opens: press **Submit new issue** as the repository owner (see Approval below). The computer then restarts into the installer, erases its disk (Windows included), installs, and restarts as the node. macOS cannot do this; the wizard tells you and offers the USB instead.
+   - **Turn THIS computer into a node.** On x86-64 Windows (UEFI, GPT, Secure Boot off) and on x86-64 Linux with `kexec`. Choose the kind of node, review, confirm. The live installer registers with Fleet; approve the computer under Pending in the app (see Approval below). The computer then restarts into the installer, erases its disk (Windows included), installs, and restarts as the node. macOS cannot do this; the wizard tells you and offers the USB instead.
      For a **Remote devbox**, choose your SSH public `.pub` file in the wizard. Keep the matching private key on the computer you will connect from. A missing or malformed public key blocks installation.
 3. **Review** names the exact disk and what will be erased, shows preparation the installer will perform, and surfaces only warnings and checks that need your attention. The full automatic checks are available under a disclosure. Nothing is changed until you tick the box and press **Erase and install**.
 4. The operating system asks for permission (Windows: the shield prompt, macOS: your password, Linux: the polkit dialog). Accept it. Declining changes nothing.
@@ -213,7 +205,8 @@ images install both `fleet-installer` and `fleet-node` on every role.
 For the browser wizard on this machine:
 
 ```sh
-sudo nix --extra-experimental-features 'nix-command flakes' run 'github:crvouga/fleet/main?dir=packages/fleet#fleet-installer' -- --no-browser
+nix build ./packages/fleet#fleet-installer
+sudo ./result/bin/fleet-installer --no-browser
 ```
 
 Open the loopback address printed in the terminal in a browser on that same
@@ -256,7 +249,17 @@ For a USB devbox install, choose **devbox** in the boot menu. The console asks y
 
 ## Approval
 
-A node needs its kind's key to decrypt the secrets that kind shares. You do not paste anything: after you press **Erase and install**, the wizard opens a GitHub issue already filled in with the kind and a one-time public key. Press **Submit new issue** while signed in as the repository owner. A workflow answers on the issue with a single-use token that only this computer can open, and the wizard continues. Nothing is erased while it waits (up to 15 minutes), and Cancel stops the wait. If the workflow reports a problem, such as Vault having no key for that kind yet, the wizard shows it and still has erased nothing. Someone who already has a token from `just enroll <kind>` can paste it instead. A node made from a USB stick has no approval: it makes its own key, which no other node shares.
+The live installer registers the hardware identity and a fresh private per-node
+credential directly with the controller configured in the image. Open **Pending**
+in Fleet, review the computer and approve it. It waits up to five minutes before
+disk changes; rejection and timeout stop without erasing. A retry reuses the same
+credential during that live boot, and the installed system receives that private
+credential. No GitHub issue, account, workflow or shared role token is required.
+
+Encrypted shared role secrets are separate from app approval. Supply their
+operator-owned role age key on a private `FLEET-KEY` volume, or use an explicitly
+provided wrapped-secret token. A role without shared encrypted secrets creates
+its own age key. `--no-enroll` does not bypass the app's approval gate.
 
 ## Windows
 

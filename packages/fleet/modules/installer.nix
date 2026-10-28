@@ -3,7 +3,6 @@
   readiness = pkgs.runCommand "fleet-bootstrap-tools" { } ''
     mkdir -p "$out"
     cp ${../scripts/bootstrap-readiness.py} "$out/bootstrap-readiness.py"
-    cp ${../scripts/runner_control.py} "$out/runner_control.py"
     cp ${../scripts/bootstrap_report.py} "$out/bootstrap_report.py"
     cp ${../scripts/agent.py} "$out/agent.py"
     cp ${../scripts/recovery.py} "$out/recovery.py"
@@ -15,8 +14,7 @@
     cp ${../scripts/live_console.py} "$out/live_console.py"
     cp ${../scripts/decide.py} "$out/decide.py"
   '';
-  bootstrapPackages = [ pkgs.sops pkgs.qrencode (pkgs.writeShellScriptBin "fleet-bootstrap-ready" ''
-    export PATH=${lib.makeBinPath [ pkgs.sops ]}:$PATH
+  bootstrapPackages = [ pkgs.qrencode (pkgs.writeShellScriptBin "fleet-bootstrap-ready" ''
     exec ${python}/bin/python3 ${readiness}/bootstrap-readiness.py "$@"
   '') (pkgs.writeShellScriptBin "fleet-bootstrap-report" ''
     exec ${python}/bin/python3 ${readiness}/bootstrap_report.py "$@"
@@ -47,9 +45,17 @@ in {
       chmod 0600 /run/fleet-wifi/wifi.json
       rm -f /fleet-wifi.json
     fi
+    if [ -f /fleet-enrollment.token ]; then
+      mkdir -p /run/fleet-enrollment
+      chmod 0700 /run/fleet-enrollment
+      cp /fleet-enrollment.token /run/fleet-enrollment/token
+      chmod 0600 /run/fleet-enrollment/token
+      rm -f /fleet-enrollment.token
+    fi
   '';
-  # Live image. The USB ISO carries the role closures. fleet-install on this
-  # console partitions the disk and installs. SSH is optional emergency access.
+  # Live image. The USB ISO carries the role-less base closure. fleet-install on
+  # this console partitions the disk and installs it; the Fleet controller
+  # assigns the role afterwards. SSH is optional emergency access.
   # No static hostname. The installed system names itself at boot.
   networking.hostName = lib.mkForce "";
   networking.useDHCP = lib.mkForce false;
@@ -57,19 +63,17 @@ in {
     assertion = config.networking.hostName == "";
     message = "The installer does not set a static hostname.";
   }];
-  # age stays on the system path. The console user is nixos, and sudo's
-  # secure_path drops the fleet-install wrapper's PATH. age-keygen has to
-  # survive that. select-disk and nixos-install are already there.
+  # The console user is nixos, and sudo's secure_path drops the fleet-install
+  # wrapper's PATH. select-disk and nixos-install are on the system path.
   environment.systemPackages = bootstrapPackages ++ livePackages ++ [
-    pkgs.age
     (pkgs.writeShellScriptBin "select-disk" ''
       export PATH=${lib.makeBinPath [ pkgs.python3 pkgs.util-linux ]}:$PATH
       exec ${pkgs.python3}/bin/python3 ${../scripts/cattle.py} select-disk
     '')
     (pkgs.writeShellScriptBin "fleet-install" ''
       export PATH=${lib.makeBinPath [
-        pkgs.coreutils pkgs.bash pkgs.age pkgs.openssh pkgs.python3
-        pkgs.util-linux pkgs.gawk pkgs.sudo pkgs.diffutils pkgs.curl
+        pkgs.coreutils pkgs.bash pkgs.openssh pkgs.python3
+        pkgs.util-linux pkgs.gawk pkgs.sudo pkgs.diffutils
       ]}:$PATH
       exec ${pkgs.bash}/bin/bash ${../scripts/fleet-install.sh} "$@"
     '')
@@ -120,9 +124,9 @@ in {
       StandardError = "journal";
       # fleet-auto.sh retries temporary preflight failures (exit 75) itself,
       # before disko, inside this one start job. A systemd restart failed the
-      # job between attempts and let getty log in over the installer. Wrapped
-      # token use is idempotent through the private enrolled credential
-      # snapshot. Never automatically repeat a partition/install failure.
+      # job between attempts and let getty log in over the installer. Retries
+      # reuse the same private node credential from this live boot. Never
+      # automatically repeat a partition/install failure.
       Restart = "no";
     };
     # A service path replaces the default and hides select-disk and
@@ -134,7 +138,6 @@ in {
         pkgs.gawk
         pkgs.util-linux
         pkgs.systemd
-        pkgs.age
         pkgs.diffutils
         pkgs.python3
       ]}"

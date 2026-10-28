@@ -18,6 +18,10 @@ DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9._/:-]+$")
 MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 # Active roles in roles.json; rewritten by scripts/fleet_roles.py sync.
 HOST_ROLES = frozenset({"ci", "devbox"})
+# The role-less closure every machine installs (base.nix, hosts/base.nix). It
+# is not a registry role, so it is not in HOST_ROLES; the controller assigns a
+# role later and the node converges to it.
+BASE_ROLE = "base"
 HOST_CAPABILITIES = {"gpu"}
 # Hostname tags, in this order. The runner label for highmem is high-mem.
 TAG_ORDER = ("gpu", "highmem")
@@ -253,8 +257,8 @@ def capability_tags(cap_dir, ram_mib, high_mem_gib):
 
 
 def hostname_for(role, tags, ident):
-    if role not in HOST_ROLES:
-        raise ValueError("role must be one of " + ", ".join(sorted(HOST_ROLES)))
+    if role not in HOST_ROLES and role != BASE_ROLE:
+        raise ValueError("role must be one of " + ", ".join(sorted(HOST_ROLES | {BASE_ROLE})))
     if not re.fullmatch(r"[0-9a-f]{4}", ident or ""):
         raise ValueError("id must be 4 hex digits")
     unknown = set(tags) - set(TAG_ORDER)
@@ -441,11 +445,13 @@ def apply_identity(root, conf, ident, ram_mib, arch, set_hostname, cores=None, m
     counted = None
     if role == "ci":
         counted = physical_cores(str(Path(root) / "sys/devices/system/cpu")) if cores is None else cores
-    apply_dynamic(Path(root) / "run/fleet", conf, dynamic, ram_mib, counted, arch, tags)
+    if role != BASE_ROLE:
+        apply_dynamic(Path(root) / "run/fleet", conf, dynamic, ram_mib, counted, arch, tags)
     if role == "ci":
         _write(Path(root) / "run/fleet/identity", f"ACTIONS_RUNNER_INPUT_NAME={hostname}\n", 0o644)
     else:
-        for name in ("identity", "slot-count"):
+        # base runs no runner and has no labels; another role has no slots.
+        for name in ("identity", "slot-count", *(("runner-labels",) if role == BASE_ROLE else ())):
             stale = Path(root) / "run/fleet" / name
             if stale.exists():
                 stale.unlink()
@@ -453,6 +459,8 @@ def apply_identity(root, conf, ident, ram_mib, arch, set_hostname, cores=None, m
 
 
 def host_allowed(stem):
+    if stem == BASE_ROLE:
+        return True
     parts = stem.split("-")
     return bool(parts) and parts[0] in HOST_ROLES and all(part in HOST_CAPABILITIES for part in parts[1:])
 
@@ -470,7 +478,7 @@ def check_tree(root):
             errors.append(f"{rel}: profiles/ is a machine model. Add a capability module or extend the generic profile.")
         if len(rel.parts) == 2 and rel.parts[0] == "hosts" and path.suffix == ".nix" and not host_allowed(path.stem):
             errors.append(
-                f"{rel}: per-machine host file. hosts/ only allows a role plus capability, for example ci.nix or ci-gpu.nix."
+                f"{rel}: per-machine host file. hosts/ only allows base.nix or a role plus capability, for example ci.nix or ci-gpu.nix."
             )
         if path.suffix != ".nix":
             continue

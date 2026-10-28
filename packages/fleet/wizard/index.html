@@ -7,7 +7,7 @@
     <script src="/theme.js"></script>
     <link rel="stylesheet" href="/admin.css" />
   </head>
-  <body>
+  <body data-repository="__FLEET_REPOSITORY__">
     <header class="admin-header">
       <div class="admin-brand">
         <span class="admin-mark">▤</span>
@@ -337,7 +337,9 @@
       // (.github/ISSUE_TEMPLATE/fleet-installer.yml), for when it cannot answer.
       function fallbackIssueUrl(report, step) {
         return (
-          'https://github.com/crvouga/fleet/issues/new?template=fleet-installer.yml&title=' +
+          'https://github.com/' +
+          document.body.dataset.repository +
+          '/issues/new?template=fleet-installer.yml&title=' +
           encodeURIComponent('Fleet installer: installer failure') +
           '&step=' +
           encodeURIComponent(step || 'Wizard: ' + currentStep()) +
@@ -437,7 +439,7 @@
             ? '<li>Windows restarts by itself about 15 seconds after the installer is ready. Save your work first.</li>'
             : '<li>This computer restarts straight into the installer.</li>') +
           '<li>A text screen titled <b>FLEET INSTALLER</b> appears. It lists seven steps and says what to do at each one; usually that is nothing. Keep the network cable plugged in, or stay near the same Wi-Fi. If the Wi-Fi does not connect, the screen says why; a cable, a phone&#39;s USB tethering, or a network chosen there with <code>fleet-wifi</code> (Alt+F2) also works. Its DISK line says whether anything has been erased.</li>' +
-          '<li>Steps 1 to 4 check the network, the approval, Fleet and GitHub. Nothing is erased yet. If something is wrong, the screen says what happened and what to do, shows a QR code that opens a pre-filled GitHub issue, and returns to ' +
+          '<li>Steps 1 to 4 check the network, role configuration and Fleet approval. Nothing is erased yet. If something is wrong, the screen says what happened and what to do, shows a QR code that opens a pre-filled GitHub issue, and returns to ' +
           original +
           ' after two minutes (press Enter to stay).</li>' +
           '<li>Step 5 erases this disk, ' +
@@ -470,6 +472,7 @@
             }
           }
           state.scan = await api('/api/scan');
+          if (state.scan.source_required) return chooseFleet();
         } catch (e) {
           return show(
             problem(e, () => start(resume), 'looking at this computer')
@@ -536,6 +539,23 @@
         chooseUsb();
       }
 
+      function chooseFleet() {
+        show(
+          '<h2>Connect to Fleet</h2><p>Enter the address of the Fleet app managing these machines.</p>' +
+            '<label for="fleet-origin">Fleet app address</label><input id="fleet-origin" type="url" placeholder="https://fleet.example.org">' +
+            '<button class="primary" onclick="connectFleet()">Continue</button>'
+        );
+      }
+      async function connectFleet() {
+        try {
+          await api('/api/source', {
+            origin: document.getElementById('fleet-origin').value,
+          });
+          await start();
+        } catch (error) {
+          show(problem(error, chooseFleet, 'connecting to Fleet'));
+        }
+      }
       function chooseRole() {
         const s = state.scan;
         let h = '<h2>What kind of node?</h2>';
@@ -564,8 +584,8 @@
           esc(state.sshKey) +
           '"></div>';
         h +=
-          '<p>Enrollment is automatic after the repository owner approves the GitHub page that opens during installation.</p>' +
-          '<details><summary>Already have an enrollment token?</summary><p>Paste it here to use it instead of GitHub approval.</p>' +
+          '<p>After restart, the live installer registers directly with Fleet. Approve the computer under Pending in your Fleet app before its disk is erased.</p>' +
+          '<details><summary>Already have an enrollment token?</summary><p>Advanced: optional wrapped role-secret token. Normal registration uses the Fleet app.</p>' +
           '<label for="token">Enrollment token (optional)</label><input type="password" id="token" autocomplete="off" spellcheck="false" placeholder="hvs.… (optional)" value="' +
           esc(state.token) +
           '"></details>';
@@ -610,6 +630,7 @@
       async function rescanUsb() {
         try {
           state.scan = await api('/api/scan');
+          if (state.scan.source_required) return chooseFleet();
         } catch (e) {
           return show(problem(e, rescanUsb, 'rescanning USB disks'));
         }
@@ -852,7 +873,7 @@
       const STEP_TITLES = {
         download: 'Downloading and verifying the installer',
         readiness: 'Checking the installer for this role',
-        enroll: 'Waiting for approval on GitHub',
+        enroll: 'Waiting for Fleet approval',
         permission: 'Waiting for administrator permission',
         prepare: 'Preparing Windows to start the installer',
         write: 'Writing the installer partition',
@@ -901,13 +922,13 @@
         if (box.dataset.key !== key) {
           box.dataset.key = key;
           box.innerHTML = approval
-            ? '<div class="callout"><p><b>Action needed: approve this computer on GitHub.</b> ' +
+            ? '<div class="callout"><p><b>Action needed: approve this computer in Fleet.</b> ' +
               (approval.received
-                ? 'GitHub received the request; waiting for the approval workflow to answer.'
-                : 'The repository owner opens this link, signed in to GitHub, and presses <b>Submit new issue</b>. Nothing is erased while this waits.') +
+                ? 'Fleet received the request; waiting for an administrator to approve it.'
+                : 'Open Pending in Fleet and approve this computer. Nothing is erased while this waits.') +
               '</p><p><a href="' +
               esc(approval.url) +
-              '" target="_blank" rel="noreferrer">Open the approval page on GitHub</a> ' +
+              '" target="_blank" rel="noreferrer">Open Fleet approvals</a> ' +
               '<button onclick="navigator.clipboard?.writeText(' +
               esc(JSON.stringify(approval.url)) +
               ')">Copy link</button></p><p><small id="job-deadline"></small></p></div>'
@@ -982,10 +1003,7 @@
             h +=
               '<div class="callout"><p><b>Windows restarts in about 15 seconds.</b> Save your work now. If Windows says apps are preventing the restart, choose <b>Restart anyway</b>.</p>' +
               '<p><small>Nothing is erased yet. If the computer comes back to Windows instead of the installer, open this wizard again: it takes back the preparation and you can try again or make an install USB.</small></p></div>';
-          if (restarting)
-            h +=
-              nextSteps() +
-              '<p>your Fleet dashboard</p>';
+          if (restarting) h += nextSteps() + '<p>your Fleet dashboard</p>';
           if (state.mode === 'usb')
             h +=
               '<h2>Next</h2><ol><li>Plug the stick into the new computer and start it from the stick (usually F12, F11, Esc or Option at power-on).</li>' +

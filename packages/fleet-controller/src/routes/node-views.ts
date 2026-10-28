@@ -1,8 +1,5 @@
-import {
-  effectiveConfig,
-  offlineAfterSeconds,
-} from '../domain/effective-config';
-import { viewOf } from '../domain/status';
+import { effectiveConfig } from '../domain/effective-config';
+import { viewOf } from '../domain/node-view';
 import type { AppDeps } from '../deps';
 import type { NodeRow, NodeView } from '../types';
 
@@ -14,7 +11,7 @@ export async function loadViews(deps: AppDeps): Promise<NodeView[]> {
   ]);
   const now = deps.now();
   return nodes.map((node) =>
-    viewOf(node, now, offlineAfterSeconds(effectiveConfig(settings, node)))
+    viewOf(node, now, effectiveConfig(settings, node))
   );
 }
 
@@ -23,9 +20,5 @@ export async function loadView(
   node: NodeRow
 ): Promise<NodeView> {
   const settings = await deps.store.listSettings();
-  return viewOf(
-    node,
-    deps.now(),
-    offlineAfterSeconds(effectiveConfig(settings, node))
-  );
+  return viewOf(node, deps.now(), effectiveConfig(settings, node));
 }

@@ -9,20 +9,27 @@ must show a role change in their own reviewed diff. `sync` rewrites every copy
 and `check` fails when one differs, so a role change is one edit to roles.json
 followed by `sync`.
 
+Roles are assigned by the fleet controller after installation, never by the
+installer. Every machine installs the role-less `base` closure, which the flake
+defines itself (hosts/base.nix, base.nix); it is not a registry entry and no
+role may be named after it. See ARCHITECTURE.md.
+
 Views:
-  known      every role in the registry, active or retired. OpenTofu keeps a
-             role token and age key and SQLite keeps node rows until a
-             reviewed change deletes the role from the registry.
-  active     roles a machine may be installed, enrolled and updated as.
-  installer  closure attributes on the shared installer image.
-  published  closure attributes the Fleet cache workflow builds and signs.
+  known      every role in the registry, active or retired. SQLite keeps node
+             rows until a reviewed change deletes the role from the registry.
+  active     roles the controller may assign and nodes may converge to.
+  closures   closure attributes of active roles, in registry order. The
+             controller picks <role>-<capability> from these by hardware.
+  published  closure attributes the Fleet cache workflow builds and signs
+             (base is always published in addition).
 
   python3 scripts/fleet_roles.py check
   python3 scripts/fleet_roles.py sync
   python3 scripts/fleet_roles.py validate PACKAGE_DIRECTORY
-  python3 scripts/fleet_roles.py list known|active|installer|published
+  python3 scripts/fleet_roles.py list known|active|closures|published
   python3 scripts/fleet_roles.py require-active ROLE
   python3 fleet_roles.py placement REGISTRY ROLE CLOSURE   (fleet-sync, on a node)
+  python3 fleet_roles.py secrets REGISTRY ROLE             (fleet-sync, on a node)
 """
 import json
 import re
@@ -34,7 +41,15 @@ PACKAGE = Path(__file__).resolve().parent.parent
 REPOSITORY = PACKAGE.parent.parent
 REGISTRY_PATH = PACKAGE / "roles.json"
 
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
+# Version 1 also named the installer's default role and which closures the
+# installer carried. Deployed nodes parse the roles.json of the revision they
+# fetch with the parser of the revision they run, so roles.json stays version 1
+# until every node runs this parser; the legacy keys are then accepted and
+# ignored. Phase 2 of ARCHITECTURE.md's rollout moves the file to version 2.
+LEGACY_VERSION = 1
+LEGACY_CLOSURE_KEYS = frozenset(("attr", "host", "installer", "published"))
+LEGACY_TOP_KEYS = frozenset(("version", "installerDefault", "roles"))
 REGISTRY_BYTES_MAX = 64 * 1024
 ROLES_MAX = 16
 CLOSURES_PER_ROLE_MAX = 8
@@ -42,14 +57,18 @@ TEXT_LENGTH_MAX = 240
 STATES = ("active", "retired")
 ACTIVE_KEYS = frozenset(("name", "state", "title", "summary", "settings", "secrets", "closures"))
 RETIRED_KEYS = frozenset(("name", "state", "title", "summary"))
-CLOSURE_KEYS = frozenset(("attr", "host", "installer", "published"))
-TOP_KEYS = frozenset(("version", "installerDefault", "roles"))
+CLOSURE_KEYS = frozenset(("attr", "host", "published"))
+TOP_KEYS = frozenset(("version", "roles"))
 ROLE_NAME = re.compile(r"[a-z][a-z0-9]{0,15}")
 CLOSURE_ATTR = re.compile(r"[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4}")
 SETTINGS_PATH = re.compile(r"[a-z][a-z0-9-]{0,31}\.nix")
 SECRETS_PATH = re.compile(r"secrets/[a-z][a-z0-9-]{0,31}\.yaml")
 # Flake outputs that are not role closures. A role must not shadow them.
-RESERVED_ATTRS = frozenset(("installer", "node", "default", "disko", "bootstrap", "fleet-installer", "fleet-node", "nixos-anywhere"))
+RESERVED_ATTRS = frozenset(("base", "installer", "node", "default", "disko", "bootstrap", "fleet-installer", "fleet-node", "nixos-anywhere"))
+
+# The role-less closure every machine installs. fleet-sync and node.conf use
+# this name where a role would be.
+BASE = "base"
 
 
 class RegistryError(ValueError):
@@ -65,7 +84,6 @@ def require(condition, message):
 class Closure:
     attr: str
     host: str
-    is_on_installer: bool
     is_published: bool
 
 
@@ -86,7 +104,6 @@ class Role:
 
 @dataclass(frozen=True)
 class Registry:
-    installer_default: str
     roles: "tuple[Role, ...]"
 
     def view(self, name):
@@ -94,11 +111,11 @@ class Registry:
             return tuple(role.name for role in self.roles)
         if name == "active":
             return tuple(role.name for role in self.roles if role.is_active)
-        if name == "installer":
-            return tuple(closure.attr for role in self.roles for closure in role.closures if closure.is_on_installer)
+        if name == "closures":
+            return tuple(closure.attr for role in self.roles if role.is_active for closure in role.closures)
         if name == "published":
             return tuple(closure.attr for role in self.roles for closure in role.closures if closure.is_published)
-        raise RegistryError("unknown view " + repr(name) + "; use known, active, installer or published")
+        raise RegistryError("unknown view " + repr(name) + "; use known, active, closures or published")
 
     def role(self, name):
         found = [role for role in self.roles if role.name == name]
@@ -112,9 +129,9 @@ def parse_text(value, what):
     return value
 
 
-def parse_closure(role_name, value):
-    require(isinstance(value, dict) and set(value) == CLOSURE_KEYS,
-            "role " + role_name + ": each closure has exactly " + ", ".join(sorted(CLOSURE_KEYS)))
+def parse_closure(role_name, value, keys=CLOSURE_KEYS):
+    require(isinstance(value, dict) and set(value) == keys,
+            "role " + role_name + ": each closure has exactly " + ", ".join(sorted(keys)))
     attr = value["attr"]
     require(isinstance(attr, str) and CLOSURE_ATTR.fullmatch(attr) is not None,
             "role " + role_name + ": closure attr " + repr(attr) + " is not a lowercase name")
@@ -125,20 +142,17 @@ def parse_closure(role_name, value):
     require(attr not in RESERVED_ATTRS, "closure " + attr + " shadows a flake output")
     require(value["host"] == "hosts/" + attr + ".nix",
             "role " + role_name + ": closure " + attr + " must use host hosts/" + attr + ".nix")
-    require(isinstance(value["installer"], bool) and isinstance(value["published"], bool),
-            "role " + role_name + ": closure " + attr + " installer and published are true or false")
-    # fleet.role= on the installer command line names a closure, and the
-    # installer writes that name as the node's role.
-    require(not value["installer"] or attr == role_name,
-            "role " + role_name + ": only the closure " + role_name + " itself can be on the installer")
-    return Closure(attr, value["host"], value["installer"], value["published"])
+    require(isinstance(value["published"], bool),
+            "role " + role_name + ": closure " + attr + " published is true or false")
+    return Closure(attr, value["host"], value["published"])
 
 
-def parse_role(value):
+def parse_role(value, closure_keys=CLOSURE_KEYS):
     require(isinstance(value, dict), "every role is an object")
     name = value.get("name")
     require(isinstance(name, str) and ROLE_NAME.fullmatch(name) is not None,
             "role name " + repr(name) + " is not a lowercase name of at most 16 characters")
+    require(name != BASE, "role name " + BASE + " is the role-less closure every machine installs")
     state = value.get("state")
     require(state in STATES, "role " + name + ": state must be active or retired")
     keys = ACTIVE_KEYS if state == "active" else RETIRED_KEYS
@@ -156,24 +170,27 @@ def parse_role(value):
     closures_value = value["closures"]
     require(isinstance(closures_value, list) and 0 < len(closures_value) <= CLOSURES_PER_ROLE_MAX,
             "role " + name + ": closures holds 1 to " + str(CLOSURES_PER_ROLE_MAX) + " entries")
-    closures = tuple(parse_closure(name, closure) for closure in closures_value)
+    closures = tuple(parse_closure(name, closure, closure_keys) for closure in closures_value)
     primary = closures[0]
-    # The primary closure is what a new machine of this role installs and
-    # what it updates to. Without both, an active role cannot be operated.
+    # The primary closure is what the controller assigns when no capability
+    # variant matches the hardware. Nodes converge from the published cache.
     require(primary.attr == name, "role " + name + ": the first closure is " + name + " itself")
-    require(primary.is_on_installer and primary.is_published,
-            "role " + name + ": its first closure must be on the installer and published")
+    require(primary.is_published, "role " + name + ": its first closure must be published")
     return Role(name, state, title, summary, settings, secrets, closures)
 
 
 def parse(document):
-    require(isinstance(document, dict) and set(document) == TOP_KEYS,
-            "top level has exactly " + ", ".join(sorted(TOP_KEYS)))
-    require(document["version"] == REGISTRY_VERSION, "version must be " + str(REGISTRY_VERSION))
+    version = document.get("version") if isinstance(document, dict) else None
+    require(version in (LEGACY_VERSION, REGISTRY_VERSION),
+            "version must be " + str(REGISTRY_VERSION) + " (or " + str(LEGACY_VERSION) + " during the rollout)")
+    legacy = version == LEGACY_VERSION
+    top_keys = LEGACY_TOP_KEYS if legacy else TOP_KEYS
+    require(set(document) == top_keys, "top level has exactly " + ", ".join(sorted(top_keys)))
     roles_value = document["roles"]
     require(isinstance(roles_value, list) and 0 < len(roles_value) <= ROLES_MAX,
             "roles holds 1 to " + str(ROLES_MAX) + " entries")
-    roles = tuple(parse_role(role) for role in roles_value)
+    closure_keys = LEGACY_CLOSURE_KEYS if legacy else CLOSURE_KEYS
+    roles = tuple(parse_role(role, closure_keys) for role in roles_value)
     names = [role.name for role in roles]
     require(len(set(names)) == len(names), "role names repeat: " + ", ".join(names))
     attrs = [closure.attr for role in roles for closure in role.closures]
@@ -184,9 +201,7 @@ def parse(document):
     require(len(set(settings)) == len(settings), "two active roles share a settings file")
     active = [role for role in roles if role.is_active]
     require(len(active) > 0, "at least one role is active")
-    default = document["installerDefault"]
-    require(any(role.name == default for role in active), "installerDefault " + repr(default) + " is an active role")
-    return Registry(default, roles)
+    return Registry(roles)
 
 
 def load(path=REGISTRY_PATH):
@@ -203,26 +218,40 @@ PLACEMENT_EXIT_GONE = 3
 
 
 def placement(registry, role_name, attr):
-    """Why a node of this role and closure can no longer follow the repository,
-    or None when it can. The answer names what to do, for the dashboard."""
+    """Why a node cannot converge to this role and closure at the fetched
+    revision, or None when it can. The answer names what to do, for the
+    dashboard. The base closure always exists."""
+    if role_name == BASE or attr == BASE:
+        if role_name == BASE and attr == BASE:
+            return None
+        return "FLEET_TARGET_INVALID: base is only ever the closure of the base role."
     roles = [role for role in registry.roles if role.name == role_name]
     active = ", ".join(registry.view("active"))
     if not roles:
         return ("FLEET_ROLE_REMOVED: roles.json no longer defines role " + role_name
-                + ". Reinstall this machine with fleet-node as one of: " + active + ".")
+                + ". Assign this node one of: " + active + ", or no role, in the fleet controller.")
     role = roles[0]
     if not role.is_active:
         return ("FLEET_ROLE_RETIRED: roles.json retired role " + role_name + " (" + role.summary
-                + ") Reinstall this machine with fleet-node as one of: " + active + ".")
+                + ") Assign this node one of: " + active + ", or no role, in the fleet controller.")
     if attr not in [closure.attr for closure in role.closures]:
         return ("FLEET_CLOSURE_REMOVED: roles.json no longer builds " + attr + " for role " + role_name
-                + ". Reinstall this machine with fleet-node " + role_name + ".")
+                + ". The controller assigns another closure of " + role_name + " at the next report.")
     return None
+
+
+def secrets_file(registry, role_name):
+    """The role's SOPS file relative to the package, or None (base, unknown or retired roles)."""
+    roles = [role for role in registry.roles if role.name == role_name and role.is_active]
+    return roles[0].secrets if roles else None
 
 
 def file_problems(registry, package=PACKAGE):
     """Each active role's files exist and no retired role leaves its files behind."""
     problems = []
+    for path in (BASE + ".nix", "hosts/" + BASE + ".nix"):
+        if not (package / path).is_file():
+            problems.append("the base closure needs " + path)
     for role in registry.roles:
         if role.is_active:
             for path in [role.settings] + [closure.host for closure in role.closures]:
@@ -272,21 +301,12 @@ COPIES = (
          line(r"^(?P<head>ROLES = \()(?P<list>[^)]*)(?P<tail>\).*)$")),
     Copy("packages/fleet/scripts/cattle.py", "active", "python-set",
          line(r"^(?P<head>HOST_ROLES = frozenset\(\{)(?P<list>[^}]*)(?P<tail>\}\).*)$")),
-    Copy("packages/fleet/scripts/decide.py", "active", "python-tuple",
-         line(r"^(?P<head>ROLES = \()(?P<list>[^)]*)(?P<tail>\).*)$")),
-    Copy("packages/fleet/scripts/fleet-install.sh", "active", "words",
-         line(r"^(?P<head>installer_roles=\()(?P<list>[^)]*)(?P<tail>\).*)$")),
-    Copy("packages/fleet/scripts/bootstrap.sh", "active", "words",
-         line(r"^(?P<head>installer_roles=\()(?P<list>[^)]*)(?P<tail>\).*)$")),
-    Copy("packages/fleet/e2e/setup.sh", "active", "words",
-         line(r"^(?P<head>installer_roles=\()(?P<list>[^)]*)(?P<tail>\).*)$")),
     Copy("packages/fleet-controller/src/types.ts", "known", "single-quoted",
          line(r"^(?P<head>export const ROLES = \[)(?P<list>[^\]]*)(?P<tail>\] as const;.*)$")),
     Copy("packages/fleet-controller/src/types.ts", "active", "single-quoted",
          line(r"^(?P<head>export const ACTIVE_ROLES = \[)(?P<list>[^\]]*)(?P<tail>\] as const.*)$")),
-    Copy("packages/fleet-controller/src/db/schema.sql", "known", "single-quoted",
-         line(r"^(?P<head>  CONSTRAINT nodes_role_known CHECK \(role IN \()(?P<list>[^)]*)(?P<tail>\)\).*)$")),
-
+    Copy("packages/fleet-controller/src/types.ts", "closures", "single-quoted",
+         line(r"^(?P<head>export const CLOSURES = \[)(?P<list>[^\]]*)(?P<tail>\] as const;.*)$")),
 )
 
 
@@ -363,6 +383,12 @@ def main(argv):
         if command == "list" and len(argv) == 2:
             print("\n".join(registry.view(argv[1])))
             return 0
+        if command == "secrets" and len(argv) == 3:
+            # On a node: the SOPS file the target role decrypts, if any.
+            path = secrets_file(load(argv[1]), argv[2])
+            if path:
+                print(path)
+            return 0
         if command == "require-active" and len(argv) == 2:
             if argv[1] in registry.view("active"):
                 return 0
@@ -371,7 +397,8 @@ def main(argv):
     except RegistryError as error:
         print(error, file=sys.stderr)
         return 1
-    print("usage: fleet_roles.py check | sync | validate PACKAGE | list VIEW | require-active ROLE", file=sys.stderr)
+    print("usage: fleet_roles.py check | sync | validate PACKAGE | list VIEW | require-active ROLE"
+          " | placement REGISTRY ROLE CLOSURE | secrets REGISTRY ROLE", file=sys.stderr)
     return 2
 
 

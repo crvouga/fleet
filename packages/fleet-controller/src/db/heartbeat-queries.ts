@@ -44,14 +44,19 @@ async function updateReport(
   remoteAddr: string | null,
   seen: { at: Date; interval: number }
 ): Promise<Row> {
+  // Observed state only: a report never changes the assigned role.
   const rows = await db`
     update nodes set
-      role = ${body.role},
       hostname = ${body.hostname},
       facts = ${factsOf(body)},
       revision = ${body.revision},
       agent_version = ${body.agent.version},
-      config_revision = ${body.agent.configRevision},
+      applied_revision = ${body.agent.desiredRevision},
+      observed_role = ${body.role},
+      observed_closure = ${body.closure},
+      age_recipient = ${body.ageRecipient ?? null},
+      hardware = ${body.hardware ? JSON.stringify(body.hardware) : null},
+      reconcile = ${body.reconcile ? JSON.stringify(body.reconcile) : null},
       heartbeat_interval_seconds = ${seen.interval},
       remote_addr = coalesce(${remoteAddr}, remote_addr),
       last_seen_at = ${seen.at.toISOString()},
@@ -95,11 +100,8 @@ export async function storeHeartbeat(
   if (locked === null) return null;
   const prev = toNodeRow(locked);
   if (prev.approval === 'rejected' || prev.approval === 'retired') return prev;
-  const documents = await selectScopes(
-    db,
-    scopesFor({ id: prev.id, role: body.role })
-  );
-  const config = effectiveConfig(documents, { id: prev.id, role: body.role });
+  const documents = await selectScopes(db, scopesFor(prev));
+  const config = effectiveConfig(documents, prev);
   const interval = Math.min(
     MAX_INTERVAL,
     Math.max(

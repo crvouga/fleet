@@ -12,7 +12,7 @@
   "scripts": {
     "build": "bun run build:css && bun run build:console && test -f src/db/schema.sql",
     "build:css": "tailwindcss -i src/ui/app.css -o dist/app.css --minify",
-    "dev": "bun run build && bun src/dev.ts",
+    "dev": "bun src/dev.ts",
     "lint": "eslint src test playwright.config.ts --max-warnings 0",
     "tc": "tsc --noEmit -p tsconfig.json",
     "test": "bun test ./test && bun run test:bdd",
@@ -26,7 +26,8 @@
     "start": "bun src/start.ts",
     "access:allow": "bun src/db/allow-email.ts",
     "check:config": "bun src/start.ts --check",
-    "dev:controller": "bun run dev"
+    "dev:controller": "bun run dev",
+    "dev:managed": "FLEET_DEV_MODE=managed bun run dev"
   },
   "dependencies": {
     "@mantine/charts": "9.7.3",
@@ -45,13 +46,15 @@
     "yaml": "catalog:"
   },
   "devDependencies": {
+    "@crvouga/mockingbird-service-oauth": "3.11.0",
+    "@crvouga/mockingbird-service-s3": "3.10.0",
     "@playwright/test": "1.63.0",
     "@tailwindcss/cli": "catalog:",
     "@types/bun": "catalog:",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "playwright-bdd": "9.2.1",
     "tailwindcss": "catalog:",
-    "typescript": "catalog:",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0"
+    "typescript": "catalog:"
   }
 }

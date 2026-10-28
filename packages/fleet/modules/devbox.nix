@@ -1,6 +1,7 @@
 { config, lib, pkgs, settings, ... }: let
-  # sshd reads bootstrap public keys as root; the development user cannot
-  # modify fleet state, role keys, or the system's Git-managed configuration.
+  # sshd reads the dev login's keys as root from the file fleet-agent writes
+  # from the devbox.authorizedKeys setting (scripts/agent.py). The development
+  # user cannot modify fleet state, age keys, or the Git-managed configuration.
   keys = pkgs.writeShellScript "devbox-authorized-keys" ''
     set -eu
     [ "$1" = dev ] || exit 0
@@ -46,6 +47,7 @@ in {
     Remote fleet devbox. Connect as dev; /nix/devbox survives reboots.
     Use nix develop and nix profile for project tools. System configuration
     continues to come from Git; the dev user has no administrator privileges.
-    Reinstalling into any role erases the workspace. Back it up first.
+    Fleet can assign this machine another role; it then reboots into a system
+    without this login. Back the workspace up; do not rely on it surviving.
   '';
 }

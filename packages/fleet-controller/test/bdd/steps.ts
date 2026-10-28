@@ -3,8 +3,7 @@ import { Given, When, Then } from './fixtures';
 import { emulateComputer } from './browser-profile';
 import { PROFILES } from './profiles';
 
-const DOWNLOAD =
-  'https://github.com/crvouga/fleet/releases/download/fleet-installer/';
+const DOWNLOAD = '/installers/download/';
 
 Then(
   'the recommendation matches the computer running this browser',
@@ -143,9 +142,13 @@ Then(
       'href',
       '#nixos-install'
     );
-    await expect(page.locator('#nixos-install code')).toContainText(
+    const command = page.getByRole('link', {
+      name: 'Show the native installer command',
+    });
+    await expect(command).toBeVisible();
+    await command.click();
+    await expect(page.locator('body')).toContainText(
       'packages/fleet#fleet-installer'
     );
-    await expect(page.locator('#nixos-install code')).toBeVisible();
   }
 );
