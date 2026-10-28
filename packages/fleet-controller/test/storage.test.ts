@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { parse } from 'yaml';
 import { readControllerEnv } from '../src/env';
 import { litestreamConfig } from '../src/start';
+import { S3_ALIASES, litestreamCredentials } from '../src/storage';
 
 const valid = {
   FLEET_ADMIN_TOKEN: 'a'.repeat(32),
@@ -83,5 +84,49 @@ describe('single-node configuration', () => {
         },
       ],
     });
+  });
+  test('generic S3_* names configure storage when Fleet names are unset', () => {
+    const storage = readControllerEnv({
+      FLEET_ADMIN_TOKEN: 'a'.repeat(32),
+      S3_BUCKET: 'shared-bucket',
+      S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
+      S3_REGION: 'auto',
+      S3_ACCESS_KEY_ID: 'alias-key',
+      S3_SECRET_ACCESS_KEY: 'alias-secret',
+    }).storage;
+    expect(storage).toMatchObject({
+      bucket: 'shared-bucket',
+      endpoint: 'https://account.r2.cloudflarestorage.com',
+      region: 'auto',
+    });
+    expect(JSON.stringify(storage)).not.toContain('alias-secret');
+    expect(
+      litestreamCredentials({
+        S3_ACCESS_KEY_ID: 'alias-key',
+        S3_SECRET_ACCESS_KEY: 'alias-secret',
+      })
+    ).toEqual({
+      AWS_ACCESS_KEY_ID: 'alias-key',
+      AWS_SECRET_ACCESS_KEY: 'alias-secret',
+    });
+  });
+  test('Fleet names win over equal aliases and conflicting aliases refuse startup', () => {
+    expect(
+      readControllerEnv({ ...valid, S3_BUCKET: 'my-bucket' }).storage.bucket
+    ).toBe('my-bucket');
+    for (const [key, alias] of Object.entries(S3_ALIASES)) {
+      expect(() =>
+        readControllerEnv({
+          ...valid,
+          [key]: 'https://one.example.org',
+          [alias]: 'https://two.example.org',
+        })
+      ).toThrow(`${key} and ${alias} are both set to different values`);
+    }
+  });
+  test('alias values are validated like Fleet names', () => {
+    expect(() =>
+      readControllerEnv({ ...valid, FLEET_S3_BUCKET: '', S3_BUCKET: 'UPPER' })
+    ).toThrow('FLEET_S3_BUCKET must be a bucket name');
   });
 });

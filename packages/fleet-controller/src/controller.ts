@@ -9,6 +9,7 @@ import { createDefaultAuth, resolveAuth } from './auth/composition';
 import type { AuthFactory, AuthServices, AuthContext } from './auth/contracts';
 import type { Store } from './store';
 import type { AppDeps } from './deps';
+import type { AccessStore } from './auth/browser-contract';
 import {
   ConfigurationError,
   readControllerEnv,
@@ -17,6 +18,7 @@ import {
 import { startJobs } from './jobs/scheduler';
 import { mountUi } from './routes/ui';
 import { localResponse } from './local-response';
+import { WRITE_GATE_ENV, fileWriteGate } from './ownership/write-gate';
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
@@ -26,6 +28,15 @@ export interface ControllerOptions {
   /** Trusted server-side adapter; never selected by request or tenant data. */
   readonly authFactory?: AuthFactory;
   readonly fetch?: AuthContext['fetch'];
+  /** Write gate; by default the supervisor's gate file when one is supplied. */
+  readonly writable?: () => boolean;
+}
+
+/** The explicit gate, else the supervisor's gate file when one is supplied. */
+function writeGate(options: ControllerOptions): { writable?: () => boolean } {
+  if (options.writable) return { writable: options.writable };
+  const path = process.env[WRITE_GATE_ENV];
+  return path ? { writable: fileWriteGate(path) } : {};
 }
 
 export interface RunningController {
@@ -37,7 +48,7 @@ export interface RunningController {
 export function buildDeps(
   env: ControllerEnv,
   store: Store,
-  auth: AuthServices,
+  auth: AuthServices & { readonly access?: AccessStore },
   now: () => Date
 ): AppDeps {
   return {
@@ -59,15 +70,16 @@ export async function startController(
   try {
     const store = new SqliteStore(db);
     const now = () => new Date();
+    const access = new SqliteAccessStore(db);
     const auth = resolveAuth(options.authFactory ?? createDefaultAuth, {
       adminToken: env.adminToken,
-      access: new SqliteAccessStore(db),
+      access,
       ...(env.oidc ? { oidc: env.oidc } : {}),
       fetch: options.fetch ?? fetch,
       now,
     });
-    const deps = buildDeps(env, store, auth, now);
-    const app = createController(deps, { log });
+    const deps = buildDeps(env, store, { ...auth, access }, now);
+    const app = createController(deps, { log, ...writeGate(options) });
     mountUi(app, deps);
     await store.health();
     const listener = Bun.serve({
