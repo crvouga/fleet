@@ -127,6 +127,28 @@ class IdentityTests(unittest.TestCase):
             self.assertFalse((root / "run/fleet/identity").exists())
             self.assertIn("hostname=devbox-gpu-ab12\n", (root / "run/fleet/node").read_text())
 
+    def test_the_base_closure_has_a_hostname_and_no_runner_files(self):
+        self.assertEqual(cattle.hostname_for("base", ["highmem"], "7c21"), "base-highmem-7c21")
+        self.assertEqual(cattle.hostname_for("base", [], "7c21"), "base-7c21")
+        self.assertNotIn("base", cattle.HOST_ROLES, "base is not a registry role")
+        with self.assertRaises(ValueError):
+            cattle.hostname_for("web", [], "7c21")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "etc/fleet/capabilities.d").mkdir(parents=True)
+            conf = {"role": "ci", "high_mem_gib": "60", "reserve_gib": "0", "per_runner_gib": "1",
+                    "per_runner_cores": "2", "slot_max": "4"}
+            cattle.apply_identity(root, conf, "ab12", 4096, "x86_64", lambda name: None, cores=4,
+                                  dynamic={"runners": {"repositories": ["o/a"]}})
+            self.assertTrue((root / "run/fleet/runner-labels").exists())
+            conf["role"] = "base"
+            names = []
+            hostname = cattle.apply_identity(root, conf, "ab12", 4096, "x86_64", names.append, cores=4, dynamic={})
+            self.assertEqual((hostname, names), ("base-ab12", ["base-ab12"]))
+            self.assertIn("role=base\n", (root / "run/fleet/node").read_text())
+            for name in ("identity", "slot-count", "runner-labels"):
+                self.assertFalse((root / "run/fleet" / name).exists(), name)
+
 
 class MachineIdTests(unittest.TestCase):
     def test_the_hostname_id_is_the_front_of_the_full_digest(self):
@@ -261,8 +283,14 @@ class CheckerTests(unittest.TestCase):
                 'mac = "aa:bb:cc:dd:ee:ff";\n'
             )
             (root / "ok.nix").write_text('{ device = "/dev/fleet-install-disk"; networking.hostName = ""; }\n')
+            (root / "hosts/base.nix").write_text("{ }\n")
+            (root / "hosts/ci-gpu.nix").write_text("{ }\n")
+            (root / "hosts/base-gpu.nix").write_text("{ }\n")
             errors = "\n".join(cattle.check_tree(root))
             self.assertIn("per-machine host file", errors)
+            self.assertNotIn("hosts/base.nix", errors)
+            self.assertNotIn("hosts/ci-gpu.nix", errors)
+            self.assertIn("hosts/base-gpu.nix", errors)
             self.assertIn("profiles/", errors)
             self.assertIn("hardware-configuration.nix", errors)
             self.assertIn("hardcoded NVMe kernel path", errors)

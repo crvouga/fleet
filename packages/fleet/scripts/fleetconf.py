@@ -45,6 +45,7 @@ SPEC = {
     "heartbeat.intervalSeconds": _int(15, 3600),
     "sync.paused": ("bool",),
     "sync.retryBootAfter": _int(0, 4102444800),
+    "secrets.rotateAgeKeyAfter": _int(0, 4102444800),
     "reboot.enabled": ("bool",),
     "reboot.delayMaxSeconds": _int(0, 86400),
     "disk.alertPercent": _int(50, 99),

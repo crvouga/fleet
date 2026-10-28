@@ -6,7 +6,7 @@ Install with Bun 1.4.4. Run `bun run check`; Linux contributors also run `bun ru
 
 OS changes after bootstrap use Git pull updates. Never apply system changes over SSH. Infrastructure provisioning belongs to the operator's IaC, outside this application. Never run setup, provision credentials or change GitHub settings without explicit authorization.
 
-`packages/fleet/roles.json` is the canonical registry. Run `bun run roles:sync` after changes. Regenerate the downloadable script with `bash packages/fleet/scripts/bundle-fleet-node.sh`. Do not edit generated role copies or bundled payloads by hand.
+The installer installs the role-less `base` closure and never assigns a role. The controller owns each node's desired state (role, closure, settings); nodes reconcile level-triggered and only report observed state. See ARCHITECTURE.md. `packages/fleet/roles.json` is the canonical registry. Run `bun run roles:sync` after changes. Regenerate the downloadable script with `bash packages/fleet/scripts/bundle-fleet-node.sh`. Do not edit generated role copies or bundled payloads by hand.
 
 Installers, bootstrap and USB writes are destructive. Before running them obtain explicit human approval identifying the disk. `--yes` is not authorization. Never test against physical disks. Preserve internal/removable disk checks, confirmation expiry, image checksum verification, rollback and secret redaction.
 

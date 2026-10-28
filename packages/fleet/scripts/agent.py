@@ -195,6 +195,10 @@ class Paths:
         return Path(self._env.get("FLEET_AGE_PUB") or self.state.parent / "secrets/age.pub")
 
     @property
+    def age_keygen(self):
+        return self._env.get("FLEET_AGE_KEYGEN") or "age-keygen"
+
+    @property
     def devbox_keys(self):
         return Path(self._env.get("FLEET_DEVBOX_KEYS") or self.state.parent / "devbox/authorized_keys")
 
@@ -562,6 +566,57 @@ class Agent:
         value = (read_text(self.paths.age_pub, 256) or "").strip()
         return value if AGE_RECIPIENT.fullmatch(value) else None
 
+    def age_recipient_next(self):
+        """The rotated identity's recipient while a rotation waits for its promotion (fleet-sync), else None."""
+        folder = self.paths.age_pub.parent
+        if not (folder / "age.next.key").is_file():
+            return None
+        value = (read_text(folder / "age.next.pub", 256) or "").strip()
+        return value if AGE_RECIPIENT.fullmatch(value) else None
+
+    def identity_created(self):
+        """When this node's age identity was made (fleet-age-identity writes age.created), or None."""
+        folder = self.paths.age_pub.parent
+        text = (read_text(folder / "age.created", 64) or "").strip()
+        if text.isdigit():
+            return int(text)
+        try:
+            return int((folder / "age.key").stat().st_mtime)
+        except OSError:
+            return None
+
+    def rotate_identity(self, flat):
+        """secrets.rotateAgeKeyAfter: an identity made before then gets a successor.
+
+        Only the successor's public recipient leaves the machine (ageRecipientNext).
+        fleet-sync promotes it once the assigned role's SOPS file lists it, so the
+        node never holds an identity its secrets cannot be decrypted with."""
+        after = flat.get("secrets.rotateAgeKeyAfter")
+        folder = self.paths.age_pub.parent
+        created = self.identity_created()
+        if type(after) is not int or created is None or created >= after or (folder / "age.next.key").exists():
+            return False
+        staged = folder / "age.next.key.new"
+        try:
+            staged.unlink()
+        except FileNotFoundError:
+            pass
+        code, _ = self.command([self.paths.age_keygen, "-o", str(staged)], 30)
+        if code != 0 or not staged.is_file():
+            self.log("could not create the rotated age identity; retrying next cycle")
+            return False
+        os.chmod(staged, 0o600)
+        code, out = self.command([self.paths.age_keygen, "-y", str(staged)], 15)
+        recipient = (out or "").strip()
+        if code != 0 or not AGE_RECIPIENT.fullmatch(recipient):
+            staged.unlink()
+            self.log("the rotated age identity has no valid recipient; retrying next cycle")
+            return False
+        fleetconf.write_atomic(str(folder / "age.next.pub"), recipient + "\n", 0o644)
+        os.replace(staged, folder / "age.next.key")
+        self.log(f"created the rotated age identity {recipient}; it is promoted once the role's secrets list it")
+        return True
+
     def reconcile_report(self):
         """fleet-sync's last verdict (/run/fleet/reconcile.json), validated and clipped, or None."""
         document = read_json(self.paths.reconcile)
@@ -712,6 +767,9 @@ class Agent:
         recipient = self.age_recipient()
         if recipient:
             body["ageRecipient"] = recipient
+        upcoming = self.age_recipient_next()
+        if upcoming and upcoming != recipient:
+            body["ageRecipientNext"] = upcoming
         verdict = self.reconcile_report()
         if verdict:
             body["reconcile"] = verdict
@@ -814,6 +872,7 @@ class Agent:
         """The steps every role takes on every cycle: the target for fleet-sync and the devbox logins."""
         self.step("target", self.write_target)
         self.step("devbox keys", self.apply_devbox_keys, flat)
+        self.step("age identity rotation", self.rotate_identity, flat)
 
     def write_target(self):
         """Write /nix/fleet-state/target when the desired closure differs from it, then start fleet-sync.
@@ -857,6 +916,8 @@ class Agent:
         except (OSError, KeyError, ValueError):
             self.log("no node.conf; runner settings are not applied")
             return
+        if role == BASE:
+            return  # base runs no runner and has no labels
         if role != "ci":
             self.step("runner labels", self.apply_labels_only, node_conf, flat)
             return

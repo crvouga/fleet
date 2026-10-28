@@ -4,8 +4,6 @@ in {
   role = "ci";
   flakeAttr = "ci";
   inherit (shared) sshKeys bootGenerationLimit bootTries repo binaryCache capacity drift disk monitoring fleetApi;
-  # Set true only in the commit that adds the sops secret age-key-next.
-  rotateAgeKey = false;
   reboot = shared.reboot // { drainCommand = "fleet-drain"; resumeCommand = "fleet-resume"; };
   # One data file for bootstrap registration. Runtime repository assignments
   # can override this through the fleet controller's Postgres-backed settings.

@@ -267,6 +267,23 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# A private repository needs the read credential the installer placed at a
+# fixed path (modules/sync.nix). Without it no fetch can ever succeed, so say
+# exactly that instead of reporting a fetch failure on every poll.
+case "${REPO_AUTH:-none}" in
+  ssh|token)
+    credential_file=${GIT_KEY:-}
+    [ "$REPO_AUTH" = token ] && credential_file=${GIT_TOKEN:-}
+    if [ -z "$credential_file" ] || [ ! -s "$credential_file" ]; then
+      issue="FLEET_GIT_CREDENTIAL_MISSING: this fleet follows a private repository (repo.auth = $REPO_AUTH) and ${credential_file:-the read credential} is missing. Reinstall with --git-credential-file; nodes are stateless."
+      echo "sync: $issue" >&2
+      set_phase blocked "$issue"
+      record_success=0
+      exit 0
+    fi
+    ;;
+esac
+
 if [ -n "${GIT_KEY:-}" ] && [ -f "$GIT_KEY" ]; then
   known=${GIT_KNOWN_HOSTS:-/etc/fleet/git-known-hosts}
   quoted_key=$(printf '%q' "$GIT_KEY")
@@ -419,6 +436,23 @@ if [ -f "$registry" ]; then
   recipient=""
   if [ -f "$age_pub" ]; then
     recipient=$(head -n 1 "$age_pub" | tr -d '[:space:]')
+  fi
+  # Rotation (secrets.rotateAgeKeyAfter): fleet-agent created a next identity
+  # and reports it. Promote it once the target role's file lists it, or at once
+  # for a role without secrets. Until then the current identity keeps working.
+  age_dir=$(dirname "$age_pub")
+  next=""
+  if [ -s "$age_dir/age.next.key" ] && [ -s "$age_dir/age.next.pub" ]; then
+    next=$(head -n 1 "$age_dir/age.next.pub" | tr -d '[:space:]')
+  fi
+  if [[ "$next" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] && { [ -z "$secrets_file" ] || [ ! -f "$repo/$FLAKE_DIR/$secrets_file" ] \
+    || grep -qF -- "$next" "$repo/$FLAKE_DIR/$secrets_file"; }; then
+    mv "$age_dir/age.next.key" "$age_dir/age.key"
+    mv "$age_dir/age.next.pub" "$age_pub"
+    date +%s > "$age_dir/age.created"
+    echo "sync: promoted the rotated age identity $next (was ${recipient:-none})" >&2
+    recovery_event age-rotated info "age-rotated:${next:4:24}" "the node now uses its rotated age identity $next; remove ${recipient:-the old recipient} from the role's secrets"
+    recipient=$next
   fi
   if [ -n "$secrets_file" ] && [ -f "$repo/$FLAKE_DIR/$secrets_file" ] && [ -n "$recipient" ] \
     && ! grep -qF -- "$recipient" "$repo/$FLAKE_DIR/$secrets_file"; then

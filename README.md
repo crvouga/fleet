@@ -2,6 +2,8 @@
 
 Git-managed NixOS machines with a cross-platform installer and an optional management dashboard. Fleet provides CI runner and development-box roles, hardware capability variants, pull updates, rollback, telemetry, and node enrollment. There are no per-machine host definitions.
 
+Every machine installs the same role-less `base` system. The Fleet controller assigns each node's role and settings, and a level-triggered reconcile loop on the node converges to them through Git pull updates. See **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
 Fleet runs on hardware you control. It does not require Railway, Cloudflare, a particular Vault, the author's infrastructure, or a cloud account. The optional Fleet controller coordinates enrollment, node settings, telemetry and recovery through a dashboard, backed by Bun and SQLite. By default, Litestream restores and replicates its database to your S3-compatible bucket, so the compute is replaceable. Browser login uses a configurable HTTPS OpenID Connect provider with authorization code + S256 PKCE and verified email claims.
 
 Fleet is maintained by [Chris Vouga](https://www.chrisvouga.dev). Runtime independence does not remove release ownership: official installers come from `crvouga/fleet`, and release CI may use the maintainer’s shared infrastructure, including Vault/OpenBao. Windows builds include author and product metadata; Windows publisher verification requires the separate [signing workflow](packages/fleet/docs/windows-signing.md). CI credentials never belong in the app or downloadable installer.
@@ -64,14 +66,14 @@ bun --env-file=deployment.env run start
 
 See **[CONFIGURATION.md](CONFIGURATION.md)** for every setting, defaults, startup checks, error remedies, browser login, and the service-manager example. The [environment template](deployment.env.example) contains all supported settings. Startup refuses traffic until configuration, local prerequisites, restore, schema initialization and an initial S3 sync succeed. Failures exit nonzero with a corrective action. One node owns the SQLite working file and replica prefix; stop it before starting a replacement. Ordinary restarts retain data, and a replacement can restore from the bucket. Abrupt host loss may lose recent unreplicated writes.
 
-Nodes register directly with Fleet and wait under Pending for owner approval before disk erasure. A per-node private credential survives installation. Shared encrypted role secrets are a separate operator configuration: provide a role-specific age key when required. Vault/OpenBao wrapping is an optional explicit key-transfer mechanism; it does not grant app approval by itself. Neither Vault nor GitHub is needed to approve an ordinary node. `FLEET_KEYS_OUT` controls private role-key output (default `~/.config/fleet/`, mode 0600). Never commit private keys or tokens.
+Nodes register directly with Fleet and wait under Pending for owner approval before disk erasure. The installer installs `base` only; assign the role when you approve the node or later on its page, and the node converges to it (a role change is a drained, health-checked reboot that wipes the previous role's data; nodes are stateless and keep only their identity). A per-node private credential survives installation, and each node creates its own age identity on first boot. Role secrets stay SOPS-encrypted in Git: make the recipients listed by `GET /v1/recipients` recipients of the role's file (`scripts/fleet-keys.py` renders the rules) and merge; Fleet never holds a private age key. An optional enrollment token (`FLEET_ENROLLMENT_TOKENS`) approves a node without a person and can name the role to assign. Never commit private keys or tokens.
 
 ## Develop
 
 ```sh
 bun run check          # typecheck, lint, Python/controller tests, dashboard build
 bun run check:nix      # NixOS evaluations, builds and VM checks on Linux
-bun run roles:sync     # regenerate role lists in scripts, controller and schema
+bun run roles:sync     # regenerate role and closure lists in node scripts and the controller
 ```
 
 Browser tests additionally require Playwright Chromium (`bunx playwright install chromium`). Native packaged installer validation requires the target OS and `packages/fleet/wizard/requirements-build.txt`. Portable checks do not establish physical installation or Windows signing readiness. CI uses GitHub-hosted runners; the reusable runner workflow is optional.

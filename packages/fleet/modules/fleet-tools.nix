@@ -14,6 +14,7 @@
     cp ${../scripts/node_readiness.py} "$out/node_readiness.py"
     cp ${../scripts/telemetry.py} "$out/telemetry.py"
     cp ${../scripts/recovery.py} "$out/recovery.py"
+    cp ${../scripts/node_state.py} "$out/node_state.py"
   '';
   # Runner units embed these paths. A store path shared with every other
   # script changed the runner units on almost every update. Keep the job hook
@@ -39,7 +40,7 @@ in {
   # fleet-agent run|once|status|retire. A shell started by hand gets the same
   # Controller address as the unit.
   agent = pkgs.writeShellScriptBin "fleet-agent" ''
-    export PATH=${lib.makeBinPath [ pkgs.iproute2 pkgs.systemd pkgs.coreutils ]}:$PATH
+    export PATH=${lib.makeBinPath [ pkgs.iproute2 pkgs.systemd pkgs.coreutils pkgs.age ]}:$PATH
     export FLEET_API_URL="''${FLEET_API_URL-${apiUrl}}"
     exec ${python} ${scripts}/agent.py "$@"
   '';

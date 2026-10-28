@@ -47,7 +47,7 @@ in {
     Remote fleet devbox. Connect as dev; /nix/devbox survives reboots.
     Use nix develop and nix profile for project tools. System configuration
     continues to come from Git; the dev user has no administrator privileges.
-    Fleet can assign this machine another role; it then reboots into a system
-    without this login. Back the workspace up; do not rely on it surviving.
+    Fleet nodes are stateless: /nix/devbox is a cache. It is wiped when Fleet
+    assigns this machine another role or reinstalls it. Push your work.
   '';
 }

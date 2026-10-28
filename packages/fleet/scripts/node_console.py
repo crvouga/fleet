@@ -353,14 +353,13 @@ def role_row(facts):
     running = f"{facts['role']} ({facts.get('closure') or facts['role']})"
     target = facts.get("target")
     verdict = facts.get("reconcile") or {}
-    issues = [issue for issue in verdict.get("issues") or [] if isinstance(issue, str)]
     if verdict.get("phase") == "blocked" and target:
-        return ("fail", "Role", f"{running}; assigned {target[0]} ({target[1]}) is blocked: "
-                + (screen.code(issues[0]) or "see below" if issues else "no reason recorded"))
+        # The row is cut at the screen width; the reason is the STATUS line.
+        return ("fail", "Role", f"{running}; {target[0]} ({target[1]}) is blocked")
     if target and target != (facts["role"], facts.get("closure") or facts["role"]):
         return ("wait", "Role", f"{running} now; changing to {target[0]} ({target[1]})")
     if facts["role"] == "base":
-        return ("off", "Role", "base: no role assigned yet; assign one on the node's page in Fleet")
+        return ("off", "Role", "base: no role yet; assign one in Fleet")
     return ("ok", "Role", running)
 
 

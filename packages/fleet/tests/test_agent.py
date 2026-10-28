@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fleet-agent against a real local HTTP server that speaks packages/fleet-controller/PROTOCOL.md."""
+"""fleet-agent against a real local HTTP server that speaks packages/fleet-controller/PROTOCOL.md (v2)."""
 
 import hashlib
 import http.server
@@ -22,14 +22,23 @@ import agent  # noqa: E402
 import fleetconf  # noqa: E402
 
 MACHINE_ID = "a3f9" + "0123456789abcdef" * 3 + "0123456789ab"
+# An enrollment token that the fake controller maps to the ci role.
 ROLE_TOKEN = "ci-role-token-9f8e7d6c5b4a"
+RECIPIENT = "age1" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l" + "q" * 26
+CLOSURE_RE = re.compile(r"^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4}$")
 HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$")
 TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+-]{1,64}$")
 EVENT_KIND_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
 
 
 def revision_of(values):
+    """The revision a protocol v1 controller gave settings; still accepted from a cached file."""
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def desired_revision(values, role=None, closure=None):
+    """The controller's revision of a desired document: sha256 of its canonical JSON, 16 hex."""
+    return hashlib.sha256(json.dumps({"closure": closure, "role": role, "values": values}, sort_keys=True).encode()).hexdigest()[:16]
 
 
 class Rng:
@@ -69,9 +78,18 @@ def validate_heartbeat(body):
     def nullable_string(value, limit, pattern=None):
         return value is None or (isinstance(value, str) and len(value) <= limit and (pattern is None or pattern.match(value)))
 
-    need(body.get("v") == 1, "v")
+    need(body.get("v") == 2, "v")
     need(isinstance(body.get("nodeId"), str) and re.fullmatch(r"[0-9a-f]{64}", body["nodeId"]), "nodeId")
-    need(body.get("role") in agent.ROLES, "role")
+    need(body.get("role") in agent.ROLES + ("base",), "role")
+    need(isinstance(body.get("closure"), str) and CLOSURE_RE.match(body["closure"]), "closure")
+    hardware = body.get("hardware")
+    need(hardware is None or (isinstance(hardware, dict) and isinstance(hardware.get("capabilities"), list)
+         and all(isinstance(c, str) for c in hardware["capabilities"])), "hardware")
+    need("ageRecipient" not in body or re.fullmatch(r"age1[02-9ac-hj-np-z]{58}", str(body["ageRecipient"])), "ageRecipient")
+    verdict = body.get("reconcile")
+    need(verdict is None or (verdict.get("phase") in ("converged", "progressing", "blocked")
+         and isinstance(verdict.get("issues"), list) and len(verdict["issues"]) <= 8
+         and all(isinstance(i, str) and len(i) <= 500 for i in verdict["issues"])), "reconcile")
     need(isinstance(body.get("hostname"), str) and HOSTNAME_RE.match(body["hostname"]), "hostname")
     caps = body.get("capabilities")
     need(isinstance(caps, list) and len(caps) <= 32 and all(isinstance(c, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,50}", c) for c in caps), "capabilities")
@@ -100,8 +118,9 @@ def validate_heartbeat(body):
     runners = body.get("runners")
     need(runners is None or (number(runners.get("slots"), 0, 4096, True) and number(runners.get("busy"), 0, 4096, True)), "runners")
     info = body.get("agent") or {}
-    need(isinstance(info.get("version"), str) and TOKEN_RE.match(info["version"]), "agent.version")
-    need(nullable_string(info.get("configRevision"), 64, TOKEN_RE), "agent.configRevision")
+    need(info.get("version") == "2", "agent.version")
+    need(info.get("desiredRevision") is None or re.fullmatch(r"[0-9a-f]{16}", str(info["desiredRevision"])), "agent.desiredRevision")
+    need("configRevision" not in info, "agent.configRevision is v1")
     events = body.get("events")
     need(isinstance(events, list) and len(events) <= 20, "events")
     for event in events if isinstance(events, list) else []:
@@ -118,7 +137,10 @@ class Api:
         self.nodes = {}
         self.requests = []
         self.script = []
-        self.role_tokens = {"ci": ROLE_TOKEN}
+        # Enrollment tokens and the role each assigns (FLEET_ENROLLMENT_TOKENS).
+        self.enrollment_tokens = {ROLE_TOKEN: "ci"}
+        # Closures per role in registry order, as types.ts CLOSURES.
+        self.closures = {"ci": ["ci", "ci-gpu"], "devbox": ["devbox"]}
         self.values = {}
         self.interval = 60
         outer = self
@@ -157,9 +179,20 @@ class Api:
     def of(self, path):
         return [request for request in self.requests if request["path"] == path]
 
-    def envelope(self, node):
-        values = self.values if node["approval"] == "approved" else {"heartbeat": {"intervalSeconds": self.interval}}
-        return {"revision": revision_of(values), "values": values}
+    def closure_for(self, role, capabilities):
+        for attr in self.closures[role]:
+            suffix = attr.split("-")[1:]
+            if suffix and all(part in capabilities for part in suffix):
+                return attr
+        return role
+
+    def desired(self, node, body):
+        if node["approval"] != "approved":
+            role, closure, values = None, None, {"heartbeat": {"intervalSeconds": self.interval}}
+        else:
+            role, values = node["role"], self.values
+            closure = "base" if role is None else self.closure_for(role, (body.get("hardware") or {}).get("capabilities") or [])
+        return {"revision": desired_revision(values, role, closure), "role": role, "closure": closure, "values": values}
 
     def respond(self, path, authorization, body):
         if self.script:
@@ -181,10 +214,10 @@ class Api:
         if errors or body["nodeId"] != credential[0]:
             return 400, {"error": "invalid_request", "message": "; ".join(errors)}
         node["last"] = body
-        envelope = self.envelope(node)
+        desired = self.desired(node, body)
         answer = {"ok": True, "status": node["approval"], "serverTime": "2026-10-14T12:00:00.000Z"}
-        if body["agent"]["configRevision"] != envelope["revision"]:
-            answer["config"] = envelope
+        if body["agent"]["desiredRevision"] != desired["revision"]:
+            answer["desired"] = desired
         return 200, answer
 
     def register(self, body):
@@ -193,22 +226,25 @@ class Api:
             and re.fullmatch(r"[0-9a-f]{64}", str(body.get("nodeId")))
             and re.fullmatch(r"[0-9a-f]{64}", str(body.get("secret")))
             and HOSTNAME_RE.match(str(body.get("hostname")))
-            and body.get("role") in self.role_tokens
+            and "role" not in body and "roleToken" not in body
         )
         if not valid:
             return 400, {"error": "invalid_request", "message": "bad body"}
-        proved = body.get("roleToken") is not None and body["roleToken"] == self.role_tokens[body["role"]]
+        proved = body.get("enrollmentToken") in self.enrollment_tokens
         existing = self.nodes.get(body["nodeId"])
         approval = "approved" if proved else "pending"
         if existing and existing["approval"] == "rejected":
             approval = "rejected"
         created = existing is None
+        role = existing["role"] if existing else None
+        if proved and role is None:
+            role = self.enrollment_tokens[body["enrollmentToken"]]
         self.nodes[body["nodeId"]] = {
             "secretHash": hashlib.sha256(body["secret"].encode()).hexdigest(),
             "approval": approval,
-            "role": body["role"],
+            "role": role,
         }
-        return (201 if created else 200), {"status": approval, "heartbeatIntervalSeconds": self.interval}
+        return (201 if created else 200), {"status": approval, "heartbeatIntervalSeconds": self.interval, "role": role}
 
 
 class FakeRun:
@@ -333,10 +369,11 @@ class AgentCase(unittest.TestCase):
         self.api.close()
         self.tmp.cleanup()
 
-    def make(self, url=None, role_token=None):
-        if role_token is not None:
-            self.node.state.mkdir(parents=True, exist_ok=True)
-            (self.node.state / "role-token").write_text(role_token + "\n")
+    def make(self, url=None, role_token=None, legacy_token=None):
+        for name, value in (("enrollment-token", role_token), ("role-token", legacy_token)):
+            if value is not None:
+                self.node.state.mkdir(parents=True, exist_ok=True)
+                (self.node.state / name).write_text(value + "\n")
         return agent.Agent(
             agent.Paths(self.node.env()),
             url or self.api.url,
@@ -368,7 +405,7 @@ class RegistrationTests(AgentCase):
         self.assertNotIn("Authorization", register["headers"])
         self.assertEqual(
             register["body"],
-            {"nodeId": MACHINE_ID, "role": "ci", "hostname": "ci-gpu-a3f9", "secret": secret, "roleToken": ROLE_TOKEN},
+            {"nodeId": MACHINE_ID, "hostname": "ci-gpu-a3f9", "secret": secret, "enrollmentToken": ROLE_TOKEN},
         )
         self.assertEqual(self.api.nodes[MACHINE_ID]["approval"], "approved")
         heartbeat, = self.api.of("/v1/heartbeat")
@@ -380,7 +417,7 @@ class RegistrationTests(AgentCase):
         ok, _ = worker.cycle()
         self.assertTrue(ok, self.logs)
         register, = self.api.of("/v1/nodes/register")
-        self.assertNotIn("roleToken", register["body"])
+        self.assertNotIn("enrollmentToken", register["body"])
         self.assertEqual(self.api.nodes[MACHINE_ID]["approval"], "pending")
         self.assertEqual(len(self.heartbeats()), 1)
         status = json.loads((self.node.state / "status.json").read_text())
@@ -396,7 +433,15 @@ class RegistrationTests(AgentCase):
         worker = self.make(role_token="has spaces and is not a token")
         worker.cycle()
         register, = self.api.of("/v1/nodes/register")
-        self.assertNotIn("roleToken", register["body"])
+        self.assertNotIn("enrollmentToken", register["body"])
+
+    def test_a_legacy_role_token_is_sent_as_the_enrollment_token_only_without_one(self):
+        self.make(legacy_token=ROLE_TOKEN).cycle()
+        self.assertEqual(self.api.of("/v1/nodes/register")[-1]["body"]["enrollmentToken"], ROLE_TOKEN)
+        self.assertEqual(self.api.nodes[MACHINE_ID]["approval"], "approved")
+        (self.node.state / "node.secret").unlink()
+        self.make(role_token="newer-enrollment-token-1").cycle()
+        self.assertEqual(self.api.of("/v1/nodes/register")[-1]["body"]["enrollmentToken"], "newer-enrollment-token-1")
 
     def test_a_rejected_node_backs_off_to_hourly_and_does_not_crash(self):
         worker = self.make()
@@ -458,7 +503,7 @@ class HeartbeatPayloadTests(AgentCase):
             self.skipTest("packages/fleet-controller/PROTOCOL.md is not present")
         text = PROTOCOL.read_text()
         for block in re.findall(r"```json\n(.*?)```", text, re.S):
-            if '"v": 1' in block and '"nodeId"' in block:
+            if '"v": 2' in block and '"nodeId"' in block:
                 return json.loads(block)
         self.fail("PROTOCOL.md has no heartbeat example")
 
@@ -480,6 +525,9 @@ class HeartbeatPayloadTests(AgentCase):
         revision = revision_of({})
         (self.node.state / "config.json").write_text(json.dumps({"revision": revision, "values": {}}))
         (self.node.run / "slot-1/busy").write_text("1\n")
+        (self.node.root / "nix/fleet-state/secrets").mkdir(parents=True)
+        (self.node.root / "nix/fleet-state/secrets/age.pub").write_text(RECIPIENT + "\n")
+        (self.node.run / "reconcile.json").write_text(json.dumps({"phase": "converged", "issues": []}))
         self.make().cycle()
         body = self.heartbeats()[0]
         self.assertEqual(validate_heartbeat(body), [])
@@ -501,7 +549,7 @@ class HeartbeatPayloadTests(AgentCase):
         for key in ("v", "nodeId", "role", "hostname", "capabilities", "revision", "bootId", "uptimeSeconds", "kernel", "arch",
                     "cpu", "memory", "load1", "disk", "addresses", "sync", "failedUnits", "runners", "agent", "events"):
             self.assertIn(key, body)
-        self.assertEqual(body["v"], 1)
+        self.assertEqual(body["v"], 2)
         self.assertEqual(body["nodeId"], MACHINE_ID)
         self.assertEqual(body["role"], "ci")
         self.assertEqual(body["hostname"], "ci-gpu-a3f9")
@@ -521,7 +569,11 @@ class HeartbeatPayloadTests(AgentCase):
         self.assertEqual(body["sync"], {"rolledBack": True, "healthFailure": "github unreachable", "paused": False})
         self.assertEqual(body["failedUnits"], ["fleet-disk.service"])
         self.assertEqual(body["runners"], {"slots": 4, "busy": 2})
-        self.assertEqual(body["agent"], {"version": "1", "configRevision": None})
+        self.assertEqual(body["closure"], "ci")
+        self.assertEqual(body["hardware"], {"capabilities": []})
+        self.assertNotIn("ageRecipient", body)
+        self.assertNotIn("reconcile", body)
+        self.assertEqual(body["agent"], {"version": "2", "desiredRevision": None})
 
     def test_a_node_without_runners_reports_null_and_unreadable_facts_are_null(self):
         for path in ("proc/uptime", "proc/loadavg", "etc/fleet/revision", "proc/sys/kernel/osrelease"):
@@ -542,7 +594,6 @@ class HeartbeatPayloadTests(AgentCase):
         self.tmp.cleanup()
         self.tmp = tempfile.TemporaryDirectory()
         self.node = Node(self.tmp.name, "devbox")
-        self.api.role_tokens["devbox"] = ROLE_TOKEN
         self.make().cycle()
         self.assertIsNone(self.heartbeats()[0]["runners"])
         self.assertEqual(self.heartbeats()[0]["role"], "devbox")
@@ -657,7 +708,6 @@ class ConfigTests(AgentCase):
     }
 
     def approved(self, values):
-        self.api.role_tokens["ci"] = ROLE_TOKEN
         self.api.values = values
         return self.make(role_token=ROLE_TOKEN)
 
@@ -668,9 +718,9 @@ class ConfigTests(AgentCase):
         worker = self.approved(self.FULL)
         ok, delay = worker.cycle()
         self.assertTrue(ok, self.logs)
-        revision = revision_of(self.FULL)
+        revision = desired_revision(self.FULL, "ci", "ci")
         cached = json.loads((self.node.state / "config.json").read_text())
-        self.assertEqual(cached, {"revision": revision, "values": self.FULL})
+        self.assertEqual(cached, {"revision": revision, "role": "ci", "closure": "ci", "values": self.FULL})
         self.assertEqual(json.loads(self.node.applied.read_text()), self.FULL)
         self.assertEqual(json.loads(self.read("config.json")), self.FULL)
         self.assertEqual(self.node.applied.stat().st_mode & 0o777, 0o600)
@@ -682,14 +732,14 @@ class ConfigTests(AgentCase):
         ok, delay = worker.cycle()
         self.assertTrue(ok)
         self.assertEqual(delay, 30)
-        self.assertEqual(self.heartbeats()[1]["agent"]["configRevision"], revision)
+        self.assertEqual(self.heartbeats()[1]["agent"]["desiredRevision"], revision)
         self.assertTrue(self.heartbeats()[1]["sync"]["paused"])
-        self.assertNotIn("config", [k for r in [self.api.requests[-1]] for k in r["body"]])
+        self.assertNotIn("desired", [k for r in [self.api.requests[-1]] for k in r["body"]])
 
     def test_the_revision_is_kept_across_a_restart(self):
         self.approved(self.FULL).cycle()
         self.make().cycle()
-        self.assertEqual(self.heartbeats()[-1]["agent"]["configRevision"], revision_of(self.FULL))
+        self.assertEqual(self.heartbeats()[-1]["agent"]["desiredRevision"], desired_revision(self.FULL, "ci", "ci"))
         self.assertEqual(len(self.api.of("/v1/heartbeat")), 2)
 
     def test_removing_repositories_removes_the_assignments(self):
@@ -730,13 +780,13 @@ class ConfigTests(AgentCase):
         self.assertEqual(self.read("runner-labels").split(), ["x64", "gpu"])
         self.assertEqual(self.read("slot-count"), "2\n")
         cached = json.loads((self.node.state / "config.json").read_text())
-        self.assertEqual(cached["revision"], revision_of(values))
+        self.assertEqual(cached["revision"], desired_revision(values, "ci", "ci"))
         self.assertEqual(cached["values"], {})
 
-    def test_a_malformed_config_block_is_ignored(self):
+    def test_a_malformed_desired_document_is_ignored(self):
         worker = self.approved({})
         worker.cycle()
-        self.api.script = [(200, {"ok": True, "status": "approved", "config": {"revision": "not hex!", "values": []}})]
+        self.api.script = [(200, {"ok": True, "status": "approved", "desired": {"revision": "not hex!", "values": []}})]
         ok, _ = worker.cycle()
         self.assertTrue(ok)
         self.assertTrue(any("invalid shape" in line for line in self.logs))
@@ -863,7 +913,7 @@ class ConfigTests(AgentCase):
         self.tmp.cleanup()
         self.tmp = tempfile.TemporaryDirectory()
         self.node = Node(self.tmp.name, "devbox")
-        self.api.role_tokens["devbox"] = ROLE_TOKEN
+        self.api.enrollment_tokens[ROLE_TOKEN] = "devbox"
         self.api.values = {"runners": {"cordoned": True, "repositories": ["o/a"]}, "sync": {"paused": True}}
         worker = self.make(role_token=ROLE_TOKEN)
         worker.cycle()
@@ -871,6 +921,263 @@ class ConfigTests(AgentCase):
         self.assertFalse((self.node.run / "assign").exists())
         self.assertFalse((self.node.run / "slot-count").exists())
         self.assertEqual(json.loads(self.node.applied.read_text())["sync"], {"paused": True})
+
+
+ED25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl dev@laptop"
+RSA = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7" + "A" * 300 + "== other"
+
+
+class DesiredStateTests(AgentCase):
+    """The controller assigns role and closure; the agent writes the target fleet-sync converges to."""
+
+    @property
+    def target(self):
+        return self.node.root / "nix/fleet-state/target"
+
+    def sync_starts(self):
+        return self.run_stub.matching("start", "--no-block", "fleet-sync.service")
+
+    def gpu(self, vendor="0x10de", klass="0x030000"):
+        device = self.node.sys / "bus/pci/devices/0000:01:00.0"
+        device.mkdir(parents=True)
+        (device / "class").write_text(klass + "\n")
+        (device / "vendor").write_text(vendor + "\n")
+        other = self.node.sys / "bus/pci/devices/0000:00:1f.0"
+        other.mkdir(parents=True)
+        (other / "class").write_text("0x060100\n")
+        (other / "vendor").write_text("0x8086\n")
+
+    def test_the_target_is_written_once_when_it_changes_and_starts_sync_without_waiting(self):
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci\n")
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(len(self.sync_starts()), 1)
+        mtime = self.target.stat().st_mtime_ns
+        worker.cycle()
+        worker.cycle()
+        self.assertEqual(len(self.sync_starts()), 1, "an unchanged target never restarts fleet-sync")
+        self.assertEqual(self.target.stat().st_mtime_ns, mtime)
+
+    def test_every_cycle_repairs_a_lost_or_damaged_target_even_without_the_controller(self):
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.target.unlink()
+        self.api.script = [(503, {"error": "unavailable"})]
+        ok, _ = worker.cycle()
+        self.assertFalse(ok)
+        self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci\n")
+        self.target.write_text("role=ci\nclos")
+        self.make(url=self.closed()).cycle()
+        self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci\n")
+        self.assertEqual(len(self.sync_starts()), 3)
+
+    def closed(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        return f"http://127.0.0.1:{port}"
+
+    def test_a_pending_node_keeps_what_it_runs_and_never_writes_a_target(self):
+        worker = self.make()
+        worker.cycle()
+        worker.cycle()
+        self.assertEqual(self.api.nodes[MACHINE_ID]["approval"], "pending")
+        cached = json.loads((self.node.state / "config.json").read_text())
+        self.assertEqual((cached["role"], cached["closure"]), (None, None))
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.sync_starts(), [])
+
+    def test_an_approved_node_without_a_role_converges_to_base(self):
+        self.api.enrollment_tokens[ROLE_TOKEN] = None
+        self.make(role_token=ROLE_TOKEN).cycle()
+        self.assertEqual(self.target.read_text(), "role=base\nclosure=base\n")
+
+    def test_a_reassigned_role_rewrites_the_target(self):
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.api.nodes[MACHINE_ID]["role"] = "devbox"
+        worker.cycle()
+        self.assertEqual(self.target.read_text(), "role=devbox\nclosure=devbox\n")
+        self.assertEqual(len(self.sync_starts()), 2)
+        # The heartbeat still reports what runs, never what is assigned.
+        self.assertEqual((self.heartbeats()[-1]["role"], self.heartbeats()[-1]["closure"]), ("ci", "ci"))
+
+    def test_an_invalid_desired_document_is_refused_whole_and_the_cached_one_kept(self):
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        cached = (self.node.state / "config.json").read_text()
+        good = json.loads(cached)
+        for bad in (
+            {**good, "revision": "0" * 15},
+            {**good, "role": "web", "closure": "web"},
+            {**good, "role": "ci", "closure": "devbox"},
+            {**good, "role": "ci", "closure": "base"},
+            {**good, "role": None, "closure": "ci"},
+            {**good, "role": "ci", "closure": "ci-../x"},
+            {**good, "values": ["not", "a", "map"]},
+            {**good, "role": "ci", "closure": "cix"},
+            "not a document",
+        ):
+            with self.subTest(bad=bad):
+                self.api.script = [(200, {"ok": True, "status": "approved", "desired": bad})]
+                ok, _ = worker.cycle()
+                self.assertTrue(ok)
+                self.assertEqual((self.node.state / "config.json").read_text(), cached)
+                self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci\n")
+                self.assertEqual(worker.desired_revision, good["revision"])
+        self.assertTrue(any("invalid shape" in line for line in self.logs))
+
+    def test_gpu_hardware_is_reported_and_selects_the_gpu_closure(self):
+        self.gpu()
+        self.make(role_token=ROLE_TOKEN).cycle()
+        self.assertEqual(self.heartbeats()[0]["hardware"], {"capabilities": ["gpu"]})
+        self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci-gpu\n")
+
+    def test_only_an_nvidia_display_controller_is_a_gpu(self):
+        self.assertEqual(agent.hardware_capabilities(self.node.sys), [])
+        self.gpu(vendor="0x1002")
+        self.assertEqual(agent.hardware_capabilities(self.node.sys), [])
+        self.assertEqual(agent.hardware_capabilities(self.node.root / "missing"), [])
+
+    def test_observed_role_and_closure_come_from_the_running_node_conf(self):
+        conf = (self.node.etc / "node.conf").read_text().replace("flake_attr=ci", "flake_attr=ci-gpu")
+        (self.node.etc / "node.conf").write_text(conf)
+        self.make().cycle()
+        body = self.heartbeats()[0]
+        self.assertEqual((body["role"], body["closure"]), ("ci", "ci-gpu"))
+
+    def test_a_base_node_reports_base_and_has_no_runner_state(self):
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.node = Node(self.tmp.name, "base")
+        self.api.values = {"runners": {"extraLabels": ["fast"]}}
+        self.make(role_token=ROLE_TOKEN).cycle()
+        body = self.heartbeats()[0]
+        self.assertEqual((body["role"], body["closure"], body["runners"]), ("base", "base", None))
+        self.assertEqual(validate_heartbeat(body), [])
+        self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci\n")
+        self.assertFalse(self.run_stub.matching("systemd-run"))
+        self.assertFalse((self.node.run / "runner-labels").exists(), "base runs no runner")
+
+    def test_the_age_recipient_is_reported_only_when_it_is_one(self):
+        secrets_dir = self.node.root / "nix/fleet-state/secrets"
+        secrets_dir.mkdir(parents=True)
+        worker = self.make()
+        (secrets_dir / "age.pub").write_text("AGE-SECRET-KEY-1NOTAPUBLICKEY\n")
+        worker.cycle()
+        self.assertNotIn("ageRecipient", self.heartbeats()[-1])
+        (secrets_dir / "age.pub").write_text(RECIPIENT + "\n")
+        worker.cycle()
+        self.assertEqual(self.heartbeats()[-1]["ageRecipient"], RECIPIENT)
+
+    def test_the_convergence_verdict_is_validated_and_clipped(self):
+        worker = self.make()
+        (self.node.run / "reconcile.json").write_text(json.dumps(
+            {"phase": "blocked", "issues": ["FLEET_X: " + "y" * 900] * 12 + [5, ""], "role": "ci"}))
+        worker.cycle()
+        verdict = self.heartbeats()[-1]["reconcile"]
+        self.assertEqual(verdict["phase"], "blocked")
+        self.assertEqual(len(verdict["issues"]), 8)
+        self.assertTrue(all(len(issue) <= 500 for issue in verdict["issues"]))
+        self.assertEqual(set(verdict), {"phase", "issues"})
+        for broken in ('{"phase": "done", "issues": []}', "[1]", "{not json"):
+            (self.node.run / "reconcile.json").write_text(broken)
+            worker.cycle()
+            self.assertNotIn("reconcile", self.heartbeats()[-1])
+        self.assertEqual(validate_heartbeat(self.heartbeats()[-1]), [])
+
+    def test_a_cached_v1_settings_file_is_still_applied_and_the_desired_document_replaces_it(self):
+        self.node.state.mkdir(parents=True)
+        values = {"runners": {"extraLabels": ["fast"]}}
+        (self.node.state / "config.json").write_text(json.dumps({"revision": "abc", "values": values}))
+        self.api.script = [(503, {"error": "down"})]
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.assertEqual((self.node.run / "runner-labels").read_text().split(), ["x64", "gpu", "fast"])
+        self.assertFalse(self.target.exists())
+        worker.cycle()
+        self.assertEqual(self.heartbeats()[-1]["agent"]["desiredRevision"], None)
+        self.assertEqual(self.target.read_text(), "role=ci\nclosure=ci\n")
+
+    def devbox(self):
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.node = Node(self.tmp.name, "devbox")
+        self.api.enrollment_tokens[ROLE_TOKEN] = "devbox"
+        return self.node.root / "nix/fleet-state/devbox/authorized_keys"
+
+    def test_rotation_creates_a_successor_once_and_reports_only_its_recipient(self):
+        secrets_dir = self.node.root / "nix/fleet-state/secrets"
+        secrets_dir.mkdir(parents=True)
+        (secrets_dir / "age.pub").write_text(RECIPIENT + "\n")
+        (secrets_dir / "age.key").write_text("AGE-SECRET-KEY-1CURRENT\n")
+        (secrets_dir / "age.created").write_text("1000\n")
+        upcoming = "age1" + "p" * 58
+
+        def keygen(argv, timeout=10):
+            if argv[1] == "-o":
+                Path(argv[2]).write_text("AGE-SECRET-KEY-1NEXT\n")
+                return 0, ""
+            return 0, upcoming + "\n"
+
+        real = self.run_stub
+        self.run_stub = lambda argv, timeout=10: keygen(argv) if Path(argv[0]).name == "age-keygen" else real(argv, timeout)
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.assertFalse((secrets_dir / "age.next.key").exists(), "no rotation was asked for")
+        self.assertNotIn("ageRecipientNext", self.heartbeats()[-1])
+        self.api.values = {"secrets": {"rotateAgeKeyAfter": 2000}}
+        worker.cycle()
+        worker.cycle()
+        self.assertEqual((secrets_dir / "age.next.key").read_text(), "AGE-SECRET-KEY-1NEXT\n")
+        self.assertEqual((secrets_dir / "age.next.key").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((secrets_dir / "age.next.pub").read_text(), upcoming + "\n")
+        self.assertEqual(self.heartbeats()[-1]["ageRecipientNext"], upcoming)
+        self.assertEqual(self.heartbeats()[-1]["ageRecipient"], RECIPIENT)
+        self.assertNotIn("AGE-SECRET-KEY", json.dumps(self.heartbeats()))
+        self.assertEqual(sum(1 for line in self.logs if "created the rotated age identity" in line), 1)
+        # Promoted by fleet-sync, made after the requested time: nothing more to do.
+        (secrets_dir / "age.next.key").replace(secrets_dir / "age.key")
+        (secrets_dir / "age.next.pub").replace(secrets_dir / "age.pub")
+        (secrets_dir / "age.created").write_text("3000\n")
+        worker.cycle()
+        self.assertFalse((secrets_dir / "age.next.key").exists())
+        self.assertNotIn("ageRecipientNext", self.heartbeats()[-1])
+
+    def test_devbox_keys_are_written_for_a_running_devbox_and_emptied_when_removed(self):
+        keys = self.devbox()
+        self.api.values = {"devbox": {"authorizedKeys": [ED25519, RSA]}}
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.assertEqual(keys.read_text(), ED25519 + "\n" + RSA + "\n")
+        self.assertEqual(keys.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(keys.parent.stat().st_mode & 0o777, 0o700)
+        self.api.values = {}
+        worker.cycle()
+        self.assertEqual(keys.read_text(), "")
+
+    def test_devbox_keys_refuse_options_newlines_and_unknown_types(self):
+        keys = self.devbox()
+        for bad in ('command="sh" ' + ED25519, ED25519 + "\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoq",
+                    "ssh-dss AAAAB3NzaC1kc3MAAACBAP1", "ssh-ed25519 short", ED25519 + " bad;comment"):
+            self.assertEqual(fleetconf.sanitize({"devbox": {"authorizedKeys": [bad]}}), {}, bad)
+        self.assertEqual(fleetconf.sanitize({"devbox": {"authorizedKeys": [ED25519, ED25519]}}), {})
+        self.assertEqual(fleetconf.sanitize({"devbox": {"authorizedKeys": [ED25519] * 17}}), {})
+        self.api.values = {"devbox": {"authorizedKeys": ['command="sh" ' + ED25519]}}
+        self.make(role_token=ROLE_TOKEN).cycle()
+        self.assertEqual(keys.read_text(), "")
+
+    def test_devbox_keys_are_never_written_on_another_role_and_an_old_file_is_emptied(self):
+        keys = self.node.root / "nix/fleet-state/devbox/authorized_keys"
+        self.api.values = {"devbox": {"authorizedKeys": [ED25519]}}
+        self.make(role_token=ROLE_TOKEN).cycle()
+        self.assertFalse(keys.exists())
+        keys.parent.mkdir(parents=True)
+        keys.write_text(ED25519 + "\n")
+        self.make().cycle()
+        self.assertEqual(keys.read_text(), "")
 
 
 class OfflineTests(AgentCase):
@@ -897,7 +1204,7 @@ class OfflineTests(AgentCase):
         # It also reports the cached revision once the server is back.
         recovered = self.make()
         recovered.cycle()
-        self.assertEqual(self.heartbeats()[0]["agent"]["configRevision"], revision_of(values))
+        self.assertEqual(self.heartbeats()[0]["agent"]["desiredRevision"], revision_of(values))
         self.assertTrue(self.heartbeats()[0]["sync"]["paused"])
 
     def test_failures_back_off_exponentially_up_to_a_cap_and_reset_on_success(self):
@@ -950,7 +1257,7 @@ class OfflineTests(AgentCase):
         worker = self.make(role_token=ROLE_TOKEN)
         ok, _ = worker.cycle()
         self.assertTrue(ok, self.logs)
-        self.assertEqual(json.loads((self.node.state / "config.json").read_text())["revision"], revision_of({}))
+        self.assertEqual(json.loads((self.node.state / "config.json").read_text())["revision"], desired_revision({}, "ci", "ci"))
         self.assertIn("boot", [event["kind"] for event in self.heartbeats()[0]["events"]])
 
     def test_a_missing_node_file_waits_instead_of_crashing(self):
@@ -1001,7 +1308,7 @@ class SecretTests(AgentCase):
         lines = "\n".join(worker.status_lines())
         everything = "\n".join(self.logs) + lines
         for path in self.node.root.rglob("*"):
-            if path.is_file() and path.name not in ("node.secret", "role-token"):
+            if path.is_file() and path.name not in ("node.secret", "enrollment-token"):
                 everything += path.read_text(errors="replace")
         everything += "".join(json.dumps(event) for body in self.heartbeats() for event in body["events"])
         self.assertNotIn(secret, everything)
@@ -1038,14 +1345,16 @@ class CommandLineTests(AgentCase):
 
     def test_once_reports_over_real_http_and_status_never_prints_secrets(self):
         self.node.state.mkdir(parents=True)
-        (self.node.state / "role-token").write_text(ROLE_TOKEN + "\n")
+        (self.node.state / "enrollment-token").write_text(ROLE_TOKEN + "\n")
         done = self.run_cli("once")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("registration: approved", done.stdout)
         self.assertEqual(len(self.heartbeats()), 1)
         again = self.run_cli("status")
         self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertIn("role token: present", again.stdout)
+        self.assertIn("enrollment token: present", again.stdout)
+        self.assertIn("assigned: ci (ci)", again.stdout)
+        self.assertIn("target: ci (ci)", again.stdout)
         for text in (done.stdout + done.stderr, again.stdout + again.stderr):
             self.assertNotIn(self.secret(), text)
             self.assertNotIn(ROLE_TOKEN, text)

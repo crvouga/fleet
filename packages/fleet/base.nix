@@ -6,7 +6,6 @@ in {
   role = "base";
   flakeAttr = "base";
   inherit (shared) sshKeys bootGenerationLimit bootTries repo binaryCache reboot capacity drift disk monitoring fleetApi;
-  rotateAgeKey = false;
   # base decrypts nothing. Each role's own file is encrypted to the nodes the
   # controller assigned it.
   secretsFile = null;

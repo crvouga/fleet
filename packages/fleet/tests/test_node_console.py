@@ -158,6 +158,34 @@ class NodeConsoleTests(unittest.TestCase):
         self.assertIn("[!] Recovery a kernel update is quarantined", screen)
         self.assertIn("press Retry the update on the node's page in Fleet", screen)
 
+    def test_the_assigned_role_its_progress_and_the_public_age_recipient_are_shown(self):
+        (self.root / "etc/node.conf").write_text("role=ci\nflake_attr=ci\n")
+        screen = " ".join(self.node("status").stdout.split())
+        self.assertIn("[x] Role ci (ci)", screen)
+        self.assertIn("AGE RECIPIENT age1fixturepublickey", screen)
+        self.assertNotIn("reinstall", screen.lower())
+        (self.root / "state/target").write_text("role=devbox\nclosure=devbox\n")
+        (self.root / "run/reconcile.json").write_text(json.dumps({"phase": "progressing", "issues": []}))
+        screen = " ".join(self.node("status").stdout.split())
+        self.assertIn("[~] Role ci (ci) now; changing to devbox (devbox)", screen)
+        issue = ("FLEET_SECRETS_RECIPIENT_MISSING: age1fixturepublickey is not a recipient of secrets/devbox.yaml "
+                 "at c839ee0. Re-encrypt it for this node (GET /v1/recipients) and merge.")
+        (self.root / "run/reconcile.json").write_text(json.dumps({"phase": "blocked", "issues": [issue]}))
+        result = self.node("status", "--report")
+        screen = " ".join(result.stdout.split())
+        self.assertIn("STATUS PROBLEM. Age1fixturepublickey is not a recipient of secrets/devbox.yaml", screen)
+        self.assertIn("[!] Role ci (ci); devbox (devbox) is blocked", screen)
+        self.assertIn("adds this node's age recipient", screen)
+        self.assertNotIn("reinstall", screen.lower())
+
+    def test_a_base_node_without_a_role_says_so(self):
+        (self.root / "run/node").write_text("role=base\nhostname=base-a3f9\n")
+        (self.root / "etc/node.conf").write_text("role=base\nflake_attr=base\n")
+        (self.root / "etc/bootstrap.json").write_text(json.dumps({"version": 1, "github": None}))
+        screen = " ".join(self.node("status").stdout.split())
+        self.assertIn("a base node (no role yet)", screen)
+        self.assertIn("[-] Role base: no role yet; assign one in Fleet", screen)
+
     def test_the_console_unit_owns_tty1_and_replaces_the_one_shot_info(self):
         nix = (FLEET / "modules/console.nix").read_text()
         self.assertIn('systemd.services."getty@tty1".enable = false;', nix)

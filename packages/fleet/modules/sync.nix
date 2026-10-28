@@ -3,8 +3,17 @@
   configured = !(lib.hasInfix "TODO" repo.url);
   timerOn = (repo.timer or true) && configured;
   auth = repo.auth or "none";
-  gitKey = if auth == "ssh" then config.sops.secrets.git-read-key.path else "";
-  gitToken = if auth == "token" then config.sops.secrets.git-read-token.path else "";
+  # Every closure, base included, reads the Git read credential from one fixed
+  # path. The installer places it there (a node cannot decrypt anything before
+  # an operator makes it a SOPS recipient, and cannot fetch that change without
+  # a credential). A role whose secretsFile holds a newer credential refreshes
+  # the fixed copy, so rotation travels through Git. It is node identity, never
+  # cache: node_state.py keeps /nix/fleet-state/secrets across role changes.
+  credentialName = if auth == "ssh" then "git-read-key" else "git-read-token";
+  credential = "/nix/fleet-state/secrets/${credentialName}";
+  gitKey = if auth == "ssh" then credential else "";
+  gitToken = if auth == "token" then credential else "";
+  refreshed = auth != "none" && settings.secretsFile != null;
   tools = import ./fleet-tools.nix { inherit lib pkgs; };
 in {
   # comin is not in nixpkgs at the pinned revision 7c8764b7, so this timer is
@@ -19,8 +28,8 @@ in {
       message = "Every role polls main. There is no deploy or canary branch.";
     }
     {
-      assertion = auth == "none" || settings.secretsFile != null;
-      message = "repo.auth needs this role's secretsFile. Roles must not share that file. The role-less base closure has no secrets, so it can only follow a repository with repo.auth = \"none\".";
+      assertion = builtins.elem auth [ "none" "ssh" "token" ];
+      message = "repo.auth is none, ssh or token.";
     }
   ];
   environment.systemPackages = [
@@ -57,11 +66,27 @@ in {
     AGE_PUB=${lib.escapeShellArg "/nix/fleet-state/secrets/age.pub"}
     RECONCILE=${lib.escapeShellArg "/run/fleet/reconcile.json"}
     NODE_CONF=${lib.escapeShellArg "/etc/fleet/node.conf"}
+    REPO_AUTH=${lib.escapeShellArg auth}
   '';
-  sops.secrets = lib.mkIf (settings.secretsFile != null) (lib.mkMerge [
-    (lib.mkIf (auth == "ssh") { git-read-key = { mode = "0400"; }; })
-    (lib.mkIf (auth == "token") { git-read-token = { mode = "0400"; }; })
-  ]);
+  sops.secrets = lib.mkIf refreshed {
+    ${credentialName} = { mode = "0400"; restartUnits = [ "fleet-git-credential.service" ]; };
+  };
+  systemd.services.fleet-git-credential = lib.mkIf refreshed {
+    description = "Refresh the Git read credential from this role's secrets";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "fleet-sync.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; UMask = "0077"; };
+    path = [ pkgs.coreutils pkgs.diffutils ];
+    script = ''
+      set -eu
+      from=${config.sops.secrets.${credentialName}.path}
+      [ -s "$from" ] || exit 0
+      cmp -s "$from" ${credential} 2>/dev/null && exit 0
+      install -d -m 0700 /nix/fleet-state/secrets
+      install -m 0600 "$from" ${credential}.new
+      mv ${credential}.new ${credential}
+    '';
+  };
   systemd.services.fleet-sync = {
     description = "Converge this node to its assigned closure";
     after = [ "network-online.target" ];

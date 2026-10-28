@@ -58,6 +58,11 @@ _assignment_. A node never chooses its own role.
    kernel change: drain, `switch-to-configuration boot`, staggered reboot,
    boot-count fallback and health-checked rollback. The existing update
    safety (quarantine, drain gate, recovery outbox) applies unchanged.
+6. **Nodes are stateless.** A node only caches. Everything that matters lives
+   in Git (code, encrypted secrets) or in the controller (assignment,
+   settings). The only durable node data is its identity. Any node can be
+   wiped, reinstalled or replaced at any time and converges back to the same
+   desired state.
 
 ## Desired state
 
@@ -136,6 +141,25 @@ person what blocks convergence, e.g.
 5. Write `/run/fleet/reconcile.json` (`{ phase, issues, target, revision }`)
    for the agent to report.
 
+## Stateless nodes
+
+Root is tmpfs; `/nix` is the only disk a node writes. It holds three things:
+
+| Class        | Where                                                                                                 | Lifetime                       |
+| ------------ | ----------------------------------------------------------------------------------------------------- | ------------------------------ |
+| **System**   | `/nix/store`, `/nix/var`                                                                              | Nix's own; garbage collected   |
+| **Identity** | the allow-list `IDENTITY` in `scripts/node_state.py`: node credential, enrollment token, age identity, Git read credential, SSH host keys, Wi-Fi, target, desired-state cache, update and recovery records | until the disk is reinstalled  |
+| **Cache**    | everything else: `/nix/devbox`, `/nix/ci-cache`, `/nix/ci-state`, `/nix/fleet-code`, applied settings, **and anything undeclared** | until the role changes         |
+
+A role is an epoch. `fleet-node-state.service` runs at the first boot of a
+closure, before tmpfiles and any service, and compares the running role with
+`/nix/fleet-state/role-epoch`. When they differ it wipes every cache, records
+the new role and queues a `state-wiped` event. No role ever sees another
+role's data, and a module that forgets to declare its data cannot leak it,
+because the list names what is kept, not what is wiped. A wipe that fails
+leaves the old record, so the next boot tries again. A devbox workspace is a
+cache too: push your work.
+
 ## Secrets: per-node identities, role-scoped recipients
 
 Every node generates its own private age identity on first boot
@@ -152,7 +176,29 @@ key, never writes to Git and never changes GitHub settings. Role separation is
 preserved: a devbox's identity is not a recipient of the CI file.
 
 Nodes installed before this design keep their shared role key at the same
-path; its public key is already a recipient, so they keep converging.
+path; its public key is already a recipient, so they keep converging. Rotate
+them to their own identity with the procedure below.
+
+**Rotation is per node and level-triggered.** The setting
+`secrets.rotateAgeKeyAfter` (node page: **Rotate age identity**) asks every
+node whose identity is older than that time for a successor. The agent creates
+`age.next.key` on the node and reports only `ageRecipientNext`;
+`GET /v1/recipients` lists it as `next`. The operator re-encrypts the role's
+file for both recipients and merges. `fleet-sync` promotes the successor once
+the fetched file lists it (at once for a role without secrets), so a node never
+holds an identity its secrets cannot be decrypted with. After the node reports
+the new `ageRecipient`, remove the old recipient.
+
+**Private update repositories** (`repo.auth = "ssh" | "token"`). A new node
+cannot decrypt anything before the operator makes it a recipient, and cannot
+fetch that change without a credential. So the Git read credential is node
+identity at a fixed path (`/nix/fleet-state/secrets/git-read-key` or
+`git-read-token`, 0600), placed by the installer (`--git-credential-file` or a
+`FLEET-KEY` volume); the installer refuses to erase a disk without it. A role
+whose SOPS file holds the credential refreshes the fixed copy
+(`fleet-git-credential.service`), so a rotated credential reaches every
+assigned node through Git. Without it `fleet-sync` reports
+`FLEET_GIT_CREDENTIAL_MISSING` instead of failing to fetch on every poll.
 
 ## Installer
 
@@ -162,8 +208,9 @@ The installer is a disk tool, not a configuration tool:
 2. Select and confirm the internal disk (unchanged checks, expiry, checksum).
 3. Managed mode: register the hardware identity (no role) and wait for a person
    to approve it before erasing. Local mode: proceed without approval.
-4. Install `base` with `node.secret` and an optional enrollment token.
-   Nothing else; the age identity is created by the node on first boot.
+4. Install `base` with `node.secret`, an optional enrollment token and, for a
+   private update repository, the Git read credential. Nothing else; the age
+   identity is created by the node on first boot.
 5. Reboot. From here the controller decides.
 
 Removed from the installer: role choice (menus, prompts, flags, kernel
@@ -220,7 +267,8 @@ operator; that review remains the gate for credentials.
 | Node-claimed role in register and heartbeat                             | Controller-assigned `role`; reported `observed` |
 | Devbox key at install                                                   | `devbox.authorizedKeys` setting                 |
 | Per-role readiness/`installBlocked` on the image                        | Node-reported `reconcile.issues`                |
-| "Changing roles erases the disk"                                        | Role change = drained reboot into a new closure |
+| "Changing roles erases the disk"                                        | Drained reboot that wipes the old role's caches |
+| `rotateAgeKey` (one key shared through SOPS `age-key-next`)             | Per-node `secrets.rotateAgeKeyAfter`            |
 
 ## Rollout order
 
@@ -233,5 +281,28 @@ operator; that review remains the gate for credentials.
 4. Build and publish the new `base` installer. New machines install `base`
    and wait for assignment.
 
+The first boot with `fleet-node-state` records the running role without
+wiping (there is no other role's cache yet). Deployments that set
+`rotateAgeKey` fail evaluation with a message naming
+`secrets.rotateAgeKeyAfter`; remove it and the `age-key-next` secret.
+
 Reporting is best effort throughout: a v1 agent that the v2 controller refuses
 (`400`) keeps updating from Git and picks up the v2 agent on its next sync.
+
+**Phase 2** (after every node reports agent version 2): move
+`packages/fleet/roles.json` to `"version": 2` by deleting `installerDefault`
+and every closure's `installer` flag. It must wait: each node checks the
+fetched `roles.json` with the parser of the system it runs, and a version 1
+parser refuses version 2, which would stop that node's updates. Run
+`bun run roles:sync` afterwards.
+
+During step 3 a node's first desired document is computed from its copied
+role and its reported hardware. A `ci-gpu` node whose NVIDIA device is not
+detected would be assigned `ci` and reboot into it; check
+`hardware.capabilities` on the node pages before merging if you run GPU nodes.
+
+## Boundaries
+
+- **Local mode** (no controller) has no approval, recipients endpoint or fleet
+  view; `fleet-target` at each machine's console is its assignment source.
+  That is the design, not a gap: the controller is the system of record.
