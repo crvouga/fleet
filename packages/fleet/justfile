@@ -54,5 +54,6 @@ vm-test:
     nix build -L path:.#checks.x86_64-linux.native-vm
     nix build -L path:.#checks.x86_64-linux.lifecycle
     nix build -L path:.#checks.x86_64-linux.follow-up
+    nix build -L path:.#checks.x86_64-linux.runner-registration-vm
     nix build -L path:.#checks.x86_64-linux.cattle
     nix build -L path:.#checks.x86_64-linux.cattle-vm

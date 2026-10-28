@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { describeController } from '../support/describe-controller';
 import { nodeIdOf } from '../support/fixtures';
+import { adminConfirmed } from '../support/confirm';
 
 describeController('direct Fleet enrollment status', (ctx) => {
   test('a node polls its own approval using its private credential without re-registering', async () => {
@@ -30,7 +31,7 @@ describeController('direct Fleet enrollment status', (ctx) => {
       401
     );
     expect((await h.call('GET', '/v1/enrollment/status')).status).toBe(401);
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/reject`);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/reject`, 1);
     expect((await h.asNode(1, 'GET', '/v1/enrollment/status')).status).toBe(
       403
     );

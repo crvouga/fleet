@@ -12,6 +12,7 @@ import {
 import type { Telemetry } from '../telemetry';
 import type { FleetEntry } from '../ui/lib/fleet-data';
 import { runLink, telemetryFresh } from '../ui/lib/telemetry';
+import { TelemetryHealth } from './telemetry-health';
 import { TelemetryResources } from './telemetry-resources';
 import { TelemetryTable } from './telemetry-table';
 
@@ -34,6 +35,7 @@ export function NodeTelemetry({
     <Stack>
       <TelemetryHeader entry={entry} now={now} />
       <TelemetryResources sample={sample} />
+      <TelemetryHealth sample={sample} stale={!telemetryFresh(entry, now)} />
       <RunnerActivity sample={sample} />
       <TelemetryTable
         title="Service diagnostics"

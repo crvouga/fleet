@@ -3,7 +3,7 @@ import type { Context, Hono } from 'hono';
 import { emailAddress, type AccessStore } from '../auth/browser-contract';
 import type { AppDeps } from '../deps';
 
-import { adminRoute } from './guards';
+import { adminRoute, requireAdmin } from './guards';
 import { controllerError } from './http';
 
 /** The list browser sign-in consults, so an injected auth adapter stays authoritative. */
@@ -18,6 +18,25 @@ function unavailable(c: Context): Response {
     'access_unavailable',
     'This controller has no browser access list.'
   );
+}
+
+/**
+ * A change to who may sign in is audited by the access store in the same
+ * transaction. A refused revoke changes nothing, so the store writes no row:
+ * leave one here, because a failed attempt to remove access is worth seeing.
+ */
+async function recordRefusedRevoke(
+  deps: AppDeps,
+  actor: string,
+  email: string
+): Promise<void> {
+  await deps.store.audit({
+    actor,
+    action: 'access.revoke',
+    targetKind: 'access',
+    targetId: email,
+    outcome: 'failed',
+  });
 }
 
 function badEmail(c: Context): Response {
@@ -38,7 +57,9 @@ function badEmail(c: Context): Response {
 export function mountAdminAccess(app: Hono, deps: AppDeps): void {
   app.get(
     '/v1/access',
-    adminRoute(deps, async (c) => {
+    adminRoute(deps, async (c, actor) => {
+      const denied = await requireAdmin(deps, c, actor, 'access.read');
+      if (denied !== null) return denied;
       const store = storeOf(deps);
       if (!store) return unavailable(c);
       return c.json({ emails: await store.emails() });
@@ -62,13 +83,15 @@ export function mountAdminAccess(app: Hono, deps: AppDeps): void {
       if (!store) return unavailable(c);
       const email = emailAddress(c.req.param('email'));
       if (!email) return badEmail(c);
-      if (!(await store.revoke(email, actor)))
+      if (!(await store.revoke(email, actor))) {
+        await recordRefusedRevoke(deps, actor, email);
         return controllerError(
           c,
           409,
           'cannot_revoke',
           'Cannot remove the final allowed account, or that email is not listed.'
         );
+      }
       return c.json({ email, allowed: false });
     })
   );

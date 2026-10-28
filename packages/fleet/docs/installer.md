@@ -103,6 +103,25 @@ Parts support resumable downloads of the offline image. Do
 not write a `.part-*` file to a USB disk; let the wizard finish the download and
 verification first.
 
+## Bound to your Fleet app
+
+The Fleet app can bind the installer you download to itself, so nobody has to
+copy an enrollment token or type the app's address. Under **Add node → Bind the
+installer to this app**, an administrator creates a **single-use, expiring
+enrollment grant** (default 24 hours, at most 7 days; optional label; optional
+role) and the browser saves `fleet-bind.json`. Put it next to the installer, or
+leave it in Downloads. The wizard finds it by itself.
+
+- It names the issuing app's origin. The wizard downloads the installer only from that origin and **refuses** any other: a different address in the form, `FLEET_CONTROLLER_URL`, or an image from elsewhere stops with "this installer is bound to …".
+- It is signed (HMAC-SHA256) by a secret only that app holds. The wizard cannot check the signature offline, so at review time it asks the app, read-only, whether the grant is valid. An expired, revoked, modified or foreign binding is refused before anything is erased, with what to do next.
+- The grant becomes the enrollment token of the live installer through the same private handoff as a pasted token; it is never shown, logged or put in arguments. A token you paste yourself takes precedence.
+- **This computer** only: a USB stick carries no grant (a USB lives for a long time and is easy to copy); the computer booted from it is approved under Pending as before.
+- The single-use rule: the first computer to register with the grant is bound to it. A copy of the file cannot enroll a second machine: that one waits under Pending and both nodes get a warning event. The same machine may retry (an interrupted install) until the grant expires.
+- Without a role, the grant only identifies the install: a person still approves the computer. With a role chosen by the administrator, the computer is approved with that role automatically.
+- Treat `fleet-bind.json` as a credential until it is used or expires; delete it afterwards. The app keeps only a hash and cannot show it again: revoke and create another.
+
+Threat model, API and what is not protected: [installer enrollment](../../fleet-controller/docs/installer-enrollment.md).
+
 ## 2. Open it
 
 New packaged builds include a public CA bundle in addition to the operating
@@ -256,13 +275,20 @@ erasing. A retry reuses the same credential during that live boot, and the
 installed system receives that private credential. Then assign its role in the
 app. Without a configured controller (local mode) there is no approval step.
 
+After approval, **Pending** in the Fleet app shows **Installations in progress**:
+the step (network, approval, checks, disk, erase, install), the last report, the
+last error with what to do next, whether anything has been erased yet, and a
+warning when the installer has been silent for ten minutes. Progress is best
+effort, redacted and bounded; it never changes whether a disk operation is safe.
+See [installer enrollment](../../fleet-controller/docs/installer-enrollment.md).
+
 The installer never handles age keys. The node creates its own age identity on
 first boot and reports its public recipient to Fleet. The operator encrypts
 role secrets to it; until then the node reports the missing recipient.
 
 ## Enrollment token
 
-A token is optional. It lets Fleet approve the computer without a person; if
+A token is optional (and the [installer binding](#bound-to-your-fleet-app) replaces pasting one). It lets Fleet approve the computer without a person; if
 the operator's token entry names a role, Fleet also assigns that role. When a
 token is present the live installer checks it with Fleet before erasing.
 It is never printed and never put on a kernel command line or in arguments.
@@ -308,6 +334,78 @@ for the first run.
 The five downloads are for the computer making the USB, not five node architectures. Nodes currently require x86-64, UEFI, supported Wi-Fi or Ethernet networking and one unambiguous internal disk; Apple silicon and ARM boards can make install media but cannot become fleet nodes. The ordinary Linux downloads require glibc; Alpine/musl and old Linux distributions are not supported. NixOS uses the native Nix package on x86-64 or ARM64; it does not need a foreign ELF loader. macOS installations use a USB and require a physical firmware boot. Windows converts itself but needs Secure Boot turned off once. The wizard cannot automate firmware settings, hardware replacement, or unsigned-app approval. No claim of universal hardware support is made.
 
 An interrupted USB write leaves an incomplete stick. Keep it plugged in, restart the wizard and write the whole image again; it never reports that stick as ready before verification passes. A reinstall erases the old OS and files.
+
+## Hardware support tiers
+
+Before it changes anything the wizard (and again the privileged step and the live
+installer, each from fresh facts) classifies the target as `supported`,
+`partially automated` or `unsupported`. One pure function does it
+(`classify_hardware` in `scripts/decide.py`) and the same table is shown in the
+Fleet app under Add node.
+
+- **supported**: every check passed and the installer does the work. You confirm the disk.
+- **partially automated**: it can proceed, but a limitation remains that the installer cannot remove or verify (a firmware setting, a recovery key, an unverifiable Wi-Fi driver). The review page names each limitation and the exact acknowledgement you must tick; the installer refuses to start without it. A failing check in this tier (Secure Boot on, no free space) still blocks until you fix it and press **Check again**.
+- **unsupported**: in-place install is **refused**, not warned about: the wizard cannot start it, the privileged helper refuses it again, and the live installer stops before registering or erasing. The review says what to do instead (usually make an install USB).
+
+<!-- hardware-matrix:start -->
+| Computer | Becomes a node | Makes install USB |
+| -------- | -------------- | ----------------- |
+| Windows x64 (UEFI, GPT, Secure Boot off) | supported | supported |
+| Windows x64 with Secure Boot on, unreadable Secure Boot, BitLocker, RAID/VMD or battery | partially automated | supported |
+| Windows with legacy BIOS, MBR, dynamic disk, no EFI partition or more than one internal disk | unsupported | supported |
+| Linux x64 (UEFI) with kexec or an installable kexec-tools | supported | supported |
+| Linux x64 with Wi-Fi as the only network | partially automated | supported |
+| Linux without kexec that cannot be prepared, or an unsupported staging filesystem | unsupported | supported |
+| NixOS x64 | supported | supported |
+| macOS (Intel or Apple silicon) | unsupported | supported |
+| Linux or NixOS ARM64, other ARM | unsupported | supported |
+| Any machine with less RAM than the image plus 2 GiB | unsupported | supported |
+<!-- hardware-matrix:end -->
+
+The USB column is the machine that only writes the stick. The computer you boot
+the stick on is classified by the live installer when it starts, from what it can
+see there (architecture, UEFI, RAM, and whether any network adapter has a
+driver); anything unsupported stops it with `FLEET_HARDWARE_UNSUPPORTED` before
+it registers or erases. A partial verdict there is logged and reported to the
+Fleet app with the progress.
+
+| Code | Tier | Meaning and what to do |
+| ---- | ---- | ---------------------- |
+| `arch-not-x86-64` | unsupported | The computer is ARM or another architecture. It can make a USB for an x86-64 computer, not become a node. |
+| `firmware-not-uefi` | unsupported | Booted in legacy BIOS or the mode is unknown. Turn on UEFI and turn off CSM, or use another computer. |
+| `ram-below-minimum` | unsupported | Less RAM than the image plus 2 GiB. The image runs from memory; add RAM. A USB cannot help. |
+| `disk-not-gpt` | unsupported | The Windows system disk is MBR. Only GPT/UEFI converts in place; make a USB. |
+| `windows-dynamic-disk` | unsupported | A Windows dynamic disk cannot be resized in place. |
+| `unsupported-sector-size` | unsupported | Only 512-byte and 4096-byte sectors work. |
+| `no-efi-partition` | unsupported | Windows has no EFI system partition on its disk. |
+| `ambiguous-system-disk` | unsupported | Windows runs from a different disk than the one that would be erased. Disconnect the other internal disks. |
+| `no-boot-tool` | unsupported | Linux without `kexec` that the installer cannot add. Make a USB. |
+| `unsupported-staging-filesystem` | unsupported | The image would be staged on a filesystem the live initrd cannot mount (for example NTFS or APFS). Make a USB. |
+| `windows-cannot-shrink` | unsupported | Windows cannot give up enough space even after one consolidation. |
+| `usb-too-small` | unsupported | The USB stick cannot hold the image. |
+| `no-network-driver` | unsupported | Live installer only: every network adapter it sees has no driver in the image. Plug in a supported Ethernet adapter or tether a phone over USB. |
+| `os-cannot-restart-into-installer` | unsupported | macOS (and any OS that is not Windows or Linux) cannot restart into the installer. Make a USB. |
+| `multiple-internal-disks` | unsupported | More than one internal disk: the installer never guesses. Disconnect the extra disk. |
+| `no-eligible-internal-disk` | unsupported | No fixed internal disk (USB, removable and hotplug disks are never erased). |
+| `secure-boot-on` | partially automated | Secure Boot is on and the loader is unsigned. Turn it off once in the firmware, then check again. |
+| `secure-boot-unknown` | partially automated | Windows would not say whether Secure Boot is on. If the installer does not start, turn it off. |
+| `staging-space` | partially automated | Not enough free space to hold the image. Free space and check again. |
+| `installer-unreachable` | partially automated | The installer release cannot be downloaded yet. |
+| `job-running` | partially automated | A CI job is running on this node. Wait for it. |
+| `raid-or-vmd-controller` | partially automated | The disk is behind a RAID/Intel RST/VMD controller that Linux cannot see; switch to AHCI or make a USB. |
+| `leftover-linux-partition` | partially automated | An earlier installer left a Linux partition on the Windows disk; delete it so only one copy exists. |
+| `bitlocker-recovery-key` | partially automated | BitLocker is on: save the recovery key on another device first. |
+| `running-on-battery` | partially automated | Plug in power; a cut while partitions change needs the recovery steps. |
+| `wifi-driver-unverified` | partially automated | Wi-Fi is the only network detected. Whether the image has a driver for this adapter cannot be known before it boots; with no connection it waits and erases nothing. Prefer Ethernet. |
+| `linux-boot-tool-install` | supported (automated) | `kexec-tools` is installed once with the system's package manager. |
+| `windows-free-space-consolidation` | supported (automated) | Windows free space is consolidated once and measured again. |
+| `media-only` | supported | This computer only writes an install USB. |
+
+An unknown failing check is never `supported`: it classifies as partially
+automated and keeps its own advice. Unknown warnings do not change the tier.
+Nothing here weakens an existing guard: internal/removable disk checks,
+confirmation expiry, image checksum verification, rollback and secret redaction
+are unchanged.
 
 ## When something goes wrong
 

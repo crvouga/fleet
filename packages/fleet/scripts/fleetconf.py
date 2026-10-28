@@ -46,6 +46,7 @@ SPEC = {
     "sync.paused": ("bool",),
     "sync.retryBootAfter": _int(0, 4102444800),
     "secrets.rotateAgeKeyAfter": _int(0, 4102444800),
+    "maintenance.restartAfter": _int(0, 4102444800),
     "reboot.enabled": ("bool",),
     "reboot.delayMaxSeconds": _int(0, 86400),
     "disk.alertPercent": _int(50, 99),

@@ -22,13 +22,17 @@ import {
 import { desiredFor, intervalOf, loadConfig } from './node-config';
 import { validateRegister } from './register-body';
 import { enrollmentCheck } from './enrollment-check';
+import { mountEnrollmentGrants } from './enrollment-grants';
+import { registerEnrolled } from '../enrollment/service';
+import { settleOperations } from '../operations/reconcile';
+import { credentialHint, recordDesiredBestEffort } from './credential-hint';
 
 export interface NodeRouteOptions {
   readonly registerLimiter: RateLimiter;
   readonly log: Logger;
 }
 
-type Authenticated =
+export type Authenticated =
   | { readonly node: NodeRow }
   | {
       readonly response: Response;
@@ -37,7 +41,10 @@ type Authenticated =
     };
 
 /** 401 for an unknown id or wrong secret; 403 only to a caller that holds the secret. */
-async function authenticate(c: Context, deps: AppDeps): Promise<Authenticated> {
+export async function authenticate(
+  c: Context,
+  deps: AppDeps
+): Promise<Authenticated> {
   const credential = parseNodeCredential(c.req.header('authorization'));
   if (credential === null) {
     return {
@@ -100,7 +107,7 @@ function register(deps: AppDeps, log: Logger) {
         }
       );
     }
-    const { node, created } = await deps.store.registerNode({
+    const { node, created } = await registerEnrolled(deps, enrollmentToken, {
       id: nodeId,
       hostname,
       secretHash: sha256Hex(secret),
@@ -189,13 +196,20 @@ function heartbeat(deps: AppDeps) {
         `This node is ${node.approval}. Back off and ask a person.`
       );
     }
-    const desired = desiredFor(node, await loadConfig(deps.store, node));
+    // Operations settle first, so intent recorded now reaches this response.
+    const settled = await settleOperations(deps, node);
+    const desired = desiredFor(settled, await loadConfig(deps.store, settled));
     const current = read.report.agent.desiredRevision === desired.revision;
+    // Desired history and the credential flag are additive and best effort:
+    // neither may make a heartbeat fail.
+    await recordDesiredBestEffort(deps, node.id, desired);
+    const credential = await credentialHint(deps, node.id);
     return c.json({
       ok: true,
       status: node.approval,
       serverTime: now.toISOString(),
       ...(current ? {} : { desired }),
+      ...credential,
     });
   };
 }
@@ -222,6 +236,7 @@ export function mountNodeRoutes(
   deps: AppDeps,
   options: NodeRouteOptions
 ): void {
+  mountEnrollmentGrants(app, deps);
   app.post(
     '/v1/enrollment/check',
     rateLimitGuard(options.registerLimiter),

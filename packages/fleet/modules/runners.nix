@@ -3,9 +3,17 @@
   # cattle.py writes to /run/fleet/slot-count for the live CPU and RAM.
   slots = settings.capacity.slotMax;
   tools = import ./fleet-tools.nix { inherit lib pkgs; };
-  hasTarget = if settings.github.scope == "organization"
+  # GitHub access belongs to the fleet controller (docs/github-runners.md in
+  # packages/fleet-controller): a node asks it for a short-lived registration
+  # token with its own credential, so no GitHub App key has to be on the node.
+  # settings/github.json is the legacy per-machine path and may stay empty.
+  controllerUrl = (settings.fleetApi or { }).url or "";
+  controllerManaged = controllerUrl != "" && !(lib.hasInfix "TODO" controllerUrl);
+  # runner_control.py sends no repository for this target: the controller chooses.
+  placeholderTarget = "fleet-controller/unassigned";
+  hasTarget = controllerManaged || (if settings.github.scope == "organization"
     then settings.github.organization != ""
-    else settings.github.repositories != [ ];
+    else settings.github.repositories != [ ]);
   # Templates have no credentials or runner targets. Do not fabricate a scope.
   ids = lib.optionals hasTarget (map (n: "slot-${toString n}") (lib.range 1 slots));
   # The NixOS module applies `pkg.override { nodeRuntimes }`.
@@ -33,20 +41,30 @@
         if [ -z "$extra" ]; then extra=$line; else extra="$extra,$line"; fi
       done < /run/fleet/runner-labels
     fi
-    # The repository the fleet controller assigned to this slot. The registration step
-    # records the one it used in /run/fleet/assign-used/<slot>, so the token and
-    # the URL always name the same repository. No record: the settings.github scope.
+    # The repository (or organization) the fleet controller assigned to this slot.
+    # The registration step records the one it used in /run/fleet/assign-used/<slot>,
+    # so the token and the URL always name the same target. No record: the
+    # settings.github scope. A runner group exists for an organization only; the
+    # controller's choice is recorded in /run/fleet/assign-group/<slot>.
     repo=""
+    group=""
     used=/run/fleet/assign-used/''${FLEET_SLOT:-none}
     if [ -s "$used" ]; then
       read -r repo < "$used" || true
-      repo_pattern='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+      repo_pattern='^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$'
       if ! [[ "$repo" =~ $repo_pattern ]]; then repo=""; fi
+    fi
+    groupfile=/run/fleet/assign-group/''${FLEET_SLOT:-none}
+    if [ -n "$repo" ] && [ -s "$groupfile" ]; then
+      read -r group < "$groupfile" || true
+      group_pattern='^[A-Za-z0-9 _.-]{1,64}$'
+      if ! [[ "$group" =~ $group_pattern ]]; then group=""; fi
     fi
     if [ -z "$extra" ] && [ -z "$repo" ]; then
       exec "$real" "$@"
     fi
     args=()
+    have_group=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --labels)
@@ -68,11 +86,17 @@
           ;;
         # A runner group exists for an organization only; a repository has none.
         --runnergroup)
-          if [ -z "$repo" ]; then args+=("$1" "$2"); fi
+          have_group=1
+          if [[ "$repo" == */* ]]; then :
+          elif [ -n "$group" ]; then args+=("$1" "$group")
+          else args+=("$1" "$2"); fi
           shift 2
           ;;
         --runnergroup=*)
-          if [ -z "$repo" ]; then args+=("$1"); fi
+          have_group=1
+          if [[ "$repo" == */* ]]; then :
+          elif [ -n "$group" ]; then args+=("--runnergroup=$group")
+          else args+=("$1"); fi
           shift
           ;;
         *)
@@ -81,9 +105,11 @@
           ;;
       esac
     done
+    if [ -n "$group" ] && [ "$have_group" = 0 ]; then args+=(--runnergroup "$group"); fi
     exec "$real" "''${args[@]}"
   '') {};
   scopeFor = n: if settings.github.scope == "organization" then settings.github.organization
+    else if settings.github.repositories == [ ] then placeholderTarget
     else builtins.elemAt settings.github.repositories (lib.mod (n - 1) (builtins.length settings.github.repositories));
   token = if registrationProvider != null then registrationProvider else pkgs.writeScript "fleet-token" ''#!${pkgs.python3.withPackages (p: [ p.pyjwt p.cryptography ])}/bin/python3
 ${builtins.readFile ../scripts/runner_control.py}
@@ -105,6 +131,8 @@ ${builtins.readFile ../scripts/runner_control.py}
     used=/run/fleet/assign-used
     ${pkgs.coreutils}/bin/install -d -m 0755 "$used"
     ${pkgs.coreutils}/bin/rm -f "$used/${id}"
+    ${pkgs.coreutils}/bin/install -d -m 0755 /run/fleet/assign-group
+    ${pkgs.coreutils}/bin/rm -f "/run/fleet/assign-group/${id}"
     repo=""
     if [ -s "/run/fleet/assign/${id}" ]; then
       read -r repo < "/run/fleet/assign/${id}" || true
@@ -123,6 +151,15 @@ ${builtins.readFile ../scripts/runner_control.py}
       && ${pkgs.coreutils}/bin/readlink -f /run/current-system > /run/fleet/${id}/system; } 2>/dev/null || true
     # The outcome, public text only, for the console screen and readiness.
     export FLEET_REGISTER_STATUS=/run/fleet/register/${id}.json
+    # With a fleet controller address the token comes from the controller, using
+    # this node's own credential (/nix/fleet-state/agent/node.secret). The
+    # controller records the target it chose in assign-used (and the runner
+    # group in assign-group) for the Runner.Listener wrapper. A node that still
+    # has the legacy GitHub App key file registers directly, as before.
+    export FLEET_API_URL=${lib.escapeShellArg controllerUrl}
+    export FLEET_SLOT=${id}
+    export FLEET_ASSIGN_USED_FILE="$used/${id}"
+    export FLEET_ASSIGN_GROUP_FILE=/run/fleet/assign-group/${id}
     exec ${token} register "$scope" "$target" ${lib.escapeShellArgs [ settings.github.appId settings.github.installationId "/run/secrets/github-app-key" "/run/fleet/tokens/${id}" ]}
   '';
   targets = if settings.github.scope == "organization" then [ settings.github.organization ] else settings.github.repositories;
@@ -165,6 +202,7 @@ in {
     { assertion = slots >= 1 && slots <= 64; message = "Fleet slots must be 1..64."; }
     { assertion = builtins.elem settings.github.scope [ "organization" "repository" ]; message = "Invalid GitHub scope."; }
     { assertion = settings.github.scope != "repository" || builtins.length settings.github.repositories > 0
+        || controllerManaged
         || (settings.github.appId == "" && settings.github.installationId == "" && settings.secretsFile == null);
       message = "Repository registration needs at least one owner/repo."; }
   ];
@@ -225,6 +263,18 @@ in {
       DOCKER_HOST = "unix:///run/user/${toString (2000 + lib.lists.findFirstIndex (x: x == id) 0 ids)}/podman/podman.sock";
     };
     serviceOverrides = {
+      # Resource control, the systemd equivalent of Kubernetes requests/limits
+      # and priority classes without a second scheduler: every slot lives in one
+      # slice that is capped below the machine's memory (so a runaway job cannot
+      # starve fleet-agent or fleet-sync), shares CPU and I/O fairly, and is the
+      # first thing the kernel OOM killer chooses. Absolute per-slot memory
+      # limits are not set: the slot count is derived at boot from the live CPU
+      # and RAM (cattle.py), which Nix cannot know at evaluation time.
+      Slice = "fleet-ci.slice";
+      CPUWeight = 100;
+      IOWeight = 100;
+      TasksMax = 16384;
+      OOMScoreAdjust = 500;
       Restart = lib.mkForce "always";
       RestartSec = "15s";
       UMask = lib.mkForce "0077";
@@ -245,6 +295,19 @@ in {
       NoNewPrivileges = lib.mkForce false;
     };
   }) ids);
+  # The shared cgroup of every runner slot (see serviceOverrides). MemoryHigh
+  # throttles before MemoryMax kills, and both leave headroom for the system.
+  systemd.slices.fleet-ci = lib.mkIf (ids != [ ]) {
+    description = "Fleet CI runner slots";
+    sliceConfig = {
+      CPUAccounting = true;
+      MemoryAccounting = true;
+      IOAccounting = true;
+      TasksAccounting = true;
+      MemoryHigh = "88%";
+      MemoryMax = "92%";
+    };
+  };
   systemd.services = builtins.listToAttrs (lib.imap1 (n: id: lib.nameValuePair "github-runner-${id}" {
     wantedBy = lib.mkForce [ ];
     requires = [ "node-identity.service" ];

@@ -55,4 +55,37 @@ describe('recovery operations are audited node settings', () => {
     );
     expect(missing.headers.get('location')).toBe('/nodes');
   });
+
+  test('a settings edit that lands between read and write is not overwritten', async () => {
+    const { app, deps } = populated();
+    const scope = `node:${IDS.online}` as const;
+    await deps.store.putSettings(scope, { sync: { paused: true } }, 'someone');
+    // Another administrator saves right after this action reads the document.
+    const read = deps.store.getSettings.bind(deps.store);
+    let raced = false;
+    deps.store.getSettings = async (requested) => {
+      const row = await read(requested);
+      if (requested === scope && !raced) {
+        raced = true;
+        await deps.store.putSettings(
+          scope,
+          { sync: { paused: false }, runners: { cordoned: true } },
+          'other-admin',
+          row?.revision
+        );
+      }
+      return row;
+    };
+    const res = await post(app, `/nodes/${IDS.online}/recovery/retry-update`);
+    expect(res.status).toBe(303);
+    const saved = (await read(scope))?.value as Record<
+      string,
+      Record<string, unknown>
+    >;
+    // The other administrator's document survives; the action asked to retry.
+    expect(saved['runners']?.['cordoned']).toBe(true);
+    expect(saved['sync']?.['retryBootAfter']).toBeUndefined();
+    const audit = await deps.store.listAudit({ limit: 5 });
+    expect(audit.some((row) => row.outcome === 'failed')).toBe(true);
+  });
 });

@@ -1,5 +1,7 @@
 import type {
   Approval,
+  AuditOutcome,
+  AuditRow,
   Capability,
   EnrolledVia,
   EventRow,
@@ -25,6 +27,7 @@ const APPROVALS: readonly Approval[] = [
   'rejected',
   'retired',
 ];
+const AUDIT_OUTCOMES: readonly AuditOutcome[] = ['success', 'denied', 'failed'];
 const SEVERITIES: readonly Severity[] = ['info', 'warn', 'error'];
 const ENROLLED: readonly EnrolledVia[] = [
   'enrollment-token',
@@ -212,6 +215,7 @@ export function toSettingsRow(row: Row): SettingsRow {
     value: jsonObject(row, 'value'),
     updatedAt: dateOf(row, 'updated_at'),
     updatedBy: textOrNull(row, 'updated_by'),
+    revision: numberOf(row, 'revision'),
   };
 }
 
@@ -229,4 +233,19 @@ export function telemetryOrNull(row: Row, key: string): Telemetry | null {
   const raw = row[key];
   const sample = telemetryOf(typeof raw === 'string' ? JSON.parse(raw) : raw);
   return sample ? compactTelemetry(sample) : null;
+}
+
+export function toAuditRow(row: Row): AuditRow {
+  return {
+    id: numberOf(row, 'id'),
+    at: dateOf(row, 'at'),
+    actor: text(row, 'actor'),
+    actorRole: textOrNull(row, 'actor_role'),
+    action: text(row, 'action'),
+    targetKind: text(row, 'target_kind'),
+    targetId: textOrNull(row, 'target_id'),
+    outcome: oneOf(row, 'outcome', AUDIT_OUTCOMES),
+    requestId: textOrNull(row, 'request_id'),
+    detail: jsonObject(row, 'detail'),
+  };
 }

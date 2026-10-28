@@ -4,6 +4,7 @@ import type { RegisterInput, NodePatch } from '../store';
 import type { Approval, Role } from '../types';
 
 import type { Db } from './client';
+import { isRevoked, settleRegistration } from './credential-queries';
 import { text, type Row } from './rows';
 
 export async function selectNode(
@@ -45,8 +46,14 @@ export async function selectNodeWithSecret(
  */
 export async function upsertNode(
   db: Db,
-  input: RegisterInput
+  given: RegisterInput
 ): Promise<{ row: Row; created: boolean }> {
+  // A node whose credential was revoked never comes back approved by itself,
+  // not even with an enrollment token: a person decides.
+  const revoked = await isRevoked(db, given.id);
+  const input: RegisterInput = revoked
+    ? { ...given, approval: 'pending', tokenRole: null, enrolledVia: 'hello' }
+    : given;
   const created = (await selectNode(db, input.id, false)) === null;
   const approved = input.approval === 'approved';
   const approvedBy = approved ? input.enrolledVia : null;
@@ -80,6 +87,7 @@ export async function upsertNode(
     returning *`;
   const row = rows[0];
   if (row === undefined) throw new Error('node upsert returned no row');
+  await settleRegistration(db, input.id, revoked);
   return { row, created };
 }
 
@@ -146,6 +154,18 @@ export async function selectDue(
       and coalesce(last_seen_at, approved_at, first_seen_at)
           < ${new Date(now.getTime() - seconds * 1000).toISOString()}
     order by id`;
+}
+
+export async function claimNotified(
+  db: Db,
+  id: string,
+  at: Date
+): Promise<boolean> {
+  const rows = await db`
+    update nodes set offline_notified_at = ${at.toISOString()}
+    where id = ${id} and offline_notified_at is null
+    returning id`;
+  return rows.length > 0;
 }
 
 export async function updateNotified(

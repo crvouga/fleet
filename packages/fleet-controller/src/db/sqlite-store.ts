@@ -1,7 +1,15 @@
 import type { FleetConfig, Scope } from '../config/schema';
-import type { NodePatch, RegisterInput, Store, EventQuery } from '../store';
+import type {
+  AuditQuery,
+  NodePatch,
+  RegisterInput,
+  Store,
+  EventQuery,
+} from '../store';
 import type {
   Approval,
+  AuditInput,
+  AuditRow,
   EventInput,
   EventRow,
   HeartbeatBody,
@@ -12,6 +20,26 @@ import type {
   SettingsRow,
 } from '../types';
 
+import type {
+  CredentialResult,
+  CredentialStatus,
+} from '../domain/credential-rotation';
+import type {
+  DesiredHistoryRow,
+  DesiredSnapshot,
+} from '../domain/desired-history';
+
+import { insertAudit, selectAudit } from './audit-queries';
+import {
+  requestFor,
+  revokeFor,
+  statusFor,
+  submitNextFor,
+  verifySecret,
+} from './credential-store';
+import { recordDesired, selectDesiredHistory } from './desired-history-queries';
+import { SqliteOperations } from './sqlite-operations';
+import { SqliteGrants } from './enrollment-grants';
 import type { Db } from './client';
 import { insertEvent, selectEvents } from './event-queries';
 import { deleteOlder, selectPoints, storeHeartbeat } from './heartbeat-queries';
@@ -20,8 +48,8 @@ import {
   selectDue,
   selectNode,
   selectNodes,
-  selectNodeWithSecret,
   updateApproval,
+  claimNotified,
   updateNotified,
   updatePatch,
   updateRole,
@@ -40,7 +68,13 @@ const labelOf = (node: NodeRow): string => node.displayName ?? node.hostname;
 
 /** The single-node SQLite storage implementation. */
 export class SqliteStore implements Store {
-  constructor(private readonly db: Db) {}
+  readonly operations: SqliteOperations;
+  readonly grants: SqliteGrants;
+
+  constructor(private readonly db: Db) {
+    this.operations = new SqliteOperations(db);
+    this.grants = new SqliteGrants(db);
+  }
 
   async health(): Promise<void> {
     // Readiness includes the additive schema required by heartbeat ingestion.
@@ -74,8 +108,43 @@ export class SqliteStore implements Store {
     id: string,
     secretHash: string
   ): Promise<NodeRow | null> {
-    const row = await selectNodeWithSecret(this.db, id, secretHash);
+    // The current secret, or the live next secret of a rotation (promoted here).
+    const row = await verifySecret(this.db, id, secretHash, new Date());
     return row === null ? null : toNodeRow(row);
+  }
+
+  credentialStatus(id: string): Promise<CredentialStatus | null> {
+    return statusFor(this.db, id, new Date());
+  }
+
+  requestCredentialRotation(id: string): Promise<CredentialResult<'revoked'>> {
+    return requestFor(this.db, id, new Date());
+  }
+
+  submitNextCredential(
+    id: string,
+    nextHash: string
+  ): Promise<CredentialResult<'revoked' | 'not_requested' | 'same_secret'>> {
+    return submitNextFor(this.db, id, nextHash, new Date());
+  }
+
+  revokeCredential(id: string): Promise<CredentialResult> {
+    return revokeFor(this.db, id, new Date());
+  }
+
+  recordDesired(
+    nodeId: string,
+    desired: DesiredSnapshot,
+    cause?: string
+  ): Promise<boolean> {
+    return recordDesired(this.db, { nodeId, desired, cause, now: new Date() });
+  }
+
+  desiredHistory(
+    nodeId: string,
+    limit: number
+  ): Promise<readonly DesiredHistoryRow[]> {
+    return selectDesiredHistory(this.db, nodeId, limit);
   }
 
   async listNodes(): Promise<readonly NodeRow[]> {
@@ -211,9 +280,12 @@ export class SqliteStore implements Store {
   putSettings(
     scope: Scope,
     value: FleetConfig,
-    actor: string
+    actor: string,
+    expectedRevision?: number
   ): Promise<SettingsRow> {
-    return this.db.begin((tx) => upsertSettings(tx, scope, value, actor));
+    return this.db.begin((tx) =>
+      upsertSettings(tx, scope, value, { actor, expectedRevision })
+    );
   }
 
   settingsHistory(
@@ -223,11 +295,23 @@ export class SqliteStore implements Store {
     return selectHistory(this.db, scope, limit);
   }
 
+  audit(entry: AuditInput): Promise<void> {
+    return insertAudit(this.db, entry);
+  }
+
+  listAudit(query: AuditQuery): Promise<readonly AuditRow[]> {
+    return selectAudit(this.db, query);
+  }
+
   async nodesDueOfflineNotice(
     now: Date,
     offlineAfterSeconds: number
   ): Promise<readonly NodeRow[]> {
     return (await selectDue(this.db, now, offlineAfterSeconds)).map(toNodeRow);
+  }
+
+  claimOfflineNotice(id: string, at: Date): Promise<boolean> {
+    return claimNotified(this.db, id, at);
   }
 
   setOfflineNotified(id: string, at: Date | null): Promise<void> {

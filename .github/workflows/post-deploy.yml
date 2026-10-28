@@ -1,0 +1,81 @@
+name: Post-deploy check
+# Read-only gate for a deployed Fleet controller: /health, the admin boundary, the
+# authenticated API, the schema-3 endpoints and the GitHub integration status
+# (packages/fleet-controller/scripts/post-deploy-check.ts).
+#
+# The deploy is a repository_dispatch to the infrastructure repository (publish.yml:
+# `notify_deploy`), so it finishes outside this repository and publish.yml does not
+# call this workflow. Run it after the deploy finished, either by hand (Actions >
+# Post-deploy check > Run workflow) or from a workflow that knows the deploy is done:
+#
+#   post-deploy:
+#     needs: deploy
+#     uses: crvouga/fleet/.github/workflows/post-deploy.yml@main
+#     secrets: inherit        # passes FLEET_ADMIN_TOKEN
+#     with:
+#       require_github: false
+#
+# Configuration (repository settings, never in the workflow file):
+#   variable FLEET_CONTROLLER_URL   https address of the controller
+#   secret   FLEET_ADMIN_TOKEN      the controller's admin token
+# Without both, the job succeeds with a notice and checks nothing.
+#
+# Hosted runners only, no pull request trigger: the secret is never reachable from a fork.
+on:
+  workflow_dispatch:
+    inputs:
+      require_github:
+        description: Fail unless the GitHub integration is connected
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      require_github:
+        description: Fail unless the GitHub integration is connected
+        type: boolean
+        default: false
+    secrets:
+      FLEET_ADMIN_TOKEN:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: post-deploy-${{ github.workflow }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  check:
+    name: Check deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FLEET_URL: ${{ vars.FLEET_CONTROLLER_URL }}
+      FLEET_ADMIN_TOKEN: ${{ secrets.FLEET_ADMIN_TOKEN }}
+      REQUIRE_GITHUB: ${{ inputs.require_github }}
+    steps:
+      - name: Decide whether this repository is configured for the check
+        id: config
+        run: |
+          if [ -z "$FLEET_URL" ] || [ -z "$FLEET_ADMIN_TOKEN" ]; then
+            echo "::notice title=Post-deploy check skipped::Set the repository variable FLEET_CONTROLLER_URL and the secret FLEET_ADMIN_TOKEN to enable it. Nothing was checked."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.config.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: packages/fleet-controller/scripts
+      - name: Install Bun
+        if: steps.config.outputs.run == 'true'
+        # From the npm registry at the version CI uses; no third-party action.
+        run: npm install --global bun@1.4.4
+      - name: Check the deployed controller
+        if: steps.config.outputs.run == 'true'
+        run: |
+          args=(--retries 8 --backoff 5)
+          if [ "$REQUIRE_GITHUB" = "true" ]; then args+=(--require-github); fi
+          bun packages/fleet-controller/scripts/post-deploy-check.ts "${args[@]}"

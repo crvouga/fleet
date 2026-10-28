@@ -78,7 +78,7 @@ function userVersion(path: string): number {
 }
 
 describe('schema migration v1 to v2', () => {
-  test('keeps every row, copies the role into assigned and observed, and matches a fresh v2 schema', async () => {
+  test('keeps every row, copies the role into assigned and observed, and keeps the nodes table identical to a fresh schema', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'fleet-migrate-'));
     const old = join(directory, 'old.db');
     const fresh = join(directory, 'fresh.db');
@@ -138,7 +138,7 @@ describe('schema migration v1 to v2', () => {
       ).toBe(true);
       await db.close();
 
-      expect(userVersion(old)).toBe(2);
+      expect(userVersion(old)).toBe(3);
       await (await createDb({ path: fresh })).close();
       expect(columns(old)).toEqual(columns(fresh));
     } finally {
@@ -174,6 +174,61 @@ describe('schema migration v1 to v2', () => {
       await expect(createDb({ path })).rejects.toThrow();
       expect(userVersion(path)).toBe(1);
       expect(columns(path)).toContain('config_revision TEXT 0');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('schema migration v2 to v3', () => {
+  test('a migrated v1 database has exactly the tables and columns of a fresh v3 database', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'fleet-migrate-v3-'));
+    const old = join(directory, 'old.db');
+    const fresh = join(directory, 'fresh.db');
+    try {
+      writeV1(old);
+      await (await createDb({ path: old })).close();
+      await (await createDb({ path: fresh })).close();
+      const shape = (path: string) => {
+        const sqlite = new Database(path, { readonly: true });
+        try {
+          const tables = sqlite
+            .query<{ name: string }, []>(
+              "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name"
+            )
+            .all()
+            .map((t) => t.name);
+          return tables.map((table) => [
+            table,
+            sqlite
+              .query<{ name: string; type: string; notnull: number }, []>(
+                `PRAGMA table_info(${table})`
+              )
+              .all()
+              .map((c) => `${c.name} ${c.type} ${c.notnull}`)
+              .sort(),
+          ]);
+        } finally {
+          sqlite.close();
+        }
+      };
+      expect(shape(old)).toEqual(shape(fresh));
+      expect(userVersion(old)).toBe(3);
+      expect(userVersion(fresh)).toBe(3);
+      const names = shape(fresh).map(([table]) => table);
+      for (const table of [
+        'audit_log',
+        'operations',
+        'node_lifecycle',
+        'desired_history',
+        'github_integration',
+        'ci_jobs',
+        'github_runners',
+        'issue_reports',
+        'enrollment_grants',
+        'controller_secrets',
+      ])
+        expect(names).toContain(table);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

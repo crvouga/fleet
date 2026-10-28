@@ -107,6 +107,34 @@ class ListenerWrapperTests(ScriptCase):
         other = self.configure(*self.ARGS, slot="slot-2")
         self.assertEqual(other[other.index("--url") + 1], "https://github.com/org")
 
+    def test_a_controller_chosen_organization_replaces_the_url_and_keeps_a_runner_group(self):
+        (self.fleet / "assign-used/slot-1").write_text("acme\n")
+        out = self.configure(*self.ARGS)
+        self.assertEqual(out[out.index("--url") + 1], "https://github.com/acme")
+        self.assertEqual(out[out.index("--runnergroup") + 1], "grp")
+        (self.fleet / "assign-group").mkdir()
+        (self.fleet / "assign-group/slot-1").write_text("ci group\n")
+        out = self.configure(*self.ARGS)
+        self.assertEqual(out[out.index("--runnergroup") + 1], "ci group")
+
+    def test_a_controller_chosen_runner_group_is_added_when_the_unit_passes_none(self):
+        (self.fleet / "assign-used/slot-1").write_text("acme\n")
+        (self.fleet / "assign-group").mkdir()
+        (self.fleet / "assign-group/slot-1").write_text("ci group\n")
+        out = self.configure("--unattended", "--url", "https://github.com/x", "--labels", "nixos")
+        self.assertEqual(out[-2:], ["--runnergroup", "ci group"])
+        (self.fleet / "assign-group/slot-1").write_text("bad;group\n")
+        out = self.configure("--unattended", "--url", "https://github.com/x", "--labels", "nixos")
+        self.assertNotIn("--runnergroup", out)
+
+    def test_a_runner_group_never_applies_to_a_repository_target(self):
+        (self.fleet / "assign-used/slot-1").write_text("owner/repo\n")
+        (self.fleet / "assign-group").mkdir()
+        (self.fleet / "assign-group/slot-1").write_text("ci group\n")
+        out = self.configure(*self.ARGS)
+        self.assertNotIn("--runnergroup", out)
+        self.assertNotIn("ci group", out)
+
     def test_equals_forms_are_rewritten_too(self):
         (self.fleet / "assign-used/slot-1").write_text("owner/repo\n")
         out = self.configure("--url=https://github.com/org", "--labels=nixos", "--runnergroup=grp")
@@ -141,8 +169,13 @@ class RegisterWrapperTests(ScriptCase):
         text = text.replace("${pkgs.coreutils}/bin/", "").replace("${id}", "slot-1")
         text = re.sub(r"scope=\$\{lib\.escapeShellArg settings\.github\.scope\}", "scope=organization", text)
         text = re.sub(r"target=\$\{lib\.escapeShellArg target\}", "target=static-org", text)
+        text = text.replace("${lib.escapeShellArg controllerUrl}", "http://127.0.0.1:1")
         text = re.sub(r"exec \$\{token\} register[^\n]*", f'exec {self.bin}/token register "$scope" "$target" 1 2 key out', text)
-        write_executable(self.bin / "token", "#!/bin/bash\nprintf '%s\\n' \"$*\"\n")
+        write_executable(self.bin / "token", """\
+            #!/bin/bash
+            printf '%s\\n' "$*"
+            printf 'env %s %s %s %s\\n' "$FLEET_API_URL" "$FLEET_SLOT" "$FLEET_ASSIGN_USED_FILE" "$FLEET_ASSIGN_GROUP_FILE" >> "$LOG"
+            """)
         self.register = self.script("register", text)
         (self.fleet / "assign").mkdir()
 
@@ -153,6 +186,16 @@ class RegisterWrapperTests(ScriptCase):
         done = self.run_script(self.register)
         self.assertEqual(done.stdout.strip(), "register organization static-org 1 2 key out")
         self.assertFalse(self.used().exists())
+
+    def test_the_controller_gets_what_it_needs_to_issue_the_token(self):
+        self.run_script(self.register)
+        self.assertEqual(self.logged(), [f"env http://127.0.0.1:1 slot-1 {self.fleet}/assign-used/slot-1 {self.fleet}/assign-group/slot-1"])
+
+    def test_a_stale_runner_group_record_never_survives_a_registration(self):
+        (self.fleet / "assign-group").mkdir()
+        (self.fleet / "assign-group/slot-1").write_text("old-group\n")
+        self.run_script(self.register)
+        self.assertFalse((self.fleet / "assign-group/slot-1").exists())
 
     def test_an_assignment_registers_the_repository_and_records_it_readable_by_the_runner(self):
         (self.fleet / "assign/slot-1").write_text("owner/repo\n")

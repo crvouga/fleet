@@ -437,6 +437,55 @@ class InstallTests(unittest.TestCase):
         self.assertNotIn("installed the Fleet base system", body)
         self.assertFalse((self.mnt / "nix/fleet-state/installed").exists())
 
+    def test_an_interrupted_install_is_safe_to_run_again(self):
+        """Power loss or a failed step leaves no installed marker; the next live boot repartitions and completes."""
+        write_executable(self.bin / "nixos-install", """\
+            #!/bin/bash
+            exit 7
+            """)
+        code, _out, _err = self.run_tty([], DISK + "\n")
+        self.assertNotEqual(code, 0)
+        self.assertFalse((self.mnt / "nix/fleet-state/installed").exists())
+        write_executable(self.bin / "nixos-install", f"""\
+            #!/bin/bash
+            printf 'install %s\\n' "$*" >> {self.log}
+            """)
+        code, _out, err = self.run_tty([], DISK + "\n")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.log.read_text().count("disko "), 2)
+        self.assertEqual((self.mnt / "nix/fleet-state/installed").read_text(), "status=installed\n")
+        self.assertTrue((self.mnt / "nix/fleet-state/ssh/ssh_host_ed25519_key").is_file())
+
+    def test_a_failure_is_reported_to_fleet_with_the_phase_it_stopped_in(self):
+        """The controller shows where the installer stopped: the phase is in the message, never a credential."""
+        reports = self.root / "reports"
+        write_executable(self.bin / "fleet-bootstrap-report", f"""\
+            #!/bin/bash
+            printf '%s\\n' "$3" >> {reports}
+            """)
+        write_executable(self.bin / "nixos-install", """\
+            #!/bin/bash
+            exit 7
+            """)
+        code, _out, _err = self.run_tty([], DISK + "\n")
+        self.assertNotEqual(code, 0)
+        message = reports.read_text().strip()
+        self.assertRegex(message, r"^FLEET_INSTALL_FAILED: phase=install installer exited 7 at line \d+\.")
+
+    def test_a_failure_before_the_erase_names_an_earlier_phase(self):
+        reports = self.root / "reports"
+        write_executable(self.bin / "fleet-bootstrap-report", f"""\
+            #!/bin/bash
+            printf '%s\\n' "$3" >> {reports}
+            """)
+        write_executable(self.bin / "select-disk", """\
+            #!/bin/bash
+            exit 3
+            """)
+        self.auto()
+        self.assertIn("phase=disk", reports.read_text())
+        self.assertFalse(self.wiped())
+
 
 if __name__ == "__main__":
     unittest.main()

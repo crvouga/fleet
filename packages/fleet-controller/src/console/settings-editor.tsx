@@ -1,5 +1,4 @@
 /** @jsxImportSource react */
-import { useEffect, useMemo, useState } from 'react';
 import {
   Accordion,
   Alert,
@@ -22,20 +21,10 @@ import type { Scope } from '../config/schema';
 import type { ConsoleState } from './model';
 import { SECTION_META, settingMeta } from '../ui/lib/setting-meta';
 import { inheritedSettings, displayValue } from '../ui/lib/effective';
-import { useAction } from './action';
-import { useUnsavedChanges, UnsavedDialog } from './unsaved';
-function initialFields(config: FleetConfig): Record<string, string> {
-  const values: Record<string, string> = {};
-  for (const [section, entries] of Object.entries(config))
-    for (const [key, value] of Object.entries(
-      entries as Record<string, unknown>
-    ))
-      values[`${section}.${key}`] = Array.isArray(value)
-        ? value.join('\n')
-        : String(value ?? '');
-  values['alerts.webhookUrl'] = '';
-  return values;
-}
+import { SettingsSafetyNotices } from './settings-safety';
+import { UnsavedDialog } from './unsaved';
+import { useSettingsEditor } from './use-settings-editor';
+import type { useAction } from './action';
 export function SettingsEditor({
   scope,
   state,
@@ -45,60 +34,45 @@ export function SettingsEditor({
   state: ConsoleState;
   reload: () => void;
 }) {
-  const stored = useMemo(
-    () => state.fleet.documents.get(scope) ?? {},
-    [state.fleet.documents, scope]
-  );
-  const [values, setValues] = useState(() => initialFields(stored));
-  const [raw, setRaw] = useState(() => JSON.stringify(stored, null, 2));
-  const [dirty, setDirty] = useState(false);
-  const action = useAction(reload);
-  const navigation = useUnsavedChanges(dirty || action.busy);
-  useEffect(() => {
-    if (!dirty) {
-      setValues(initialFields(stored));
-      setRaw(JSON.stringify(stored, null, 2));
-    }
-  }, [stored, dirty]);
-  async function save(mode: string) {
-    if (
-      await action.run(
-        `/settings/${scope}`,
-        mode === 'raw' ? { mode, raw } : { mode, ...values }
-      )
-    )
-      setDirty(false);
-  }
-  const inherited = inheritanceFor(state, scope);
-  function update(path: string, value: string) {
-    setValues((old) => ({ ...old, [path]: value }));
-    setDirty(true);
-  }
+  const editor = useSettingsEditor({ scope, state, reload });
+  const { action, dirty } = editor;
   return (
     <Stack>
-      <UnsavedDialog navigation={navigation} busy={action.busy} />
-      <ErrorNotice message={action.error} />
-      {!dirty && action.success && (
+      <UnsavedDialog navigation={editor.navigation} busy={action.busy} />
+      <ErrorNotice
+        message={action.problem?.code === 'conflict' ? '' : action.error}
+      />
+      {editor.readOnly && (
+        <Alert color="gray" role="status">
+          You are a viewer: you can read these settings but not change them.
+        </Alert>
+      )}
+      <SettingsSafetyNotices
+        problem={action.problem}
+        busy={action.busy}
+        discard={editor.discard}
+        confirm={editor.confirm}
+      />
+      {(!dirty || editor.previewed) && action.success && (
         <Alert color="teal" role="status">
           {action.success}
         </Alert>
       )}
       <SettingsForm
-        stored={stored}
-        values={values}
-        inherited={inherited}
-        update={update}
+        stored={editor.stored}
+        values={editor.values}
+        inherited={inheritanceFor(state, scope)}
+        update={editor.update}
         action={action}
-        save={() => save('form')}
+        save={() => editor.save('form')}
+        preview={() => editor.save('form', { intent: 'preview' })}
+        readOnly={editor.readOnly}
       />
       <RawSettings
-        raw={raw}
-        setRaw={(value) => {
-          setRaw(value);
-          setDirty(true);
-        }}
-        busy={action.busy}
-        save={() => save('raw')}
+        raw={editor.raw}
+        setRaw={editor.setRaw}
+        busy={action.busy || editor.readOnly}
+        save={() => editor.save('raw')}
       />
     </Stack>
   );
@@ -172,6 +146,26 @@ function SettingsField({
 }
 
 type EditorAction = ReturnType<typeof useAction>;
+function SaveBar({
+  busy,
+  readOnly,
+  preview,
+}: {
+  busy: boolean;
+  readOnly: boolean;
+  preview: () => void;
+}) {
+  return (
+    <Group justify="flex-end">
+      <Button variant="default" disabled={busy || readOnly} onClick={preview}>
+        Preview impact
+      </Button>
+      <Button type="submit" loading={busy} disabled={readOnly}>
+        Save settings
+      </Button>
+    </Group>
+  );
+}
 function SettingsForm({
   stored,
   values,
@@ -179,6 +173,8 @@ function SettingsForm({
   update,
   action,
   save,
+  preview,
+  readOnly,
 }: {
   stored: FleetConfig;
   values: Record<string, string>;
@@ -186,6 +182,8 @@ function SettingsForm({
   update: (path: string, value: string) => void;
   action: EditorAction;
   save: () => Promise<void>;
+  preview: () => Promise<void>;
+  readOnly: boolean;
 }) {
   return (
     <form
@@ -195,7 +193,7 @@ function SettingsForm({
       }}
     >
       <Stack gap="lg">
-        <Fieldset disabled={action.busy} variant="unstyled">
+        <Fieldset disabled={action.busy || readOnly} variant="unstyled">
           <Stack gap="lg">
             {SECTIONS.map((section) => (
               <SettingsSection
@@ -229,11 +227,11 @@ function SettingsForm({
             </Button>
           </Alert>
         )}
-        <Group justify="flex-end">
-          <Button type="submit" loading={action.busy}>
-            Save settings
-          </Button>
-        </Group>
+        <SaveBar
+          busy={action.busy}
+          readOnly={readOnly}
+          preview={() => void preview()}
+        />
       </Stack>
     </form>
   );

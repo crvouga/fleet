@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -28,8 +29,10 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from e2e_support import NodeFiles, Stack, free_port, missing_tools, query, sha256_hex  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+from e2e_support import NodeFiles, Stack, free_port, missing_tools, query, run_runner_control, runner_tools, sha256_hex  # noqa: E402
 from enroll_fakes import FakeGitHub  # noqa: E402
+from fake_github import FakeGitHubApp, generate_app_key  # noqa: E402
 import iso_fixture  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -311,13 +314,25 @@ class FullChainTest(unittest.TestCase):
             "runners": {"extraLabels": ["lab-a"], "repositories": ["crvouga/private-app"]},
             "capacity": {"slotMax": 2},
         }
-        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
+        def put_fleet(body):
+            # Writes to an existing scope carry the revision they read (optimistic
+            # concurrency), and pausing every node's updates is acknowledged on purpose.
+            _status, current, _ = http("GET", self.controller + "/v1/settings/fleet", self.admin)
+            revision = (json.loads(current).get("revision") if _status == 200 else None) or 0
+            headers = {"X-Fleet-Acknowledge": "fleet_sync_paused"}
+            if revision:
+                headers["If-Match"] = str(revision)
+            return http("PUT", self.controller + "/v1/settings/fleet", self.admin, body, headers=headers)
+
+        status, data, _ = put_fleet(desired)
         self.assertEqual(status, 200, data)
-        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, {"heartbeat": {"intervalSeconds": 1}})
+        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
+        self.assertEqual(status, 428, "an existing scope needs the revision the caller read")
+        status, data, _ = put_fleet({"heartbeat": {"intervalSeconds": 1}})
         self.assertEqual(status, 400, "an out-of-range value must be refused, not stored")
-        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, {"runner": {}})
+        status, data, _ = put_fleet({"runner": {}})
         self.assertEqual(status, 400, "a typo must not silently do nothing")
-        http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
+        put_fleet(desired)
 
         run = node.agent(self.controller, "once")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -359,7 +374,10 @@ class FullChainTest(unittest.TestCase):
         (node.state / "enrollment-token").write_text(self.role_token + "\n")
         self.assertEqual(node.agent(self.controller, "once").returncode, 0)
 
-        status, _data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin)
+        status, data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin, {})
+        self.assertEqual(status, 400, "deleting needs the typed confirmation")
+        self.assertEqual(json.loads(data)["error"], "confirmation_required")
+        status, _data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin, {"confirm": f"ci-{identity[:4]}"})
         self.assertEqual(status, 200)
         self.assertIsNone(self.node_view(identity))
         healed = node.agent(self.controller, "once")
@@ -425,7 +443,7 @@ class FullChainTest(unittest.TestCase):
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
             tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
             self.assertTrue({"nodes", "heartbeats", "events", "allowed_emails"}.issubset(tables))
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
             hashes = [row[0] for row in db.execute("select secret_hash from nodes")]
             self.assertTrue(hashes)
             for stored in hashes:
@@ -486,6 +504,379 @@ class FullChainTest(unittest.TestCase):
         )
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("FLEET_ADMIN_TOKEN", done.stdout + done.stderr)
+
+
+@unittest.skipIf(missing_tools() and not REQUIRED, "full-chain test needs: " + ", ".join(missing_tools()))
+@unittest.skipIf(shutil.which("openssl") is None, "runner registration chain needs openssl for the throwaway App key")
+class RunnerRegistrationChainTest(unittest.TestCase):
+    """The real controller and the real runner_control.py, with GitHub replaced by a loopback fake.
+
+    The controller holds a throwaway GitHub App key (given to the controller process only) and
+    talks to the fake through FLEET_GITHUB_API_URL. Nodes hold nothing but their own credential.
+    Proves the wiring: node credential -> controller -> App JWT -> installation token ->
+    registration token -> node, and what each failure looks like to the node (exit 0, 75, 78).
+    It does not prove anything about the real api.github.com or a real runner starting."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="fleet-e2e-runner-")
+        cls.root = Path(cls.tmp.name)
+        cls.enroll_token = "fleet-enroll." + secrets.token_hex(24)
+        cls.pem, public = generate_app_key(cls.root)
+        cls.github = FakeGitHubApp(public)
+        cls.stack = Stack(cls.enroll_token, extra_env={
+            "FLEET_GITHUB_API_URL": cls.github.url, "FLEET_GITHUB_APP_PRIVATE_KEY": cls.pem,
+        })
+        cls.controller = cls.stack.info["controllerUrl"]
+        cls.admin = cls.stack.info["adminToken"]
+        cls.tools = runner_tools(cls.root / "tools")
+        cls.repositories = ["acme/app", "acme/api"]
+        cls.nodes = 0
+        status, data, _ = http("PUT", cls.controller + "/v1/github/integration", cls.admin, {
+            "scope": "repository", "repositories": cls.repositories,
+            "appId": cls.github.app_id, "installationId": cls.github.installation_id,
+        })
+        if status != 200:
+            cls.tearDownClass()
+            raise AssertionError("the GitHub integration was not accepted: %s %s" % (status, data))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.stack.stop()
+        cls.github.close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        self.github.clear()
+
+    # ---- helpers --------------------------------------------------------------
+
+    def enroll(self, with_token=True, role_slots=4):
+        """A node installed as base that reports to the controller once. Returns (id, node)."""
+        type(self).nodes += 1
+        identity = machine_id("runner-chain-%d" % self.nodes)
+        node = NodeFiles(self.root / ("node-%d" % self.nodes), "ci-" + identity[:4], "ci", identity, slots=role_slots)
+        if with_token:
+            node.state.mkdir(parents=True)
+            (node.state / "enrollment-token").write_text(self.enroll_token + "\n")
+        first = node.agent(self.controller, "once")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        return identity, node
+
+    def assigned_repository(self, node, slot="slot-1"):
+        return (node.root / "run/fleet/assign" / slot).read_text().strip()
+
+    def admin_call(self, method, path, body=None, headers=None):
+        status, data, _ = http(method, self.controller + path, self.admin, body, headers=headers)
+        return status, jsonbody(data) if data[:1] in (b"{", b"[") else data.decode()
+
+    def put_node_settings(self, identity, body):
+        status, current = self.admin_call("GET", "/v1/settings/node:" + identity)
+        headers = {"If-Match": str(current["revision"])} if status == 200 and current.get("revision") else None
+        status, document = self.admin_call("PUT", "/v1/settings/node:" + identity, body, headers)
+        self.assertEqual(status, 200, document)
+
+    def register(self, node, slot="slot-1", target="fleet-controller/unassigned", **options):
+        label = options.pop("label", "r%d" % int(time.monotonic() * 1000))
+        return run_runner_control(node, self.controller, self.tools, slot, target, label=label, **options)
+
+    def register_until_ok(self, node, seconds=40, **options):
+        """Retry as the node's unit does (exit 75 means retry) until the controller serves again."""
+        deadline = time.monotonic() + seconds
+        while True:
+            done = self.register(node, **options)
+            if done.returncode == 0 or time.monotonic() > deadline:
+                return done
+            self.assertEqual(done.returncode, 75, done.text)
+            time.sleep(2)
+
+    def fresh_github_client(self):
+        """Saving the integration with a never used installation id makes the controller build a
+        new GitHub client on its next call: no token, no open circuit, no remembered refusal."""
+        self.github.installation_id = str(int(self.github.installation_id) + 1)
+        status, data = self.admin_call("PUT", "/v1/github/integration", {
+            "scope": "repository", "repositories": self.repositories,
+            "appId": self.github.app_id, "installationId": self.github.installation_id,
+        })
+        self.assertEqual(status, 200, data)
+
+    def audit(self, node_id, action):
+        _status, document = self.admin_call("GET", "/v1/audit?target=" + node_id + "&limit=200")
+        return [entry for entry in document["entries"] if entry["action"] == action]
+
+    def assert_nothing_leaked(self, text):
+        leaked = [self.pem.splitlines()[1][:30], "eyJ", self.enroll_token, *self.github.installation_tokens,
+                  *self.github.registration_tokens]
+        for secret in leaked:
+            self.assertNotIn(secret, text)
+
+    def files_of(self, node):
+        found = []
+        for path in node.root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                try:
+                    found.append((path, path.read_text(errors="ignore")))
+                except OSError:
+                    continue
+        return found
+
+    # ---- scenarios --------------------------------------------------------------
+
+    def test_01_node_gets_a_registration_token_through_the_controller_alone(self):
+        identity, node = self.enroll()
+        view = next(n for n in self.admin_call("GET", "/v1/nodes")[1]["nodes"] if n["id"] == identity)
+        self.assertEqual((view["status"], view["role"]), ("online", "ci"))
+        # The next heartbeat delivers desired state: the integration's repositories reach slot assignments.
+        again = node.agent(self.controller, "once")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        # (Placement may narrow the integration's list to some of its repositories.)
+        assigned = self.assigned_repository(node)
+        self.assertIn(assigned, self.repositories)
+
+        before = self.github.mark()
+        done = self.register(node, "slot-1", label="happy")
+        self.assertEqual(done.returncode, 0, done.text)
+        self.assertEqual(done.stdout, "")
+        self.assertEqual(done.sleeps, [])
+        token = done.output.read_text()
+        self.assertEqual(token, self.github.registration_tokens[-1])
+        self.assertEqual(stat.S_IMODE(done.output.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(done.output.parent.stat().st_mode), 0o700)
+        slot_one = (node.root / "run/fleet/assign/slot-1").read_text().strip()
+        self.assertEqual(done.used_file.read_text().strip(), slot_one, "the controller chose what the node was told")
+        self.assertIn(slot_one, self.repositories)
+        self.assertEqual(done.recorded_status()["exit"], 0)
+        self.assertNotIn(token, done.text)
+
+        # GitHub saw: at most one App-JWT token mint in total (the controller caches it),
+        # exactly one registration token, and the registration call used the installation token.
+        self.assertEqual(self.github.count("access-token"), 1)
+        self.assertEqual(self.github.bad_jwts, 0, "the controller signed with the App key")
+        registrations = self.github.since(before, "registration-token")
+        self.assertEqual(len(registrations), 1)
+        self.assertTrue(registrations[0]["bearer_is_installation"])
+        self.assertFalse(registrations[0]["bearer_is_jwt"])
+        self.assertEqual(registrations[0]["path"], "/repos/%s/actions/runners/registration-token" % slot_one)
+
+        # The node never held the App key (or any token): not in its environment, not in a file.
+        self.assertNotIn("FLEET_GITHUB_APP_PRIVATE_KEY", os.environ)
+        for path, text in self.files_of(node):
+            if path != done.output:
+                self.assertNotIn("PRIVATE KEY", text, path)
+                self.assertNotIn(token, text, path)
+        # The audit trail names the node and never the token; the controller log neither.
+        [entry] = self.audit(identity, "runner.registration")
+        self.assertEqual((entry["outcome"], entry["actor"]), ("success", "node:" + identity[:8]))
+        self.assertNotIn(token, json.dumps(entry))
+        output = "".join(self.stack.output)
+        for secret in (token, self.pem.splitlines()[1][:30], *self.github.installation_tokens):
+            self.assertNotIn(secret, output)
+
+    def test_02_concurrent_registrations_for_one_slot_share_one_github_call(self):
+        _identity, node = self.enroll()
+        node.agent(self.controller, "once")
+        self.fresh_github_client()
+        self.github.registration_delay = 1.0
+        before = self.github.mark()
+        with ThreadPoolExecutor(3) as pool:
+            runs = list(pool.map(lambda n: self.register(node, "slot-1", label="same-%d" % n), range(3)))
+        self.assertEqual([done.returncode for done in runs], [0, 0, 0], [done.text for done in runs])
+        self.assertEqual(len(self.github.since(before, "registration-token")), 1, "duplicate registrations were not coalesced")
+        self.assertEqual(len({done.output.read_text() for done in runs}), 1)
+        # Another slot is its own registration.
+        other = self.register(node, "slot-2", label="other")
+        self.assertEqual(other.returncode, 0, other.text)
+        self.assertEqual(len(self.github.since(before, "registration-token")), 2)
+        self.assertNotEqual(other.output.read_text(), runs[0].output.read_text())
+
+    def test_03_refusals_never_reach_github(self):
+        before = self.github.mark()
+        identity, node = self.enroll()
+        node.agent(self.controller, "once")
+
+        # A repository the node was not assigned.
+        done = self.register(node, "slot-1", "evil/other", label="unassigned")
+        self.assertEqual(done.returncode, 78, done.text)
+        self.assertIn("repository_not_assigned", done.stderr)
+        self.assertFalse(done.output.exists())
+        self.assertEqual(done.recorded_status()["code"], "repository_not_assigned")
+        self.assertEqual(done.sleeps, [], "a refusal is not retried")
+
+        # Cordoned: admission is closed until a person reopens it.
+        self.put_node_settings(identity, {"runners": {"cordoned": True}})
+        done = self.register(node, "slot-1", label="cordoned")
+        self.assertEqual(done.returncode, 78, done.text)
+        self.assertIn("runners_drained", done.stderr)
+        self.assertFalse(done.output.exists())
+        self.put_node_settings(identity, {})
+        reopened = self.register(node, "slot-1", label="reopened")
+        self.assertEqual(reopened.returncode, 0, reopened.text)
+
+        # A role that runs no runners.
+        status, data = self.admin_call("PATCH", "/v1/nodes/" + identity, {"role": "devbox"})
+        self.assertEqual(status, 200, data)
+        done = self.register(node, "slot-1", label="devbox")
+        self.assertEqual((done.returncode, done.recorded_status()["code"]), (78, "role_runs_no_runners"), done.text)
+        self.admin_call("PATCH", "/v1/nodes/" + identity, {"role": "ci"})
+
+        # A node that was never approved, then one whose credential is revoked, then a made-up one.
+        _waiting_id, waiting = self.enroll(with_token=False)
+        done = self.register(waiting, "slot-1", label="pending")
+        self.assertEqual(done.returncode, 78, done.text)
+        self.assertFalse(done.output.exists())
+        status, data = self.admin_call("POST", "/v1/nodes/%s/revoke-credential" % identity, {"confirm": node.hostname})
+        self.assertEqual(status, 200, data)
+        done = self.register(node, "slot-1", label="revoked")
+        self.assertEqual((done.returncode, done.recorded_status()["code"]), (78, "FLEET_CONTROLLER_AUTH"), done.text)
+        (node.state / "node.secret").write_text("ee" * 32 + "\n")
+        done = self.register(node, "slot-1", label="forged")
+        self.assertEqual((done.returncode, done.recorded_status()["code"]), (78, "FLEET_CONTROLLER_AUTH"), done.text)
+        self.assertNotIn("ee" * 32, done.text)
+
+        # Exactly one registration token was ever minted: the reopened node's.
+        self.assertEqual(len(self.github.since(before, "registration-token")), 1)
+        denied = [e for e in self.audit(identity, "runner.registration") if e["outcome"] == "denied"]
+        self.assertGreaterEqual(len(denied), 3, denied)
+
+    def test_04_throttling_is_absorbed_or_reported_as_retry_later(self):
+        _identity, node = self.enroll()
+        node.agent(self.controller, "once")
+        self.fresh_github_client()
+        # Two 429s with Retry-After: 1, then success: the controller waits as told and the node never notices.
+        self.github.fail("registration-token", 429, {"Retry-After": "1"}, times=2)
+        before, started = self.github.mark(), time.monotonic()
+        done = self.register(node, "slot-1", label="throttled-once")
+        self.assertEqual(done.returncode, 0, done.text)
+        self.assertGreaterEqual(time.monotonic() - started, 1.8, "Retry-After was not honoured")
+        self.assertEqual(len(self.github.since(before, "registration-token")), 3)
+        # A long Retry-After is not slept by the controller: the node is told to come back (exit 75).
+        self.github.clear()
+        self.fresh_github_client()
+        self.github.fail("registration-token", 429, {"Retry-After": "120"})
+        before = self.github.mark()
+        done = self.register(node, "slot-1", label="throttled-long")
+        self.assertEqual(done.returncode, 75, done.text)
+        self.assertIn("FLEET_GITHUB_UNAVAILABLE", done.stderr)
+        self.assertFalse(done.output.exists())
+        self.assertEqual(done.sleeps, [10, 10], "the node waits at most its cap between attempts and tries 3 times")
+        self.assertEqual(len(self.github.since(before, "registration-token")), 1, "the open circuit shields GitHub")
+        self.assert_nothing_leaked(done.text)
+        self.fresh_github_client()
+
+    def test_05_github_outage_is_retried_by_the_node_and_recovers(self):
+        _identity, node = self.enroll()
+        node.agent(self.controller, "once")
+        self.fresh_github_client()
+        self.github.fail("registration-token", 503)
+        before = self.github.mark()
+        done = self.register(node, "slot-1", label="outage")
+        self.assertEqual(done.returncode, 75, done.text)
+        self.assertIn("FLEET_GITHUB_UNAVAILABLE", done.stderr)
+        self.assertFalse(done.output.exists(), "no token file after a failed attempt")
+        self.assertEqual(done.recorded_status()["exit"], 75)
+        self.assertEqual(len(done.sleeps), 2, "three attempts, two waits")
+        # 3 node attempts x 4 transport tries is the hard ceiling; the circuit normally stops sooner.
+        self.assertLessEqual(len(self.github.since(before, "registration-token")), 12)
+        self.assert_nothing_leaked(done.text)
+
+        self.github.clear()
+        recovered = self.register_until_ok(node, slot="slot-1", label="recovered")
+        self.assertEqual(recovered.returncode, 0, recovered.text)
+        self.assertEqual(recovered.output.read_text(), self.github.registration_tokens[-1])
+        self.assertEqual(stat.S_IMODE(recovered.output.stat().st_mode), 0o600)
+        self.assertEqual(recovered.recorded_status()["exit"], 0)
+
+    def test_06_a_permanent_github_refusal_is_not_retried_and_names_what_to_fix(self):
+        identity, node = self.enroll()
+        node.agent(self.controller, "once")
+        self.fresh_github_client()
+        for status, code in ((404, "FLEET_GITHUB_SCOPE"), (403, "FLEET_GITHUB_SCOPE"), (401, "FLEET_GITHUB_KEY")):
+            self.github.clear()
+            self.github.fail("registration-token", status)
+            before = self.github.mark()
+            done = self.register(node, "slot-1", label="refused-%d" % status)
+            self.assertEqual(done.returncode, 78, done.text)
+            self.assertIn(code, done.stderr)
+            self.assertEqual(done.recorded_status()["code"], code)
+            self.assertEqual(done.sleeps, [], "a refusal needs a person, not a retry")
+            self.assertFalse(done.output.exists())
+            self.assert_nothing_leaked(done.text + json.dumps(done.recorded_status()))
+            self.assertNotIn("injected failure", done.text, "GitHub's own message is never relayed")
+            calls = self.github.since(before, "registration-token")
+            self.assertEqual(len(calls), 2 if status == 401 else 1, "a 401 re-mints the installation token once")
+        # The App key or installation itself refused at the token mint.
+        for status, code in ((401, "FLEET_GITHUB_KEY"), (404, "FLEET_GITHUB_SCOPE")):
+            self.github.clear()
+            self.fresh_github_client()
+            self.github.fail("access-token", status)
+            done = self.register(node, "slot-1", label="mint-%d" % status)
+            self.assertEqual((done.returncode, done.recorded_status()["code"]), (78, code), done.text)
+            self.assertEqual(done.sleeps, [])
+            self.assert_nothing_leaked(done.text)
+        self.github.clear()
+        self.fresh_github_client()
+        healed = self.register(node, "slot-1", label="healed")
+        self.assertEqual(healed.returncode, 0, healed.text)
+        failed = [e for e in self.audit(identity, "runner.registration") if e["outcome"] == "failed"]
+        self.assertGreaterEqual(len(failed), 5)
+        self.assertNotIn("ghs_", json.dumps(failed))
+
+    # ---- version skew -------------------------------------------------------------
+
+    def test_07_an_old_agent_that_knows_nothing_of_the_new_fields_still_works(self):
+        identity = machine_id("runner-chain-old-agent")
+        secret = secrets.token_hex(32)
+        status, data, _ = http("POST", self.controller + "/v1/nodes/register", None, {
+            # What a v2-era agent sent: it named a role and a role token, both ignored now.
+            "nodeId": identity, "hostname": "old-" + identity[:4], "secret": secret,
+            "role": "ci", "roleToken": "legacy-role-token", "enrollmentToken": self.enroll_token,
+        })
+        self.assertIn(status, (200, 201, 202), data)
+        credential = identity + "." + secret
+        bare = {"v": 2, "nodeId": identity, "role": "ci", "closure": "ci", "hostname": "old-" + identity[:4],
+                "agent": {"version": "2"}}
+        status, data, _ = http("POST", self.controller + "/v1/heartbeat", credential, bare)
+        self.assertEqual(status, 200, data)
+        document = jsonbody(data)
+        self.assertEqual(document["status"], "approved")
+        self.assertEqual(document["desired"]["role"], "ci")
+        self.assertNotIn("credential", document, "no rotation hint unless one was requested")
+        # Unknown newer keys and a missing telemetry block are both fine; a future version is a clear 400.
+        status, _data, _ = http("POST", self.controller + "/v1/heartbeat", credential, {**bare, "futureField": {"x": 1}})
+        self.assertEqual(status, 200)
+        status, data, _ = http("POST", self.controller + "/v1/heartbeat", credential, {**bare, "v": 3})
+        self.assertEqual((status, jsonbody(data)["error"]), (400, "unsupported_version"))
+        view = next(n for n in self.admin_call("GET", "/v1/nodes")[1]["nodes"] if n["id"] == identity)
+        self.assertEqual((view["status"], view["role"]), ("online", "ci"))
+        self.assertNotIn("legacy-role-token", json.dumps(view))
+        self.assertNotIn(secret, json.dumps(view))
+
+    def test_08_a_node_that_still_has_the_app_key_registers_directly_as_before(self):
+        identity, node = self.enroll()
+        node.agent(self.controller, "once")
+        repository = self.assigned_repository(node)
+        key_path = node.root / "run/secrets/github-app-key"
+        key_path.parent.mkdir(parents=True)
+        key_path.write_text(self.pem)
+        key_path.chmod(0o600)
+        self.fresh_github_client()
+        before, audits = self.github.mark(), len(self.audit(identity, "runner.registration"))
+        done = self.register(node, "slot-1", repository, label="legacy", key_path=key_path, app=self.github.app_id,
+                             installation=self.github.installation_id, github_redirect=self.github.url)
+        self.assertEqual(done.returncode, 0, done.text)
+        self.assertEqual(done.output.read_text(), self.github.registration_tokens[-1])
+        self.assertEqual(stat.S_IMODE(done.output.stat().st_mode), 0o600)
+        mints = self.github.since(before, "access-token")
+        self.assertEqual(len(mints), 1)
+        self.assertTrue(mints[0]["bearer_is_jwt"], "the node signed its own App JWT")
+        self.assertEqual(self.github.bad_jwts, 0)
+        self.assertEqual(len(self.audit(identity, "runner.registration")), audits, "the controller was not asked")
+        # Without the key file the same node goes through the controller.
+        key_path.unlink()
+        through = self.register(node, "slot-1", repository, label="no-key", key_path=key_path, app=self.github.app_id,
+                                installation=self.github.installation_id, github_redirect=self.github.url)
+        self.assertEqual(through.returncode, 0, through.text)
+        self.assertEqual(len(self.audit(identity, "runner.registration")), audits + 1)
 
 
 if __name__ == "__main__":

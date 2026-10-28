@@ -4,6 +4,7 @@ import { desiredRevision } from '../../src/domain/desired-state';
 import { CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { heartbeatBody, nodeIdOf, secretOf, T0 } from '../support/fixtures';
+import { adminConfirmed } from '../support/confirm';
 
 /** An approved ci node with no settings anywhere. */
 const EMPTY_REVISION = desiredRevision({
@@ -59,7 +60,7 @@ describeController('POST /v1/heartbeat', (ctx) => {
     test('a rejected node holding its secret is told 403 rejected; without the secret it is just 401', async () => {
       const { h } = ctx();
       await enroll();
-      await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/reject`);
+      await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/reject`, 1);
       const known = await beat();
       expect(known.status).toBe(403);
       expect(known.body.error).toBe('rejected');
@@ -83,7 +84,7 @@ describeController('POST /v1/heartbeat', (ctx) => {
       const { h } = ctx();
       await enroll();
       expect((await beat()).status).toBe(200);
-      await h.admin('DELETE', `/v1/nodes/${nodeIdOf(1)}`);
+      await adminConfirmed(h, 'DELETE', `/v1/nodes/${nodeIdOf(1)}`, 1);
       expect((await beat()).status).toBe(401);
       expect((await h.register(1)).status).toBe(201);
       const reply = await beat();
@@ -451,7 +452,7 @@ describeController('POST /v1/retire', (ctx) => {
   test('a rejected node is told 403', async () => {
     const { h } = ctx();
     await enroll();
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/reject`);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/reject`, 1);
     const reply = await h.asNode(1, 'POST', '/v1/retire');
     expect(reply.status).toBe(403);
   });

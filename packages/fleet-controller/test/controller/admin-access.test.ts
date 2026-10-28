@@ -60,6 +60,41 @@ describeController('/v1/access', (ctx) => {
     expect(last.body.error).toBe('cannot_revoke');
   });
 
+  test('every change to the allowlist leaves an audit row, including a refused revoke', async () => {
+    const h = harness();
+    await ctx().db.sql`delete from audit_log`;
+    await h.admin('PUT', '/v1/access/one@example.org');
+    await h.admin('PUT', '/v1/access/two@example.org');
+    await h.admin('DELETE', '/v1/access/one@example.org');
+    await h.admin('DELETE', '/v1/access/two@example.org'); // the final account stays
+    const rows = [
+      ...(await ctx().db
+        .sql`select action, target_id, outcome from audit_log order by id`),
+    ];
+    expect(rows).toEqual([
+      {
+        action: 'access.allow',
+        target_id: 'one@example.org',
+        outcome: 'success',
+      },
+      {
+        action: 'access.allow',
+        target_id: 'two@example.org',
+        outcome: 'success',
+      },
+      {
+        action: 'access.revoke',
+        target_id: 'one@example.org',
+        outcome: 'success',
+      },
+      {
+        action: 'access.revoke',
+        target_id: 'two@example.org',
+        outcome: 'failed',
+      },
+    ]);
+  });
+
   test('reports when no access list is wired', async () => {
     const reply = await ctx().h.admin('GET', '/v1/access');
     expect(reply.status).toBe(404);

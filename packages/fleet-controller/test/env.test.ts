@@ -39,9 +39,11 @@ describe('readControllerEnv', () => {
         fenceMs: 20_000,
         pollMs: 2_000,
       },
+      retention: { keepGenerations: 2, retainMs: 7 * 24 * 60 * 60 * 1000 },
       port: 8080,
       adminToken: 'a'.repeat(32),
       enrollmentTokens: [],
+      github: { apiUrl: 'https://api.github.com' },
     });
   });
   test('validates writer ownership timing', () => {

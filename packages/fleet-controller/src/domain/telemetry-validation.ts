@@ -8,6 +8,7 @@ import {
 import { diagnostics, runnerSlots } from './telemetry-activity';
 import { count, TELEMETRY_LIMITS, timestamp } from './telemetry-fields';
 import { hardware, network } from './telemetry-hardware';
+import { healthFamilies } from './telemetry-health';
 
 function swap(p: Problems, value: unknown): Telemetry['swap'] {
   if (value === null || value === undefined) return null;
@@ -40,6 +41,7 @@ export function readTelemetry(
       { min: 0, max: 100 }
     ),
     ...hardware(p, value),
+    ...healthFamilies(p, value),
     swap: swap(p, value['swap']),
     network: network(p, value['network']),
     runnerSlots: runnerSlots(p, value['runnerSlots']),

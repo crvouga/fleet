@@ -5,8 +5,9 @@ import type { AppDeps } from '../../deps';
 import type { EventRow } from '../../types';
 import { AddNodeSteps } from '../components/add-node';
 import { ApproveForm } from '../components/approve-form';
-import { ActionForm } from '../components/forms';
+import { Confirm } from '../components/forms';
 import { LiveRegion, LiveStatus } from '../components/live';
+import { NodeReportStrip } from '../components/report-issue';
 import { Shell, PageHeader } from '../layout';
 import { takeFlash } from '../lib/flash';
 import { loadFleet, type FleetData } from '../lib/fleet-data';
@@ -27,6 +28,7 @@ import { NotFoundBody } from '../pages/not-found';
 import { LIVE_OVERVIEW, OverviewBody } from '../pages/overview';
 import { PendingBody } from '../pages/pending';
 import { page } from './guard';
+import { nodePageExtras } from './node-extras';
 
 const NODE_ID = /^[0-9a-f]{64}$/;
 const DAY_MS = 24 * 3600 * 1000;
@@ -148,15 +150,23 @@ function nodeDetail(deps: AppDeps) {
         status: 404,
       });
     }
-    const [points, events] = await Promise.all([
+    const [points, events, extras] = await Promise.all([
       deps.store.listHeartbeats(id, new Date(data.now.getTime() - DAY_MS)),
       deps.store.listEvents({ nodeId: id, limit: TIMELINE_SIZE }),
+      nodePageExtras(deps, c, id),
     ]);
     const pending = entry.view.status === 'pending';
     const actions = pending ? (
       <>
         <ApproveForm nodeId={id} label="Approve" />
-        <ActionForm action={`/nodes/${id}/reject`} label="Reject" />
+        <Confirm
+          id="reject"
+          summary="Reject"
+          button="Reject machine"
+          action={`/nodes/${id}/reject`}
+          expected={entry.view.label}
+          warning="The machine is refused until a person approves it again."
+        />
       </>
     ) : (
       <a class="btn" href={`/settings/node:${id}`}>
@@ -171,11 +181,13 @@ function nodeDetail(deps: AppDeps) {
           actions={actions}
           back={{ href: '/nodes', label: 'All nodes' }}
         />
+        <NodeReportStrip entry={entry} issues={deps.issues} />
         <NodeDetailBody
           entry={entry}
           data={data}
           points={points}
           events={events}
+          {...extras}
         />
       </>
     );
@@ -225,6 +237,9 @@ function events(deps: AppDeps) {
       (e) => query.severity === null || e.severity === query.severity
     );
     const shown = matching.slice(0, EVENTS_PAGE_SIZE);
+    const issues = await deps.issues?.store.linksForEvents(
+      shown.map((event) => event.id)
+    );
     const body = (
       <>
         <PageHeader
@@ -237,6 +252,7 @@ function events(deps: AppDeps) {
           events={shown}
           hasMore={matching.length > EVENTS_PAGE_SIZE}
           now={data.now}
+          {...(issues === undefined ? {} : { issues })}
         />
       </>
     );

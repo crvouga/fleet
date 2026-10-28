@@ -3,23 +3,9 @@ import { readFacts, type NodeFacts } from '../ui/lib/facts';
 import type { Telemetry } from '../telemetry';
 import { sampleIsFresh } from '../domain/telemetry-validation';
 import { integrationReady } from '../domain/readiness';
+import { HEALTH_HELP, healthMetrics } from './health-metrics';
+import { series } from './metric-lines';
 
-function quoted(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
-}
-function series(
-  name: string,
-  value: number | null,
-  labels: Record<string, string>
-): string[] {
-  return value === null
-    ? []
-    : [
-        `${name}{${Object.entries(labels)
-          .map(([key, text]) => `${key}=${quoted(text)}`)
-          .join(',')}} ${value}`,
-      ];
-}
 function capacityMetrics(
   facts: NodeFacts,
   labels: Record<string, string>
@@ -84,6 +70,7 @@ function sensorMetrics(
       })
     ),
     ...networkMetrics(sample, labels),
+    ...healthMetrics(sample, labels),
   ];
 }
 function networkMetrics(
@@ -162,6 +149,7 @@ export function resourceMetrics(
     fleet_node_network_transmitted_bytes:
       'Cumulative transmitted bytes on the reported interface.',
     fleet_node_swap_bytes: 'Reported swap bytes by state.',
+    ...HEALTH_HELP,
   };
   return [
     ...Object.entries(help).flatMap(([name, text]) => [

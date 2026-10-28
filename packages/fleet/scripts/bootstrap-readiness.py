@@ -12,6 +12,8 @@ checked here: the node reports those as reconcile issues once Fleet assigns
 it a role. Only public error codes are printed, never a credential.
 """
 import json
+import os
+import platform
 import re
 import subprocess
 import sys
@@ -22,6 +24,40 @@ from urllib.parse import urlparse
 from bootstrap_report import BootstrapReporter, ApprovalRefused, ReportUnavailable, read_token
 
 TOKEN = re.compile(r'[A-Za-z0-9._-]{8,512}')
+
+
+def live_hardware(environ=None, read=None):
+    """Classify the machine this live installer booted on, from evidence only it can see, before
+    anything is erased. Returns decide.classify_hardware's verdict, or None when nothing can be read.
+    Unsupported is refused by the caller; a partial verdict is logged and reported, not hidden."""
+    environ = os.environ if environ is None else environ
+    read = read or (lambda path: Path(path).read_text())
+    try:
+        import decide
+    except ImportError:
+        return None
+    mem = None
+    try:
+        for line in read(environ.get('FLEET_MEMINFO', '/proc/meminfo')).splitlines():
+            if line.startswith('MemTotal:'):
+                mem = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    adapters = None
+    try:
+        adapters = json.loads(read(str(Path(environ.get('FLEET_LIVE_STATE', '/run/fleet-live')) / 'network.json'))).get('adapters')
+        adapters = adapters if isinstance(adapters, list) else None
+    except (OSError, ValueError, AttributeError):
+        pass
+    uefi = Path(environ.get('FLEET_EFI_DIR') or '/sys/firmware/efi').is_dir()
+    arch = environ.get('FLEET_ARCH') or platform.machine()
+    return decide.classify_hardware('Linux', 'live', decide.live_findings(arch, uefi, mem, adapters))
+
+
+def refuse_unsupported_hardware(verdict):
+    if verdict is not None and verdict['tier'] == 'unsupported':
+        why = '; '.join(r['detail'] for r in verdict['reasons'] if r['tier'] != 'supported')
+        raise NotReady('FLEET_HARDWARE_UNSUPPORTED: ' + why[:300] + '. ' + ' '.join(verdict['required_actions'])[:200] + ' Nothing was erased.')
 
 
 class NotReady(Exception):
@@ -67,6 +103,14 @@ def check_api(url, token):
             return
         if error.code in (408, 429) or error.code >= 500:
             raise Retryable('FLEET_API_UNAVAILABLE: Fleet is temporarily unavailable; retrying before disk changes.') from None
+        try:
+            code = json.loads(error.read(4097)).get('error')
+        except (ValueError, OSError, AttributeError):
+            code = None
+        if code == 'enrollment_grant_expired':
+            raise NotReady('FLEET_ENROLLMENT_EXPIRED: the installer grant expired. Create a new installer binding under Add node in the Fleet app, or approve this computer under Pending. Nothing was erased.') from None
+        if code == 'enrollment_grant_revoked':
+            raise NotReady('FLEET_ENROLLMENT_REVOKED: the installer grant was revoked in the Fleet app. Create a new one under Add node, or approve this computer under Pending. Nothing was erased.') from None
         raise NotReady('FLEET_ENROLLMENT_REJECTED: Fleet does not accept this enrollment token. Replace or remove it, then retry. Nothing was erased.') from None
     except (urllib.error.URLError, OSError):
         raise Retryable('FLEET_API_UNAVAILABLE: Fleet could not be reached; retrying before disk changes.') from None
@@ -116,6 +160,8 @@ if __name__ == '__main__':
     reporter = None
     try:
         toplevel, token_file = sys.argv[1:3]
+        verdict = live_hardware()
+        refuse_unsupported_hardware(verdict)
         metadata = json.loads((Path(toplevel) / "etc/fleet/bootstrap.json").read_text())
         if metadata.get("approvalMode") == "local" and metadata.get("apiUrl") == "":
             check(toplevel, token_file)
@@ -126,7 +172,8 @@ if __name__ == '__main__':
             reporter.begin(check_api)
             check(toplevel, token_file, api=lambda *args: None)
         if reporter:
-            reporter.report('FLEET_INSTALLING: preflight passed; awaiting installation and the first installed-system heartbeat.')
+            hardware = f" hardware={verdict['tier']}" if verdict is not None else ''
+            reporter.report('FLEET_INSTALLING: preflight passed;' + hardware + ' awaiting installation and the first installed-system heartbeat.')
     except (Retryable, ReportUnavailable) as error:
         if reporter:
             reporter.report(str(error), failed=True)

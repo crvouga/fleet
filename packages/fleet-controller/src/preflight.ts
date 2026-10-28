@@ -51,7 +51,7 @@ function assetsReady(): void {
   }
 }
 
-async function litestreamBinary(): Promise<string> {
+export async function litestreamBinary(): Promise<string> {
   const configured = process.env['FLEET_LITESTREAM_BIN'] ?? 'litestream';
   const binary = Bun.which(configured);
   if (!binary)

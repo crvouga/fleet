@@ -21,7 +21,9 @@
     # `blocked` list in /fleet-readiness.json). Role-specific blockers apply to
     # the running node and are reported by it, never checked at install time.
     installBlocked = metadata.blocked;
-    blocked = (if settings.role == "ci" && (settings.secretsFile == null || (settings.github.appId or "") == "") then [
+    # With a fleet controller the GitHub App lives there and a node asks it for
+    # registration tokens (modules/runners.nix): no per-machine App or secrets.
+    blocked = (if settings.role == "ci" && apiUrl == "" && (settings.secretsFile == null || (settings.github.appId or "") == "") then [
       "FLEET_RUNNERS_UNCONFIGURED: configure your GitHub App, repositories and encrypted role credentials before installing a CI node."
     ] else [ ]) ++ (if present settings.repo.url then [ ] else [
       "FLEET_REPOSITORY_UNCONFIGURED: the Git source for automatic updates is not configured."

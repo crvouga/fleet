@@ -44,6 +44,8 @@ export function useDatabase(): () => TestDatabase {
             'heartbeats',
             'settings_history',
             'settings',
+            'operations',
+            'audit_log',
             'nodes',
           ]) {
             await tx.unsafe(`delete from ${table}`);

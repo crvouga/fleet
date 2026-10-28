@@ -49,6 +49,11 @@ export const SECTION_META: Readonly<
     title: 'Secrets',
     blurb: 'Each node’s own age identity, which role secrets are encrypted to.',
   },
+  maintenance: {
+    title: 'Maintenance',
+    blurb:
+      'One-off maintenance requests. Set from the node page’s Restart button; see docs/operations.md.',
+  },
   alerts: {
     title: 'Alerts',
     blurb: 'Handled by this controller only; nodes never receive these values.',
@@ -140,6 +145,11 @@ export const SETTING_META: Readonly<Record<string, SettingMeta>> = {
     label: 'Rotate the age identity',
     unit: 'Unix time',
     help: 'Set by the node page’s Rotate age identity button. A node whose age identity was created before this time generates a next identity and reports its recipient; it switches to it once its role’s secrets are re-encrypted for that recipient and merged.',
+  },
+  'maintenance.restartAfter': {
+    label: 'Restart after',
+    unit: 'Unix time',
+    help: 'Set by the node page’s Restart button. A node whose current boot started before this time drains, waits until no job is running, then reboots once (respecting the reboot window). It never reboots while reboot.enabled is off. Once it has booted after this time nothing more happens.',
   },
   'alerts.offlineAfterSeconds': {
     label: 'Offline threshold',

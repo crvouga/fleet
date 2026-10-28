@@ -538,7 +538,9 @@ class HeartbeatPayloadTests(AgentCase):
         self.assertEqual(self.shape({key: value for key, value in body.items() if key != "telemetry"}),
                          self.shape({key: value for key, value in documented.items() if key != "telemetry"}))
         self.assertEqual(set(body["telemetry"]), {"sampledAt", "cpuUsagePercent", "filesystems", "temperatures",
-            "power", "swap", "network", "runnerSlots", "logs", "issues"})
+            "power", "swap", "network", "runnerSlots", "logs", "issues",
+            # Optional health families (docs/observability.md); each says measured, estimated or unsupported.
+            "gpus", "diskIo", "diskHealth", "cpuFrequency", "throttling", "pressure", "connectivity", "lifecycle"})
 
     def test_every_field_is_filled_from_the_machine(self):
         (self.node.run / "slot-1/busy").write_text("1\n")
@@ -1391,6 +1393,152 @@ class CommandLineTests(AgentCase):
 
     def test_usage_error(self):
         self.assertEqual(self.run_cli("bogus").returncode, 2)
+
+
+class MaintenanceRestartTests(AgentCase):
+    """maintenance.restartAfter: drain, wait until idle, reboot once."""
+
+    def requested(self, **extra):
+        after = int(self.clock.now) - 10  # this boot began a day before the request
+        values = {"maintenance": {"restartAfter": after}}
+        for section, entries in extra.items():
+            values[section] = entries
+        self.api.values = values
+        return self.make(role_token=ROLE_TOKEN), after
+
+    def reboots(self):
+        return self.run_stub.matching("reboot")
+
+    def close_gate(self):
+        (self.node.run / "draining").write_text("")
+        (self.node.run / "drain-reasons").mkdir(exist_ok=True)
+        (self.node.run / "drain-reasons" / "maintenance").write_text("2026-10-26T00:00:00Z\n")
+
+    def test_a_ci_node_drains_first_and_does_not_reboot_while_a_job_runs(self):
+        worker, _after = self.requested()
+        worker.cycle()
+        launches = self.run_stub.matching("systemd-run")
+        self.assertEqual(launches[-1], ["systemd-run", "--no-block", "--collect", "--unit=fleet-maintenance-drain",
+                                        "--setenv=FLEET_DRAIN_REASON=maintenance", "--", "/test/fleet-drain"])
+        self.assertEqual(self.reboots(), [])
+        self.close_gate()
+        self.node.busy(2)
+        worker.cycle()
+        self.assertEqual(self.reboots(), [], "a busy runner slot must never be interrupted")
+        (self.node.run / "slot-2/busy").unlink()
+        worker.cycle()
+        self.assertEqual(self.reboots(), [["systemctl", "reboot"]])
+
+    def test_it_reboots_once_across_cycles_and_after_the_reboot(self):
+        worker, after = self.requested()
+        worker.cycle()
+        self.close_gate()
+        worker.cycle()
+        self.assertEqual(len(self.reboots()), 1)
+        self.assertEqual((self.node.state / "restart-handled").read_text().strip(), str(after))
+        worker.cycle()
+        worker.cycle()
+        self.assertEqual(len(self.reboots()), 1, "the marker stops a repeat")
+        # After the reboot this boot began later than the request.
+        (self.node.proc / "uptime").write_text("30.00 20.00\n")
+        (self.node.state / "restart-handled").unlink()
+        other = self.make()
+        other.settings = {"maintenance.restartAfter": after}
+        other.reconcile()
+        self.assertEqual(len(self.reboots()), 1, "a boot that began after the request is done")
+
+    def test_a_wrong_clock_at_boot_cannot_cause_a_reboot_loop(self):
+        worker, _after = self.requested()
+        worker.cycle()
+        self.close_gate()
+        worker.cycle()
+        self.assertEqual(len(self.reboots()), 1)
+        # Still "before the request" by the node's clock, but the marker records it was handled.
+        fresh = self.make()
+        fresh.settings = dict(worker.settings)
+        fresh.reconcile()
+        self.assertEqual(len(self.reboots()), 1)
+
+    def test_a_failed_reboot_command_is_retried(self):
+        worker, _after = self.requested()
+        worker.cycle()
+        self.close_gate()
+        real = self.run_stub.__call__
+        outcomes = []
+
+        def failing(argv, timeout=10):
+            if argv[:2] == ["systemctl", "reboot"]:
+                self.run_stub.calls.append(list(argv))
+                outcomes.append(1)
+                return 1, ""
+            return real(argv, timeout)
+
+        worker.command = failing
+        worker.cycle()
+        self.assertFalse((self.node.state / "restart-handled").exists())
+        worker.cycle()
+        self.assertEqual(len(outcomes), 2)
+
+    def test_reboots_disabled_means_no_drain_and_no_reboot(self):
+        worker, _after = self.requested(reboot={"enabled": False})
+        worker.cycle()
+        self.assertEqual(self.reboots(), [])
+        self.assertEqual([c for c in self.run_stub.matching("systemd-run") if "fleet-maintenance-drain" in " ".join(c)], [])
+
+    def test_an_update_in_progress_holds_the_restart(self):
+        worker, _after = self.requested()
+        worker.cycle()
+        self.close_gate()
+        (self.node.run / "update-draining").write_text("")
+        worker.cycle()
+        self.assertEqual(self.reboots(), [])
+
+    def test_the_configured_reboot_window_staggers_the_restart(self):
+        worker, after = self.requested(reboot={"delayMaxSeconds": 3600})
+        worker.cycle()
+        self.close_gate()
+        offset = worker.restart_offset(after, worker.settings)
+        self.assertGreater(offset, 0)
+        self.clock.now = after + offset - 1
+        worker.cycle()
+        self.assertEqual(self.reboots(), [])
+        self.clock.now = after + offset
+        worker.cycle()
+        self.assertEqual(len(self.reboots()), 1)
+
+    def test_a_request_that_no_longer_applies_releases_its_drain(self):
+        worker, _after = self.requested()
+        worker.cycle()
+        (self.node.run / "drain-reasons").mkdir(exist_ok=True)
+        (self.node.run / "drain-reasons" / "maintenance").write_text("2026-10-26T00:00:00Z\n")
+        self.api.values = {}
+        worker.cycle()
+        self.assertFalse((self.node.run / "drain-reasons" / "maintenance").exists())
+        self.assertEqual(self.reboots(), [])
+
+    def test_a_request_older_than_this_boot_is_ignored(self):
+        self.api.values = {"maintenance": {"restartAfter": int(self.clock.now) - 200000}}
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.assertEqual(self.reboots(), [])
+        self.assertEqual(len([c for c in self.run_stub.matching("systemd-run") if "maintenance" in " ".join(c)]), 0)
+
+    def test_a_node_without_runners_restarts_without_a_drain(self):
+        self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.node = Node(self.tmp.name, "devbox")
+        self.api.enrollment_tokens[ROLE_TOKEN] = "devbox"
+        self.api.values = {"maintenance": {"restartAfter": int(self.clock.now) - 10}}
+        worker = self.make(role_token=ROLE_TOKEN)
+        worker.cycle()
+        self.assertEqual(self.run_stub.matching("systemd-run"), [])
+        self.assertEqual(len(self.reboots()), 1)
+
+    def test_the_agent_only_understands_a_bounded_integer(self):
+        self.assertEqual(fleetconf.sanitize({"maintenance": {"restartAfter": "now"}}), {})
+        self.assertEqual(fleetconf.sanitize({"maintenance": {"restartAfter": -1}}), {})
+        self.assertEqual(fleetconf.sanitize({"maintenance": {"restartAfter": 5, "reboot": True}}),
+                         {"maintenance.restartAfter": 5})
 
 
 class FleetconfTests(unittest.TestCase):

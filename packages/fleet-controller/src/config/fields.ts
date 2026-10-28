@@ -43,6 +43,12 @@ export interface FleetConfig {
    * next recipient (the node page's "Rotate age identity" sets it to now).
    */
   secrets?: { rotateAgeKeyAfter?: number };
+  /**
+   * restartAfter: a Unix time. A node whose current boot started before then
+   * drains, waits until it is idle and reboots once (the node page's "Restart"
+   * sets it to now). Drain itself is `runners.cordoned`. See docs/operations.md.
+   */
+  maintenance?: { restartAfter?: number };
   /** Controller-only. Never sent to a node. */
   alerts?: { offlineAfterSeconds?: number; webhookUrl?: string | null };
 }
@@ -134,6 +140,9 @@ export const RULES: Readonly<Record<Section, Readonly<Record<string, Rule>>>> =
     },
     secrets: {
       rotateAgeKeyAfter: { kind: 'int', min: 0, max: 4102444800 },
+    },
+    maintenance: {
+      restartAfter: { kind: 'int', min: 0, max: 4102444800 },
     },
     alerts: {
       offlineAfterSeconds: { kind: 'int', min: 60, max: 86400 },

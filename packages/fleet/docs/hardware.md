@@ -1,5 +1,36 @@
 # Hardware qualification notes
 
+## Support tiers
+
+What the installer will do on a given computer, as enforced by
+`classify_hardware` in `scripts/decide.py`. The reasons, the codes and what to do
+about each are in [installer.md](installer.md#hardware-support-tiers).
+
+<!-- hardware-matrix:start -->
+
+| Computer                                                                                     | Becomes a node      | Makes install USB |
+| -------------------------------------------------------------------------------------------- | ------------------- | ----------------- |
+| Windows x64 (UEFI, GPT, Secure Boot off)                                                     | supported           | supported         |
+| Windows x64 with Secure Boot on, unreadable Secure Boot, BitLocker, RAID/VMD or battery      | partially automated | supported         |
+| Windows with legacy BIOS, MBR, dynamic disk, no EFI partition or more than one internal disk | unsupported         | supported         |
+| Linux x64 (UEFI) with kexec or an installable kexec-tools                                    | supported           | supported         |
+| Linux x64 with Wi-Fi as the only network                                                     | partially automated | supported         |
+| Linux without kexec that cannot be prepared, or an unsupported staging filesystem            | unsupported         | supported         |
+| NixOS x64                                                                                    | supported           | supported         |
+| macOS (Intel or Apple silicon)                                                               | unsupported         | supported         |
+| Linux or NixOS ARM64, other ARM                                                              | unsupported         | supported         |
+| Any machine with less RAM than the image plus 2 GiB                                          | unsupported         | supported         |
+
+<!-- hardware-matrix:end -->
+
+Nodes are x86-64 UEFI machines with one unambiguous internal disk and a network
+whose adapter has a driver in the installer image (`lspci -nnk`, then check the
+kernel module named there; Wi-Fi and Ethernet firmware must be in the pinned
+Linux system). Wi-Fi as the only network is partially automated because no
+wizard can prove an adapter works before the live image boots.
+
+## Qualification notes
+
 MINISFORUM advertises the Ryzen 9 9955HX with 16 cores/32 threads, Realtek RTL8125 and Intel I226-V 2.5-GbE, dual Intel X710 10-GbE SFP+, and up to 96-GiB DDR5. These are product specifications, not a claim that a delivered unit has been tested, and they are not a NixOS profile. Verify PCI IDs, NIC revision, firmware, RAM, disk slot, and thermals on the machine you install. Do not copy a disk path into git.
 
 `modules/hardware/generic.nix` puts `r8169`, `igc`, and `i40e` in the initrd with NVMe, SATA, USB storage, and the other common NIC modules, and it enables both Intel and AMD microcode plus redistributable firmware. It does not pin a kernel, force `kvm-amd`, or install an out-of-tree Realtek driver. The NixOS default kernel is what boots. BIOS revisions and board watchdog exposure remain physical qualification tasks. No watchdog driver is forced without proof; systemd requests hardware watchdog use if a supported device exists. A NIC missing from that list is a change to the generic profile, not a new host file.

@@ -125,7 +125,11 @@ Then(
 );
 
 Then('the review refuses to interrupt the running job', async ({ page }) => {
-  await expect(page.getByText('this node is running a job')).toBeVisible();
+  // The finding row refuses the install. The hardware banner may repeat the
+  // same reason in its own list, so name the table cell, not the bare text.
+  await expect(
+    page.getByRole('cell', { name: 'this node is running a job' })
+  ).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Erase and install' })
   ).toHaveCount(0);

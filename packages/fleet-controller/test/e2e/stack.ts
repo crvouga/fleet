@@ -18,6 +18,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const READY_TIMEOUT_MS = 60_000;
+const GITHUB_PASSTHROUGH = [
+  'FLEET_GITHUB_API_URL',
+  'FLEET_GITHUB_APP_PRIVATE_KEY',
+] as const;
 const POLL_MS = 200;
 
 function sha256(text: string): string {
@@ -57,6 +61,12 @@ function serverEnv(
       { sha256: sha256(enrollmentToken), role: 'ci' },
     ]),
   };
+  // Optional GitHub App wiring for tests that run the controller against a
+  // loopback fake of api.github.com. Nothing is passed unless the caller sets it.
+  for (const name of GITHUB_PASSTHROUGH) {
+    const value = process.env[name];
+    if (value !== undefined && value !== '') env[name] = value;
+  }
   return env;
 }
 

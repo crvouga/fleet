@@ -1,3 +1,4 @@
+import type { IssueLink } from '../../issues/types';
 import type { EventRow } from '../../types';
 import { EventList } from './overview';
 import type { FleetEntry } from '../lib/fleet-data';
@@ -96,6 +97,8 @@ export function EventsBody(props: {
   events: readonly EventRow[];
   hasMore: boolean;
   now: Date;
+  /** Open issue reports by event id (src/issues). */
+  issues?: ReadonlyMap<number, IssueLink>;
 }) {
   const last = props.events[props.events.length - 1];
   return (
@@ -105,7 +108,11 @@ export function EventsBody(props: {
         {props.events.length === 0 ? (
           <p class="px-5 py-10 text-center text-fg-2">No events match.</p>
         ) : (
-          <EventList events={props.events} now={props.now} />
+          <EventList
+            events={props.events}
+            now={props.now}
+            {...(props.issues === undefined ? {} : { issues: props.issues })}
+          />
         )}
       </section>
       <nav

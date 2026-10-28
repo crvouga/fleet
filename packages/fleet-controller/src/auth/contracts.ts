@@ -4,6 +4,7 @@ import type { AccessStore, BrowserAuth, OidcConfig } from './browser-contract';
 /** Trusted deployment composition, supplied once before the listener starts. */
 export interface AuthContext {
   readonly adminToken: string;
+  readonly adminTokenNext?: string | undefined;
   readonly access: AccessStore;
   readonly oidc?: OidcConfig;
   readonly fetch: (

@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { ADMIN_TOKEN, CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { at, heartbeatBody, nodeIdOf, secretOf, T0 } from '../support/fixtures';
+import { adminConfirmed } from '../support/confirm';
 
 describeController('admin node endpoints', (ctx) => {
   const enroll = (n: number, role: 'ci' | 'web' = 'ci') =>
@@ -232,7 +233,9 @@ describeController('admin node endpoints', (ctx) => {
 
   describe('approve, reject, retire', () => {
     const act = (verb: string, id = nodeIdOf(1)) =>
-      ctx().h.admin('POST', `/v1/nodes/${id}/${verb}`);
+      verb === 'approve'
+        ? ctx().h.admin('POST', `/v1/nodes/${id}/${verb}`)
+        : adminConfirmed(ctx().h, 'POST', `/v1/nodes/${id}/${verb}`, id);
 
     test('approve moves pending to approved and names the actor', async () => {
       const { h, store } = ctx();
@@ -296,7 +299,12 @@ describeController('admin node endpoints', (ctx) => {
       await h.admin('PUT', `/v1/settings/node:${nodeIdOf(1)}`, {
         sync: { paused: true },
       });
-      const gone = await h.admin('DELETE', `/v1/nodes/${nodeIdOf(1)}`);
+      const gone = await adminConfirmed(
+        h,
+        'DELETE',
+        `/v1/nodes/${nodeIdOf(1)}`,
+        1
+      );
       expect(gone).toMatchObject({ status: 200, body: { ok: true } });
       expect((await h.admin('GET', `/v1/nodes/${nodeIdOf(1)}`)).status).toBe(
         404
@@ -320,10 +328,11 @@ describeController('admin node endpoints', (ctx) => {
     test('404 the second time', async () => {
       const { h } = ctx();
       await enroll(1);
-      await h.admin('DELETE', `/v1/nodes/${nodeIdOf(1)}`);
-      expect((await h.admin('DELETE', `/v1/nodes/${nodeIdOf(1)}`)).status).toBe(
-        404
-      );
+      await adminConfirmed(h, 'DELETE', `/v1/nodes/${nodeIdOf(1)}`, 1);
+      expect(
+        (await adminConfirmed(h, 'DELETE', `/v1/nodes/${nodeIdOf(1)}`, 1))
+          .status
+      ).toBe(404);
     });
   });
 

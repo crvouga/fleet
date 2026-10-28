@@ -15,6 +15,7 @@ import type { EventRow } from '../types';
 import type { ConsoleState } from './model';
 import { relativeTime } from '../ui/lib/format';
 import { navigate } from './router';
+import { EventReport, useEventLinks } from './report-issue-link';
 export function EventFeed({
   events,
   now,
@@ -22,6 +23,7 @@ export function EventFeed({
   events: readonly EventRow[];
   now: Date;
 }) {
+  const links = useEventLinks(events);
   if (!events.length)
     return (
       <Text size="sm" c="dimmed" py="lg">
@@ -67,6 +69,7 @@ export function EventFeed({
                         {event.nodeLabel ?? 'Node'}
                       </Anchor>
                     )}
+                    <EventReport event={event} link={links.events[event.id]} />
                   </Group>
                 </Stack>
               </Table.Td>

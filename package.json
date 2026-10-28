@@ -20,6 +20,7 @@
     "start": "bun run --cwd packages/fleet-controller start",
     "check:config": "bun run --cwd packages/fleet-controller check:config",
     "access:allow": "bun run --cwd packages/fleet-controller access:allow",
+    "restore:drill": "bun run --cwd packages/fleet-controller restore:drill",
     "local:setup": "bun packages/fleet-controller/src/local/cli.ts setup",
     "local": "bun packages/fleet-controller/src/local/cli.ts run",
     "local:status": "bun packages/fleet-controller/src/local/cli.ts status",

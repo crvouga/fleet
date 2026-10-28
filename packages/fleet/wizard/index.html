@@ -509,6 +509,11 @@
           '<button class="primary" id="here" ' +
           (here ? '' : 'disabled') +
           ' onclick="pickHere()">Turn THIS computer into a node</button>';
+        if (s.hardware)
+          h +=
+            '<p><small>Install in place on this computer: <b id="tier-here">' +
+            esc(s.hardware.here.tier) +
+            '</b>.</small></p>';
         if (!here)
           h +=
             '<div class="box">Not possible from here: <ul>' +
@@ -688,6 +693,50 @@
         return state.wifi;
       }
 
+      // The hardware tier is decided by the same code the installer enforces
+      // (decide.classify_hardware): unsupported cannot be started, partial
+      // needs the acknowledgement below.
+      function tierBanner(c) {
+        if (!c) return '';
+        const label = {
+          supported: 'Supported',
+          'partially automated': 'Partially automated',
+          unsupported: 'Unsupported',
+        }[c.tier];
+        const cls =
+          c.tier === 'unsupported'
+            ? 'fail'
+            : c.tier === 'partially automated'
+              ? 'warn'
+              : 'ok';
+        const limits = c.reasons.filter((r) => r.tier !== 'supported');
+        return (
+          '<div class="box" id="hardware-tier" data-tier="' +
+          esc(c.tier) +
+          '"><b>Hardware: <span class="' +
+          cls +
+          '">' +
+          esc(label) +
+          '</span></b>' +
+          (limits.length
+            ? '<ul>' +
+              limits
+                .map((r) => '<li>' + esc(r.detail) + '</li>')
+                .join('') +
+              '</ul>'
+            : '') +
+          (c.required_actions.length
+            ? '<p><small>What to do: ' +
+              esc(c.required_actions.join(' ')) +
+              '</small></p>'
+            : '') +
+          (c.tier === 'unsupported'
+            ? '<p class="fail">Installing in place is refused on this hardware. Nothing was changed.</p>'
+            : '') +
+          '</div>'
+        );
+      }
+
       async function review(body) {
         state.lastBody = body;
         state.plan = null;
@@ -698,7 +747,7 @@
           return show(problem(e, () => review(body), 'review'));
         }
         const p = state.plan;
-        let h = '<h2>Review</h2>';
+        let h = '<h2>Review</h2>' + tierBanner(p.classification);
         const attention = p.findings.filter(
           (f) => f.status === 'fail' || f.status === 'warn'
         );
@@ -762,6 +811,11 @@
               : 'no Wi-Fi connection was found to carry over. Plug in a network cable before the restart, or enter the Wi-Fi network under <b>Use a different Wi-Fi network</b>.') +
             ' The installer checks the connection before it erases anything.</p>';
         if (state.mode === 'here') h += nextSteps();
+        if (p.classification && p.classification.acknowledgement)
+          h +=
+            '<label><input type="checkbox" id="ack-limits"> ' +
+            esc(p.classification.acknowledgement) +
+            '</label><br>';
         h +=
           '<label><input type="checkbox" id="ack"> I understand that <b>' +
           esc(p.erase) +
@@ -774,10 +828,14 @@
       async function go() {
         if (!document.getElementById('ack').checked)
           return alert('Tick the box to confirm.');
+        const limits = document.getElementById('ack-limits');
+        if (limits && !limits.checked)
+          return alert('Tick the box that acknowledges the hardware limits.');
         try {
           await api('/api/run', {
             plan_id: state.plan.id,
             ack: true,
+            ack_limitations: !!limits,
             disk_id: state.plan.disk_id,
           });
         } catch (e) {

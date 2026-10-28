@@ -19,6 +19,7 @@ import { visibleRoles } from '../domain/summary';
 import type { ConsoleState } from './model';
 import { EventFeed } from './events';
 import { AddNode } from './add-node';
+import { ReportIssueAnchor } from './report-issue-link';
 export function Overview({ state }: { state: ConsoleState }) {
   const { fleet } = state;
   const issues = attentionList(fleet.entries);
@@ -147,6 +148,11 @@ function AttentionCard({
               <Text size="sm" c="dimmed" maw={330}>
                 {issue.message}
               </Text>
+              {issue.level !== 'info' && (
+                <ReportIssueAnchor
+                  target={{ kind: 'node', nodeId: issue.entry.view.id }}
+                />
+              )}
             </Group>
           ))
         ) : (

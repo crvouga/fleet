@@ -18,6 +18,15 @@ import { rawJson, splitErrors, type Draft } from '../lib/settings-form';
 import { SECTION_META } from '../lib/setting-meta';
 import { cx } from '../lib/tw';
 import { SettingField } from './settings-fields';
+import {
+  ConflictBanner,
+  ImpactPanel,
+  NO_SAFETY,
+  PreconditionFields,
+  WarningsPanel,
+  type SettingsSafety,
+} from './settings-safety';
+import { authorOf, rollbackOf } from '../../domain/settings-history';
 
 export interface SettingsPageProps {
   readonly scope: Scope;
@@ -30,6 +39,8 @@ export interface SettingsPageProps {
   readonly history: readonly SettingsHistoryRow[];
   readonly documents: ScopeDocuments;
   readonly now: Date;
+  /** Concurrency, impact and acknowledgement state; absent means a plain first render. */
+  readonly safety?: SettingsSafety;
 }
 
 function countKeys(config: FleetConfig | undefined): number {
@@ -178,11 +189,16 @@ function ErrorSummary(props: { errors: readonly string[] }) {
 }
 
 export function SettingsForm(props: SettingsPageProps) {
+  const safety = props.safety ?? NO_SAFETY;
   const role = props.node?.role ?? null;
   const inherited = inheritedSettings(props.scope, props.documents, role);
   return (
     <form method="post" action={`/settings/${props.scope}`} class="space-y-5">
       <input type="hidden" name="mode" value="form" />
+      <PreconditionFields safety={safety} />
+      <ConflictBanner scope={props.scope} safety={safety} />
+      <ImpactPanel impact={safety.preview} />
+      <WarningsPanel safety={safety} />
       <ErrorSummary errors={props.errors} />
       {SECTIONS.map((section) => (
         <SectionCard
@@ -201,7 +217,20 @@ export function SettingsForm(props: SettingsPageProps) {
           <a href={`/settings/${props.scope}`} class="btn">
             Discard
           </a>
-          <button type="submit" class="btn btn-primary">
+          <button
+            type="submit"
+            name="intent"
+            value="preview"
+            class="btn"
+            disabled={safety.readOnly}
+          >
+            Preview impact
+          </button>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            disabled={safety.readOnly}
+          >
             Save settings
           </button>
         </div>
@@ -223,6 +252,7 @@ export function RawEditor(props: SettingsPageProps) {
         class="space-y-3 border-t border-line p-4 sm:p-5"
       >
         <input type="hidden" name="mode" value="raw" />
+        <PreconditionFields safety={props.safety ?? NO_SAFETY} />
         <div>
           <label class="label" for="raw-json">
             Settings document
@@ -251,7 +281,11 @@ export function RawEditor(props: SettingsPageProps) {
             </p>
           )}
         </div>
-        <button type="submit" class="btn">
+        <button
+          type="submit"
+          class="btn"
+          disabled={(props.safety ?? NO_SAFETY).readOnly}
+        >
           Save JSON
         </button>
       </form>
@@ -281,9 +315,12 @@ export function HistoryPanel(props: SettingsPageProps) {
             >
               <div>
                 <p class="text-sm">
-                  <span class="font-medium">
-                    {entry.changedBy ?? 'unknown'}
-                  </span>
+                  <span class="font-medium">{authorOf(entry.changedBy)}</span>
+                  {rollbackOf(entry.changedBy) === null ? null : (
+                    <span class="ml-2 rounded bg-warn-soft px-1.5 py-0.5 text-xs font-medium">
+                      rollback to #{rollbackOf(entry.changedBy)}
+                    </span>
+                  )}
                   {index === 0 ? (
                     <span class="ml-2 rounded bg-ok-soft px-1.5 py-0.5 text-xs font-medium text-ok">
                       current
@@ -302,8 +339,13 @@ export function HistoryPanel(props: SettingsPageProps) {
                     name="historyId"
                     value={String(entry.id)}
                   />
-                  <button type="submit" class="btn btn-sm">
-                    Restore this version
+                  <PreconditionFields safety={props.safety ?? NO_SAFETY} />
+                  <button
+                    type="submit"
+                    class="btn btn-sm"
+                    disabled={(props.safety ?? NO_SAFETY).readOnly}
+                  >
+                    Roll back to this version
                   </button>
                 </form>
               )}

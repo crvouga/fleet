@@ -226,6 +226,12 @@ def install_here(request, progress):
     decide.invariant(not problems, "a check failed in the privileged step",
                      " ".join(dict.fromkeys(item["fix"] for item in problems if item.get("fix"))),
                      failed=[f"{item['name']}: {item['detail']}" for item in problems])
+    # The privileged step classifies the hardware again from fresh facts: it never
+    # trusts the unprivileged window's verdict. Unsupported is refused; a partial
+    # tier proceeds only when the person acknowledged the limitation.
+    decide.refuse_unsupported(
+        decide.classify_hardware(os_name, "here", preparation.review_findings(os_name, found), chosen, request.get("network")),
+        request.get("ack_limitations") is True)
     reinstall = request.get("reinstall", False)
     decide.invariant(isinstance(reinstall, bool), "reinstall must be a boolean")
     if not reinstall and decide.installed(directory):

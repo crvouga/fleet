@@ -230,6 +230,8 @@ export interface SettingsRow {
   readonly value: Readonly<Record<string, unknown>>;
   readonly updatedAt: Date;
   readonly updatedBy: string | null;
+  /** Optimistic-concurrency counter: 0 for a scope never written, +1 on every write. */
+  readonly revision: number;
 }
 
 export interface SettingsHistoryRow {
@@ -280,4 +282,32 @@ export function isActiveRole(value: unknown): value is ActiveRole {
     typeof value === 'string' &&
     (ACTIVE_ROLES as readonly string[]).includes(value)
   );
+}
+
+export type AuditOutcome = 'success' | 'denied' | 'failed';
+
+/** A security- or operations-relevant action. Never put credentials or tokens in `detail`. */
+export interface AuditInput {
+  readonly actor: string;
+  readonly actorRole?: string | null;
+  /** Dotted verb, e.g. `node.retire`, `settings.put`, `auth.denied`. */
+  readonly action: string;
+  readonly targetKind: string;
+  readonly targetId?: string | null;
+  readonly outcome?: AuditOutcome;
+  readonly requestId?: string | null;
+  readonly detail?: Readonly<Record<string, unknown>>;
+}
+
+export interface AuditRow {
+  readonly id: number;
+  readonly at: Date;
+  readonly actor: string;
+  readonly actorRole: string | null;
+  readonly action: string;
+  readonly targetKind: string;
+  readonly targetId: string | null;
+  readonly outcome: AuditOutcome;
+  readonly requestId: string | null;
+  readonly detail: Readonly<Record<string, unknown>>;
 }

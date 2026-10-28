@@ -15,6 +15,8 @@ import {
   readControllerEnv,
   type ControllerEnv,
 } from './env';
+import { withGithub } from './github/compose';
+import { withSqliteIssues } from './issues/compose';
 import { startJobs } from './jobs/scheduler';
 import { mountUi } from './routes/ui';
 import { localResponse } from './local-response';
@@ -73,12 +75,20 @@ export async function startController(
     const access = new SqliteAccessStore(db);
     const auth = resolveAuth(options.authFactory ?? createDefaultAuth, {
       adminToken: env.adminToken,
+      adminTokenNext: env.adminTokenNext,
       access,
       ...(env.oidc ? { oidc: env.oidc } : {}),
       fetch: options.fetch ?? fetch,
       now,
     });
-    const deps = buildDeps(env, store, { ...auth, access }, now);
+    const deps = withSqliteIssues(
+      withGithub(buildDeps(env, store, { ...auth, access }, now), db, {
+        log,
+        fetch: options.fetch,
+      }),
+      db,
+      { log, fetch: options.fetch }
+    );
     const app = createController(deps, { log, ...writeGate(options) });
     mountUi(app, deps);
     await store.health();
@@ -100,10 +110,13 @@ export async function startController(
       options.local === true
         ? undefined
         : startJobs({
-            store,
+            store: deps.store,
             now: deps.now,
             fetch: options.fetch ?? fetch,
             log,
+            github: deps.github,
+            issues: deps.issues,
+            heartbeatRetentionDays: env.heartbeatRetentionDays,
           });
     log.info('fleet controller listening', { port: listener.port });
     return {

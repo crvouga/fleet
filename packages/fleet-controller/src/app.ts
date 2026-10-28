@@ -12,11 +12,17 @@ import { RateLimiter } from './domain/rate-limit';
 import { mountAdminAccess } from './routes/admin-access';
 import { mountAdminEvents } from './routes/admin-events';
 import { mountAdminNodes } from './routes/admin-nodes';
+import { mountAdminOperations } from './routes/admin-operations';
+import { mountAdminAudit } from './routes/admin-audit';
+import { mountOwnershipStatus } from './routes/ownership-status';
+import { mountAdminIssues } from './routes/admin-issues';
+import { internalError } from './issues/error-response';
 import { mountAdminSettings } from './routes/admin-settings';
 import { mountHealth } from './routes/health';
 import { controllerError, rateLimitGuard } from './routes/http';
 import { mountMetrics } from './routes/metrics';
 import { mountNodeRoutes } from './routes/node-routes';
+import { mountGithub } from './routes/github-routes';
 
 export const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_FAILED = 'The Fleet controller could not complete the request.';
@@ -79,6 +85,20 @@ function mountObservability(app: Hono, log: Logger): void {
 const REGISTER_LIMIT: RateLimitSetting = { limit: 20, windowMs: 60_000 };
 const LOGIN_LIMIT: RateLimitSetting = { limit: 10, windowMs: 5 * 60_000 };
 
+/** Every authenticated administration route, in one place so the composition stays small. */
+function mountAdminApi(app: Hono, deps: AppDeps): void {
+  mountAdminNodes(app, deps);
+  mountAdminAccess(app, deps);
+  mountAdminOperations(app, deps);
+  mountAdminAudit(app, deps);
+  mountOwnershipStatus(app, deps);
+  mountAdminIssues(app, deps);
+  mountGithub(app, deps);
+  mountAdminEvents(app, deps);
+  mountAdminSettings(app, deps);
+  mountMetrics(app, deps);
+}
+
 /**
  * The fleet controller: node endpoints, admin endpoints, /health and /metrics. The
  * dashboard is mounted on the same app by `mountUi`. A rate limit on
@@ -119,11 +139,7 @@ export function createController(
     registerLimiter: limiter(options.registerLimit ?? REGISTER_LIMIT),
     log,
   });
-  mountAdminNodes(app, deps);
-  mountAdminEvents(app, deps);
-  mountAdminSettings(app, deps);
-  mountAdminAccess(app, deps);
-  mountMetrics(app, deps);
+  mountAdminApi(app, deps);
   app.on(
     'POST',
     '/login',
@@ -143,7 +159,7 @@ export function createController(
       route: c.req.routePath,
       error: errorDetails(err),
     });
-    return controllerError(c, 500, 'internal', REQUEST_FAILED);
+    return internalError(c, deps, err, REQUEST_FAILED);
   });
   return app;
 }

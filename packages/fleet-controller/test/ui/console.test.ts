@@ -95,11 +95,15 @@ describe('client console data contract', () => {
         },
         body,
       });
-    expect((await action('https://evil.test', 'confirm=yes')).status).toBe(403);
+    expect(
+      (await action('https://evil.test', 'confirm=Build%201')).status
+    ).toBe(403);
     const unconfirmed = await action(ORIGIN, '');
     expect((await unconfirmed.json()).flash.kind).toBe('error');
+    const wrong = await action(ORIGIN, 'confirm=yes');
+    expect((await wrong.json()).flash.text).toContain('Build 1');
     expect((await deps.store.findNode(IDS.online))?.approval).toBe('approved');
-    const confirmed = await action(ORIGIN, 'confirm=yes');
+    const confirmed = await action(ORIGIN, 'confirm=Build%201');
     expect(confirmed.status).toBe(200);
     expect((await confirmed.json()).flash.kind).toBe('success');
     expect((await deps.store.findNode(IDS.online))?.approval).toBe('retired');

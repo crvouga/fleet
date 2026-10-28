@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { useState } from 'react';
 import {
   Alert,
   Anchor,
@@ -14,6 +15,9 @@ import type { NodeView } from '../types';
 import type { ConsoleState } from './model';
 import { useAction } from './action';
 import { ApproveWithRole } from './role-select';
+import { ConfirmDialog } from './typed-confirm';
+import { InstallerProgressPanel } from './installer-progress';
+import { ReportIssueAnchor } from './report-issue-link';
 export function Pending({
   state,
   reload,
@@ -48,6 +52,7 @@ export function Pending({
       {pending.map(({ view }) => (
         <PendingCard key={view.id} view={view} action={action} />
       ))}
+      <InstallerProgressPanel state={state} />
       {!!rejected.length && (
         <RejectedList rejected={rejected} action={action} />
       )}
@@ -62,6 +67,7 @@ function PendingCard({
   view: NodeView;
   action: ReturnType<typeof useAction>;
 }) {
+  const [rejecting, setRejecting] = useState(false);
   return (
     <Paper withBorder p="lg" key={view.id}>
       <Group justify="space-between">
@@ -77,6 +83,10 @@ function PendingCard({
           <Text size="xs" ff="monospace" c="dimmed">
             {view.id}
           </Text>
+          <ReportIssueAnchor
+            target={{ kind: 'installer', nodeId: view.id }}
+            label="Report installer problem"
+          />
         </Stack>
         <Group>
           <ApproveWithRole
@@ -88,14 +98,34 @@ function PendingCard({
           <Button
             variant="default"
             disabled={action.busy}
-            onClick={() =>
-              action.run(`/nodes/${view.id}/reject`, { next: '/pending' })
-            }
+            onClick={() => setRejecting(true)}
           >
             Reject
           </Button>
         </Group>
       </Group>
+      <ConfirmDialog
+        opened={rejecting}
+        title="Reject this machine?"
+        expected={view.label}
+        confirmLabel="Reject machine"
+        busy={action.busy}
+        error={action.error}
+        onClose={() => setRejecting(false)}
+        onConfirm={async (typed) => {
+          if (
+            await action.run(`/nodes/${view.id}/reject`, {
+              confirm: typed,
+              next: '/pending',
+            })
+          )
+            setRejecting(false);
+        }}
+      >
+        <Text size="sm">
+          {view.label} is refused until a person approves it again.
+        </Text>
+      </ConfirmDialog>
     </Paper>
   );
 }

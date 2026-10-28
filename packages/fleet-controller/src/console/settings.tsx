@@ -16,6 +16,7 @@ import { PageHeading } from '@pkgs/admin-ui/components';
 import type { ConsoleState } from './model';
 import { ACTIVE_ROLES, ROLES } from '../types';
 import type { Scope } from '../config/schema';
+import { authorOf, rollbackOf } from '../domain/settings-history';
 import { SettingsEditor } from './settings-editor';
 import { useAction } from './action';
 export function Settings({
@@ -105,6 +106,8 @@ function SettingsHistory({
                 index={index}
                 scope={scope}
                 action={action}
+                revision={state.revisions?.[scope] ?? 0}
+                readOnly={state.role === 'viewer'}
               />
             ))}
           </Accordion>
@@ -122,20 +125,32 @@ function HistoryVersion({
   index,
   scope,
   action,
+  revision,
+  readOnly,
 }: {
   row: ConsoleState['history'][number];
   index: number;
   scope: string;
   action: ReturnType<typeof useAction>;
+  revision: number;
+  readOnly: boolean;
 }) {
+  const source = rollbackOf(row.changedBy);
   return (
     <Accordion.Item key={row.id} value={String(row.id)}>
       <Accordion.Control>
         <Group justify="space-between">
           <Text size="sm">
-            {row.changedAt.toLocaleString()} · {row.changedBy ?? 'Unknown'}
+            {row.changedAt.toLocaleString()} · {authorOf(row.changedBy)}
           </Text>
-          {index === 0 && <Badge size="xs">Current</Badge>}
+          <Group gap="xs">
+            {source !== null && (
+              <Badge size="xs" color="orange" variant="light">
+                Rollback to #{source}
+              </Badge>
+            )}
+            {index === 0 && <Badge size="xs">Current</Badge>}
+          </Group>
         </Group>
       </Accordion.Control>
       <Accordion.Panel>
@@ -158,13 +173,15 @@ function HistoryVersion({
             <Button
               variant="light"
               loading={action.busy}
+              disabled={readOnly}
               onClick={() =>
                 action.run(`/settings/${scope}/restore`, {
                   historyId: String(row.id),
+                  expectedRevision: String(revision),
                 })
               }
             >
-              Restore this version
+              Roll back to this version
             </Button>
           )}
         </Stack>

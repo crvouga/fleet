@@ -67,8 +67,11 @@ in {
       fi
     '';
   };
-  # GitHub App key and cache signing material stay on runner hosts only.
-  sops.secrets = lib.mkIf (settings.secretsFile != null) ({
+  # Cache signing material stays on runner hosts only. The GitHub App key is
+  # decrypted onto a node only on the legacy per-machine path (an App ID in
+  # settings/github.json). With the App on the fleet controller (the default:
+  # docs/github-runners.md) a node holds no GitHub key at all.
+  sops.secrets = lib.mkIf (settings.secretsFile != null) (lib.optionalAttrs ((settings.github.appId or "") != "") {
     github-app-key = { mode = "0400"; };
   } // lib.optionalAttrs settings.cache.remote.enable {
     cache-credentials = { mode = "0400"; };

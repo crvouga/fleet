@@ -1,23 +1,32 @@
 /** @jsxImportSource react */
 import type { ReactNode } from 'react';
-import { Paper, Stack, Table, Text, Title } from '@mantine/core';
+import { Group, Paper, Stack, Table, Text, Title } from '@mantine/core';
 export function TelemetryTable({
   title,
   columns,
   rows,
   empty = 'Unavailable: this node has not reported this measurement.',
+  badge,
+  note,
 }: {
   title: string;
   columns: readonly string[];
   rows: readonly (readonly ReactNode[])[];
   empty?: string;
+  /** Provenance badge shown beside the title. */
+  badge?: ReactNode;
+  /** Why a value is estimated or partial. */
+  note?: string | null;
 }) {
   return (
     <Paper withBorder p="lg">
       <Stack>
-        <Title order={3} size="h5">
-          {title}
-        </Title>
+        <Group gap="sm">
+          <Title order={3} size="h5">
+            {title}
+          </Title>
+          {badge}
+        </Group>
         {rows.length ? (
           <Table.ScrollContainer minWidth={480}>
             <Table>
@@ -44,6 +53,11 @@ export function TelemetryTable({
             {empty}
           </Text>
         )}
+        {note ? (
+          <Text size="xs" c="dimmed">
+            {note}
+          </Text>
+        ) : null}
       </Stack>
     </Paper>
   );

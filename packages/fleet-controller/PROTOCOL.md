@@ -209,6 +209,20 @@ State-changing browser requests also require a same-origin `Origin` header (CSRF
 - `GET /health` - `200 { "ok": true }` when the process is up and the database can read the required heartbeat schema; `503` otherwise. Used by operator monitoring.
 - `GET /assets/app.css` - the compiled stylesheet.
 
+## Additional contracts
+
+These documents are normative for the areas they cover, with the same rule as above: if a document and the code disagree, fix one of them in the same commit.
+
+| Area                                                                                                                                                                                                                                      | Document                                                             |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Operations (drain, restart, replace, decommission), audit log, typed confirmation: `POST /v1/nodes/:id/{drain,undrain,restart,replace,decommission}`, `GET /v1/operations`, `GET /v1/audit`, setting `maintenance.restartAfter`           | [docs/operations.md](docs/operations.md)                             |
+| Viewer/admin roles, node credential rotation and revocation (`/v1/credential/rotate`, heartbeat `credential` hint), `FLEET_ADMIN_TOKEN_NEXT`, settings concurrency (`If-Match`, 409/428), dry run and impact rules, desired-state history | [docs/access-and-config-safety.md](docs/access-and-config-safety.md) |
+| GitHub integration owned by the controller, `POST /v1/runner-registration`, `/v1/runners`, `/v1/jobs`, `/v1/github/*`, orphan handling and placement                                                                                      | [docs/github-runners.md](docs/github-runners.md)                     |
+| One-click issue reporting: `/report-issue`, `/v1/issues*`, redaction, deduplication, outage handling                                                                                                                                      | [docs/issue-reporting.md](docs/issue-reporting.md)                   |
+| Hardware and health telemetry, incidents (`/v1/incidents`), restart history, retention                                                                                                                                                    | [docs/observability.md](docs/observability.md)                       |
+| Installer-to-controller binding, single-use enrollment grants, hardware tiers, install progress                                                                                                                                           | [docs/installer-enrollment.md](docs/installer-enrollment.md)         |
+| Requirement-to-test traceability and what is not verified                                                                                                                                                                                 | [docs/verification.md](docs/verification.md)                         |
+
 ## Dashboard (cookie session)
 
 `GET /login` (configured OIDC sign-in), `GET /auth/login`, `GET /auth/callback`, `GET /not-allowed`, `POST /logout`, `GET /access` and `POST /access` (allowed administrators only); `POST /login` returns 410 and never creates a session; `GET /` fleet overview; `GET /nodes`, `GET /nodes/:id`; `GET /pending`; `GET /events`; `GET /settings`, `GET /settings/:scope`, `POST /settings/:scope`; `GET /ui/fleet` (an HTML fragment of the overview for auto refresh).
@@ -216,7 +230,7 @@ State-changing browser requests also require a same-origin `Origin` header (CSRF
 ## Background work (inside the controller process)
 
 - Every 30 s: nodes `approved`, silent longer than `alerts.offlineAfterSeconds` (default 300) and not yet announced get an `offline` event (severity `error`), `offline_notified_at`, and a webhook POST if `alerts.webhookUrl` is set. A node that reports again gets a `recovered` event and the notice is cleared. One outage is one notice.
-- Every hour: heartbeat history older than 7 days is deleted. Events and settings history are kept.
+- Every hour: heartbeat history older than the retention window (`FLEET_HEARTBEAT_RETENTION_DAYS`, 1-365, default 30) is deleted. Events and settings history are kept.
 
 ## Limits
 
@@ -241,7 +255,7 @@ Storage and deployment settings are documented in [the configuration guide](../.
 
 - Unknown keys in the body are ignored and never stored (a newer agent does not break an older controller). Types, ranges and sizes are checked; every problem is returned in `errors`.
 - `hostname` and `revision` are taken from the body; `role`, `closure`, `hardware`, `ageRecipient`, `reconcile` and `agent.desiredRevision` are stored as observed state (`observedRole`, `observedClosure`, `hardware`, `ageRecipient`, `reconcile`, `appliedRevision`). A heartbeat **never** writes the assigned role. The stored `facts` are the body without `events`; `ageRecipientNext` is kept only there (no column).
-- The controller writes derived events, once per change and only for `approved` nodes: `boot` (new `bootId`, unless the agent sent its own `boot`), `revision`, `rollback` / `rollback_cleared`, `units_failed` / `units_recovered` (only the units that changed), `disk_high` / `disk_ok` (per mount, at `disk.alertPercent`, default 90), `role_converged` (the observed role became the assigned role, or `base` when unassigned), `reconcile_blocked` (the node's phase became `blocked`; the message carries the first issue) and `recovered` (first report after an `offline` notice). The first report is a baseline and announces none of these.
+- The controller writes derived events, once per change and only for `approved` nodes: `boot` (new `bootId`, unless the agent sent its own `boot`), `revision`, `rollback` / `rollback_cleared`, `units_failed` / `units_recovered` (only the units that changed), `disk_high` / `disk_ok` (per mount, at `disk.alertPercent`, default 90), `role_converged` (the observed role became the assigned role, or `base` when unassigned), `reconcile_blocked` (the node's phase became `blocked`; the message carries the first issue) and `recovered` (first report after an `offline` notice). The first report is a baseline for `boot`, `revision` and `role_converged`. A condition that is already bad on the first report of an approved node (rolled back, blocked, failed units, a full disk) is announced once, because it is a level the operator must see; later reports announce changes only.
 - Registration and admin actions write `registered`, `reregistered`, `approved`, `rejected`, `retired`, `pending`, `node_updated`, `node_deleted` and `role_assigned` (`data: { role, previous, actor }`, written only when the assignment changes).
 
 ### Controller administration endpoints
@@ -277,8 +291,8 @@ No offline notice is sent in the first two minutes after the process starts, so 
 A new agent may include `telemetry` in each heartbeat. Its absence means an
 older agent or unavailable collection; it never means zero usage. The object
 is validated and stored in full in the latest node `facts`. Heartbeat history
-retains a compact nullable JSONB metric summary for the existing seven-day
-retention: sample time, CPU utilization, at most one hottest temperature sensor
+retains a compact nullable JSONB metric summary for the configured retention
+window (default 30 days; see [observability](docs/observability.md)): sample time, CPU utilization, at most one hottest temperature sensor
 and one largest measured power domain (including its name and source).
 Historical arrays for filesystems, network, jobs, diagnostics and issues are
 empty; swap is null. Full lifecycle/service diagnostics belong to the current
@@ -340,7 +354,7 @@ responses are `Cache-Control: no-store` and retain administrator authorization.
 
 ### SQLite schema lifecycle
 
-A new database is created at schema version 2 from `schema.sql`, transactionally,
+A new database is created at schema version 3 from `schema.sql`, transactionally,
 before the controller accepts requests. An existing version 1 database is
 upgraded in one transaction by `src/db/migrations.ts`: the `nodes` table is
 rebuilt (with foreign keys off, then checked) so that `role` is the nullable

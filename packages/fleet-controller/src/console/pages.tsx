@@ -4,12 +4,17 @@ import type { ConsoleState } from './model';
 import { Overview } from './overview';
 import { Nodes } from './nodes';
 import { Events } from './events';
+import { Operations } from './operations';
+import { AuditLog } from './audit';
+import { Incidents } from './incidents';
+import { Runners } from './runners';
+import { ReportIssue } from './report-issue';
 import { NodeDetail } from './node-detail';
 import { Pending } from './pending';
 import { Settings } from './settings';
 import { Access } from './access-list';
 import { AddNode } from './add-node';
-export function Pages({
+function CorePages({
   state,
   path,
   reload,
@@ -39,4 +44,21 @@ export function Pages({
       </Button>
     </Stack>
   );
+}
+
+/** Operations and the audit log, then everything else. */
+export function Pages(props: {
+  state: ConsoleState;
+  path: string;
+  reload: () => void;
+}) {
+  const pathname = props.path.split('?')[0] ?? '/';
+  if (pathname === '/operations')
+    return <Operations state={props.state} reload={props.reload} />;
+  if (pathname === '/audit') return <AuditLog state={props.state} />;
+  if (pathname === '/incidents') return <Incidents />;
+  if (pathname === '/runners') return <Runners state={props.state} />;
+  if (pathname === '/report-issue')
+    return <ReportIssue state={props.state} path={props.path} />;
+  return <CorePages {...props} />;
 }

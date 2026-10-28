@@ -1,5 +1,6 @@
 """Check Windows attribution reaches the packaged executable's build input."""
 import importlib.util
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -50,3 +51,27 @@ class InstallerBuildTests(unittest.TestCase):
         self.assertEqual(resources[0]["ProductName"], "Fleet")
         self.assertEqual(resources[0]["ProductVersion"], version)
         self.assertEqual(resources[0]["Comments"], "https://github.com/crvouga/fleet")
+
+class InstallerPackagingParityTests(unittest.TestCase):
+    """The native launcher (Nix) and the PyInstaller build ship the same wizard files.
+
+    A module added to one and not the other only fails when the packaged
+    installer starts (ModuleNotFoundError), long after the code was merged.
+    """
+
+    def test_nix_launcher_ships_exactly_the_files_the_executable_build_does(self):
+        nix = (WIZARD.parent / "modules" / "installer-package.nix").read_text()
+        listed = re.search(r"files = \[(.*?)\];", nix, re.S).group(1)
+        self.assertEqual(sorted(re.findall(r'"([^"]+)"', listed)), sorted(BUILD.FILES))
+
+    def test_every_local_module_the_wizard_imports_is_shipped(self):
+        shipped = {name[:-3] for name in BUILD.FILES if name.endswith(".py")} | {"decide", "_version"}
+        local = {path.stem for path in WIZARD.glob("*.py")}
+        for name in BUILD.FILES:
+            if not name.endswith(".py"):
+                continue
+            source = (WIZARD / name).read_text()
+            for module in re.findall(r"^\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", source, re.M):
+                if module in local:
+                    self.assertIn(module, shipped, f"{name} imports {module}, which is not packaged")
+

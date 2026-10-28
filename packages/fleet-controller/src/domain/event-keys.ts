@@ -10,7 +10,10 @@ export interface StoredEvent {
 
 export function storedEvent(
   event: Pick<NodeEventInput, 'kind' | 'severity' | 'message'> &
-    Partial<Pick<NodeEventInput, 'key' | 'at' | 'data'>>
+    Partial<Pick<NodeEventInput, 'key' | 'at'>> & {
+      /** Node-reported scalars, or structured identity a derived event carries. */
+      readonly data?: Readonly<Record<string, unknown>>;
+    }
 ): StoredEvent {
   return {
     kind: event.kind,

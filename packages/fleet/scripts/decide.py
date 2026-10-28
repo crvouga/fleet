@@ -2770,6 +2770,168 @@ def preflight(os_name, action, token, directory, need_root=True, disk_path=None,
     return found
 
 
+# ---- hardware support tiers ------------------------------------------------
+# One pure classification of the machine that would become a node (or of the
+# media being made for one), computed BEFORE anything destructive from facts the
+# checks above already gathered. `unsupported` is refused by the wizard, by the
+# privileged helper and by the live installer; `partially automated` needs the
+# person's informed acknowledgement of the named limitation. The matrix in
+# docs/installer.md and docs/hardware.md is checked against HARDWARE_MATRIX.
+TIER_SUPPORTED = "supported"
+TIER_PARTIAL = "partially automated"
+TIER_UNSUPPORTED = "unsupported"
+TIER_RANK = {TIER_SUPPORTED: 0, TIER_PARTIAL: 1, TIER_UNSUPPORTED: 2}
+
+# (finding name, finding status) -> (tier, code). The finding's own `fix` text is
+# the required action. A failing check the table does not know is never
+# "supported": it is partial, with its own fix as the action.
+FINDING_TIERS = {
+    ("architecture", "fail"): (TIER_UNSUPPORTED, "arch-not-x86-64"),
+    ("firmware", "fail"): (TIER_UNSUPPORTED, "firmware-not-uefi"),
+    ("memory", "fail"): (TIER_UNSUPPORTED, "ram-below-minimum"),
+    ("partition-style", "fail"): (TIER_UNSUPPORTED, "disk-not-gpt"),
+    ("dynamic-disk", "fail"): (TIER_UNSUPPORTED, "windows-dynamic-disk"),
+    ("sector-size", "fail"): (TIER_UNSUPPORTED, "unsupported-sector-size"),
+    ("efi-partition", "fail"): (TIER_UNSUPPORTED, "no-efi-partition"),
+    ("system-disk", "fail"): (TIER_UNSUPPORTED, "ambiguous-system-disk"),
+    ("boot-tool", "fail"): (TIER_UNSUPPORTED, "no-boot-tool"),
+    ("staging", "fail"): (TIER_UNSUPPORTED, "unsupported-staging-filesystem"),
+    ("shrink", "fail"): (TIER_UNSUPPORTED, "windows-cannot-shrink"),
+    ("usb-size", "fail"): (TIER_UNSUPPORTED, "usb-too-small"),
+    ("network-adapter", "fail"): (TIER_UNSUPPORTED, "no-network-driver"),
+    ("secure-boot", "fail"): (TIER_PARTIAL, "secure-boot-on"),
+    ("secure-boot", "warn"): (TIER_PARTIAL, "secure-boot-unknown"),
+    ("space", "fail"): (TIER_PARTIAL, "staging-space"),
+    ("network", "fail"): (TIER_PARTIAL, "installer-unreachable"),
+    ("runner-idle", "fail"): (TIER_PARTIAL, "job-running"),
+    ("disk-controller", "warn"): (TIER_PARTIAL, "raid-or-vmd-controller"),
+    ("leftover-partition", "warn"): (TIER_PARTIAL, "leftover-linux-partition"),
+    ("bitlocker", "warn"): (TIER_PARTIAL, "bitlocker-recovery-key"),
+    ("power", "warn"): (TIER_PARTIAL, "running-on-battery"),
+}
+# Checks the installer repeats and fixes itself once, then re-measures. These are
+# automation, not limitations: they never lower the tier or need an acknowledgement.
+AUTOMATIC_REASON = {
+    "boot-tool": ("linux-boot-tool-install", "the Linux boot tool (kexec) is installed with this system's package manager"),
+    "shrink": ("windows-free-space-consolidation", "Windows free space is consolidated once; if that is not enough the conversion stops before any partition changes"),
+}
+HARDWARE_MATRIX = (
+    # (platform, as this computer becomes a node, as the machine that makes install USB media)
+    ("Windows x64 (UEFI, GPT, Secure Boot off)", TIER_SUPPORTED, TIER_SUPPORTED),
+    ("Windows x64 with Secure Boot on, unreadable Secure Boot, BitLocker, RAID/VMD or battery", TIER_PARTIAL, TIER_SUPPORTED),
+    ("Windows with legacy BIOS, MBR, dynamic disk, no EFI partition or more than one internal disk", TIER_UNSUPPORTED, TIER_SUPPORTED),
+    ("Linux x64 (UEFI) with kexec or an installable kexec-tools", TIER_SUPPORTED, TIER_SUPPORTED),
+    ("Linux x64 with Wi-Fi as the only network", TIER_PARTIAL, TIER_SUPPORTED),
+    ("Linux without kexec that cannot be prepared, or an unsupported staging filesystem", TIER_UNSUPPORTED, TIER_SUPPORTED),
+    ("NixOS x64", TIER_SUPPORTED, TIER_SUPPORTED),
+    ("macOS (Intel or Apple silicon)", TIER_UNSUPPORTED, TIER_SUPPORTED),
+    ("Linux or NixOS ARM64, other ARM", TIER_UNSUPPORTED, TIER_SUPPORTED),
+    ("Any machine with less RAM than the image plus 2 GiB", TIER_UNSUPPORTED, TIER_SUPPORTED),
+)
+
+
+LIVE_MIN_RAM = 2 * 1024 ** 3
+
+
+def live_findings(arch, uefi, mem_total, adapters):
+    """What the booted live installer can know about its own machine: the evidence the tiers need
+    that the wizard could not see from outside. adapters is the `adapters` list of
+    /run/fleet-live/network.json (empty or None when unknown: the network check is then skipped, never guessed)."""
+    found = [finding("architecture", "ok" if arch in X86 else "fail", arch or "unknown",
+                     "" if arch in X86 else "Boot an x86_64 computer. Other architectures are not supported yet."),
+             finding("firmware", "ok" if uefi else "fail", "booted in UEFI mode" if uefi else "booted in legacy BIOS mode",
+                     "" if uefi else "Turn on UEFI boot and turn off CSM or legacy boot in the firmware settings.")]
+    if mem_total is not None:
+        found.append(finding("memory", "ok" if mem_total >= LIVE_MIN_RAM else "fail", f"{mem_total / 1024 ** 3:.1f} GiB RAM",
+                             "" if mem_total >= LIVE_MIN_RAM else "Add RAM: the installer runs from memory and needs at least 2 GiB."))
+    if adapters:  # an empty or unknown list proves nothing: a USB adapter can appear late, and the install waits for the network
+        usable = [item for item in adapters if isinstance(item, dict) and item.get("driver") not in (None, "", "none")]
+        found.append(finding("network-adapter", "ok" if usable else "fail",
+                             ", ".join(sorted({str(item.get("driver")) for item in usable})) or "no network adapter has a driver in this installer",
+                             "" if usable else "Plug in a supported Ethernet adapter or share a phone's USB connection. docs/hardware.md explains how to check a NIC's driver."))
+    return found
+
+
+def classify_hardware(os_name, mode, findings, disk_plan=None, network=None):
+    """Classify the target BEFORE a destructive step.
+
+    os_name: the OS running the wizard. mode: "here" (this computer becomes the
+    node) or "usb" (install media for another computer). findings: the review
+    findings (run `preparation.review_findings` first so a repair the installer
+    performs itself counts as a limitation, not a failure). disk_plan: the result
+    of plan_disks(..., "install") for mode "here". network: "wifi", "wired" or
+    None when unknown; Wi-Fi only is partial because adapter driver support in
+    the live image is unknowable before it boots.
+
+    Returns {"tier", "reasons": [{code, tier, detail}], "required_actions": [...],
+    "acknowledgement": str | None, "checked": [names that passed]}. Pure: no I/O.
+    """
+    reasons = []
+
+    def add(tier, code, detail, action=""):
+        reasons.append({"code": code, "tier": tier, "detail": detail, "action": action})
+
+    if mode == "usb":
+        add(TIER_SUPPORTED, "media-only",
+            "This computer only writes the install USB. The computer you boot it on is checked by the live installer before it erases anything.")
+    elif os_name not in ("Linux", "Windows"):
+        label = "macOS" if os_name == "Darwin" else str(os_name)
+        add(TIER_UNSUPPORTED, "os-cannot-restart-into-installer",
+            f"{label} cannot restart straight into the installer.", "Make an install USB with this computer and boot the target from it.")
+    if mode == "here" and disk_plan is not None and not disk_plan.get("ok"):
+        message = str(disk_plan.get("next", ""))
+        code = "multiple-internal-disks" if "more than one" in message else "no-eligible-internal-disk"
+        add(TIER_UNSUPPORTED, code, message.replace("Next: ", "", 1).replace(" Nothing was written.", ""),
+            "Disconnect the extra disk, or make an install USB." if code == "multiple-internal-disks" else "Connect the internal disk, or make an install USB.")
+    passed = []
+    for item in findings:
+        name, status = item["name"], item["status"]
+        if item.get("automatic") and name in AUTOMATIC_REASON:
+            code, detail = AUTOMATIC_REASON[name]
+            add(TIER_SUPPORTED, code, detail)  # automated, so not a limitation
+            continue
+        rule = FINDING_TIERS.get((name, status))
+        if rule is None and status == "fail" and name not in ("privilege",):
+            rule = (TIER_PARTIAL, "check-failed-" + name)
+        if rule is None:
+            if status == "ok":
+                passed.append(name)
+            continue
+        if mode == "usb" and name not in ("usb-size", "space", "network"):
+            continue  # a target's properties are not this computer's when it only writes media
+        add(rule[0], rule[1], str(item.get("detail", "")), str(item.get("fix", "")))
+    if mode == "here" and network == "wifi":
+        add(TIER_PARTIAL, "wifi-driver-unverified",
+            "Wi-Fi is the only network detected. Whether the installer image has a driver for this computer's Wi-Fi adapter cannot be known until it boots; with no connection it waits and erases nothing.",
+            "Prefer Ethernet, or confirm this adapter works with Linux before continuing.")
+    tier = max((r["tier"] for r in reasons), key=TIER_RANK.get, default=TIER_SUPPORTED)
+    limits = [r for r in reasons if TIER_RANK[r["tier"]] > 0]
+    actions = list(dict.fromkeys(r["action"] for r in limits if r["action"]))
+    if tier == TIER_UNSUPPORTED and not actions:
+        actions = ["Use a different USB disk." if mode == "usb" else "Make an install USB with this wizard and boot the target computer from it."]
+    acknowledgement = None
+    if tier == TIER_PARTIAL:
+        acknowledgement = ("This computer is only partially automated: "
+                           + "; ".join(r["detail"].rstrip(".") for r in limits)
+                           + ". I understand these limits and still want to continue.")
+    return {"tier": tier, "reasons": reasons, "required_actions": actions,
+            "acknowledgement": acknowledgement, "checked": passed}
+
+
+def refuse_unsupported(classification, acknowledged=False):
+    """The destructive step's gate: unsupported is refused, partial needs the
+    acknowledgement of exactly the limitation it names."""
+    tier = classification["tier"]
+    limits = [r["detail"] for r in classification["reasons"] if TIER_RANK[r["tier"]] > 0]
+    invariant(tier != TIER_UNSUPPORTED, "this hardware is unsupported for installing in place: " + "; ".join(limits),
+              " ".join(classification["required_actions"]) or "Make an install USB and boot the target from it. Nothing was erased.",
+              tier=tier)
+    invariant(tier != TIER_PARTIAL or acknowledged is True,
+              "this hardware is only partially automated and its limitation was not acknowledged",
+              "Read the limitation on the review page, tick the box that acknowledges it and try again. Nothing was erased.",
+              tier=tier)
+
+
 def show_findings(found):
     say("Checks:")
     for item in found:

@@ -77,6 +77,7 @@ async function serveAsWriter(
         `"${process.execPath}" "${new URL('controller.ts', import.meta.url).pathname}"`,
       ctx,
       shutdown,
+      retention: env.retention,
     });
   } finally {
     shutdown.dispose();

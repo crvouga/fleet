@@ -1,6 +1,7 @@
 import { ApproveForm } from '../components/approve-form';
-import { ActionForm } from '../components/forms';
+import { Confirm } from '../components/forms';
 import { Icon } from '../components/icon';
+import { ReportIssueLink } from '../components/report-issue';
 import { ChipList, RoleBadge } from '../components/status';
 import { Time } from '../components/time';
 import type { FleetData, FleetEntry } from '../lib/fleet-data';
@@ -89,15 +90,25 @@ function PendingCard(props: {
             next="/pending"
           />
           {props.rejected === true ? null : (
-            <ActionForm
+            <Confirm
+              id={`reject-${view.id.slice(0, 12)}`}
+              summary="Reject"
+              button="Reject machine"
               action={`/nodes/${view.id}/reject`}
-              label="Reject"
+              expected={view.label}
               hidden={{ next: '/pending' }}
+              warning="The machine is refused until a person approves it again."
             />
           )}
         </div>
       </div>
       <PendingSpecs entry={props.entry} now={props.now} />
+      <p class="mt-3">
+        <ReportIssueLink
+          target={{ kind: 'installer', nodeId: view.id }}
+          label="Report installer problem"
+        />
+      </p>
     </li>
   );
 }

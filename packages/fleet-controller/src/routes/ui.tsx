@@ -8,9 +8,14 @@ import { registerConsoleAssets } from '../ui/routes/console-assets';
 import { registerBrowser } from '../ui/routes/browser';
 import { registerAccess } from '../ui/routes/access';
 import { registerActions } from '../ui/routes/actions';
+import { registerCredentialActions } from '../ui/routes/credential-actions';
 import { registerPages } from '../ui/routes/pages';
+import { registerOperationsPages } from '../ui/routes/operations-pages';
 import { registerInstallers } from '../ui/routes/installers';
 import { registerSettings } from '../ui/routes/settings';
+import { registerRunners } from '../ui/routes/runners';
+import { registerReportIssue } from '../ui/routes/report-issue';
+import { registerIncidents } from '../ui/routes/incidents';
 
 function serve(c: Context, asset: Asset, type: string): Response {
   if (c.req.header('if-none-match') === asset.etag) return c.body(null, 304);
@@ -40,7 +45,12 @@ export function mountUi(app: Hono, deps: AppDeps): void {
   registerBrowser(app, deps);
   registerAccess(app, deps);
   registerActions(app, deps);
+  registerCredentialActions(app, deps);
   registerInstallers(app, deps);
   registerPages(app, deps);
+  registerOperationsPages(app, deps);
   registerSettings(app, deps);
+  registerRunners(app, deps);
+  registerReportIssue(app, deps);
+  registerIncidents(app, deps);
 }

@@ -1,5 +1,5 @@
 import { sampleIsFresh } from '../../domain/telemetry-validation';
-import type { Telemetry } from '../../telemetry';
+import type { PressureSample, Provenance, Telemetry } from '../../telemetry';
 import type { FleetEntry } from './fleet-data';
 
 export function telemetryFresh(entry: FleetEntry, now: Date): boolean {
@@ -42,4 +42,58 @@ export function bytes(value: number | null): string {
   if (value < 1024) return `${value} B`;
   const unit = Math.min(4, Math.floor(Math.log(value) / Math.log(1024)));
   return `${(value / 1024 ** unit).toFixed(1)} ${['B', 'KiB', 'MiB', 'GiB', 'TiB'][unit]}`;
+}
+
+/** What a badge says: a stale sample never claims to be a current measurement. */
+export type ProvenanceBadge = Provenance | 'stale';
+export function provenanceBadge(
+  status: Provenance,
+  stale: boolean
+): ProvenanceBadge {
+  if (status === 'unsupported') return 'unsupported';
+  return stale ? 'stale' : status;
+}
+/** A value known to be a number, with its unit; null is unknown, never "0". */
+export function measured(
+  value: number | null | undefined,
+  unit: string,
+  digits = 1
+): string {
+  return value === null || value === undefined
+    ? 'Unavailable'
+    : `${Number.isInteger(value) ? value : value.toFixed(digits)}${unit}`;
+}
+export function perSecond(value: number | null | undefined): string {
+  return value === null || value === undefined
+    ? 'Unavailable'
+    : `${bytes(value)}/s`;
+}
+function peakOf(values: readonly (number | null)[]): number | null {
+  const known = values.filter((value): value is number => value !== null);
+  return known.length ? Math.max(...known) : null;
+}
+export function peakGpuUtilization(sample?: Telemetry | null): number | null {
+  const gpus = sample?.gpus;
+  return gpus && gpus.status !== 'unsupported'
+    ? peakOf(gpus.devices.map((item) => item.utilizationPercent))
+    : null;
+}
+export function peakGpuTemperature(sample?: Telemetry | null): number | null {
+  const gpus = sample?.gpus;
+  return gpus && gpus.status !== 'unsupported'
+    ? peakOf(gpus.devices.map((item) => item.temperatureCelsius))
+    : null;
+}
+export function peakDiskBusy(sample?: Telemetry | null): number | null {
+  const disks = sample?.diskIo;
+  return disks && disks.status !== 'unsupported'
+    ? peakOf(disks.devices.map((item) => item.busyPercent))
+    : null;
+}
+/** PSI "some" over 60 s: the share of time at least one task stalled on memory. */
+export function memoryPressure(sample?: Telemetry | null): number | null {
+  const line: PressureSample | null | undefined = sample?.pressure?.memory;
+  return sample?.pressure?.status === 'unsupported'
+    ? null
+    : (line?.someAvg60 ?? null);
 }

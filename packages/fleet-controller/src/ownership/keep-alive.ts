@@ -1,12 +1,24 @@
+import { errorDetails } from '@pkgs/logger';
+
 import type { OwnershipContext } from './acquire';
 import type { Lease, LeaseState } from './lease';
+import { writeOwnershipStatus } from './status';
 import { openGateUntil } from './write-gate';
+
+/** Where the supervisor publishes ownership for the worker's monitoring endpoints. */
+export interface StatusSink {
+  readonly path: string;
+  /** Wall time when the replica last held everything committed; null before the first sync. */
+  readonly lastSyncAt: () => number | null;
+}
 
 export interface KeepAlive {
   /** Resolves once the lease leaves the held state (hand-over requested or lost). */
   readonly changed: Promise<LeaseState>;
   /** Closes the write gate for good: draining, stopping or fenced. */
   closeGate(): void;
+  /** Rewrites the status file now, e.g. after the replica sync time changed. */
+  refresh(): void;
   stop(): void;
 }
 
@@ -18,7 +30,8 @@ export interface KeepAlive {
 export function keepAlive(
   lease: Lease,
   ctx: OwnershipContext,
-  gatePath: string
+  gatePath: string,
+  status?: StatusSink
 ): KeepAlive {
   let stopped = false;
   let closed = false;
@@ -29,6 +42,7 @@ export function keepAlive(
   const publish = () => {
     const remaining = lease.writableUntil() - ctx.now();
     openGateUntil(gatePath, closed ? 0 : Date.now() + remaining);
+    if (status) publishStatus(lease, ctx, status, closed);
   };
   publish();
   void (async () => {
@@ -51,10 +65,39 @@ export function keepAlive(
       closed = true;
       publish();
     },
+    refresh: publish,
     stop: () => {
       stopped = true;
       clearTimeout(timer);
       wake?.();
     },
   };
+}
+
+/** A draining holder (gate closed) reports `handover`: still the owner, no longer accepting writes. */
+function publishStatus(
+  lease: Lease,
+  ctx: OwnershipContext,
+  status: StatusSink,
+  closed: boolean
+): void {
+  const state = closed && lease.current === 'held' ? 'handover' : lease.current;
+  try {
+    writeOwnershipStatus(status.path, {
+      state,
+      generation: lease.claim.generation,
+      holder: ctx.instance,
+      renewedAtWall: Math.max(
+        0,
+        Math.floor(Date.now() - (ctx.now() - lease.lastRenewedAt))
+      ),
+      lastSyncAtWall: status.lastSyncAt(),
+      replicaGeneration: lease.replicaGeneration,
+    });
+  } catch (error) {
+    // Monitoring must never disturb ownership renewal.
+    ctx.log.warn('could not publish ownership status', {
+      error: errorDetails(error),
+    });
+  }
 }

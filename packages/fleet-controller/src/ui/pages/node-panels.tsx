@@ -193,10 +193,17 @@ export function ManagePanel(props: { view: NodeView }) {
             label={view.approval === 'rejected' ? 'Approve anyway' : 'Approve'}
             tone="primary"
           />
-          {view.approval === 'pending' ? (
-            <ActionForm action={`${base}/reject`} label="Reject" />
-          ) : null}
         </div>
+      ) : null}
+      {view.approval === 'pending' ? (
+        <Confirm
+          id="reject"
+          summary="Reject this machine"
+          button="Reject machine"
+          action={`${base}/reject`}
+          expected={view.label}
+          warning="Rejecting refuses this machine: it is told to back off until a person approves it again."
+        />
       ) : null}
       {view.approval === 'approved' ? (
         <Confirm
@@ -204,6 +211,7 @@ export function ManagePanel(props: { view: NodeView }) {
           summary="Retire this node"
           button="Retire node"
           action={`${base}/retire`}
+          expected={view.label}
           warning="Retiring stops offline notices for this machine and ends its access. It becomes pending again if it registers again."
         />
       ) : null}
@@ -212,6 +220,7 @@ export function ManagePanel(props: { view: NodeView }) {
         summary="Delete this node"
         button="Delete node and history"
         action={`${base}/delete`}
+        expected={view.label}
         warning="Deleting forgets the node and all of its heartbeat history. Events keep its name. This cannot be undone."
       />
     </section>

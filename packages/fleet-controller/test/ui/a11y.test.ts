@@ -35,6 +35,8 @@ const PAGES = (): [string, string][] => [
   [`/nodes/${IDS.pending}`, 'pending detail'],
   ['/pending', 'pending'],
   ['/events', 'events'],
+  ['/operations', 'operations'],
+  ['/audit', 'audit'],
   ['/settings', 'settings'],
   ['/settings/role:ci', 'role settings'],
   [`/settings/node:${IDS.online}`, 'node settings'],

@@ -28,6 +28,7 @@ import diagnostics
 import elevate
 import helper
 import imaging
+import fleet_binding
 import fleet_tls
 import preparation
 import fleet_wifi
@@ -152,11 +153,65 @@ class Wizard:
         self.lock = threading.Lock()
         self.source = None
         decide.NET["probe"] = self.probe_installer
+        self.found = {"state": "none", "binding": None, "path": None}
+        self.grant_check = fleet_binding.check_controller  # replaced in tests: it is the only network call
 
     # ---- facts -------------------------------------------------------------
 
     def installer_urls(self):
         return (self.source, self.source + '.sha256') if self.source else installer_urls()
+
+    # ---- binding to the issuing controller ---------------------------------
+
+    def configured_origin(self):
+        """The controller this installer is set to download from: entered by the person, or the environment."""
+        if self.source:
+            return self.source.rsplit('/installers/assets/', 1)[0]
+        url = os.environ.get('FLEET_CONTROLLER_URL') or os.environ.get('FLEET_INSTALLER_URL') or ''
+        parsed = urllib.parse.urlsplit(url)
+        return f'{parsed.scheme}://{parsed.netloc}' if parsed.scheme in ('http', 'https') else None
+
+    def refresh_binding(self):
+        """Read fleet-bind.json (next to this program, or in Downloads). With nothing else configured, its
+        origin becomes the installer source: nobody types an address."""
+        self.found = fleet_binding.find()
+        binding = self.found["binding"]
+        if binding is not None and self.configured_origin() is None:
+            self.source = binding["origin"] + '/installers/assets/fleet-installer.iso'
+            self.plan = None
+        if binding is not None:
+            decide.REDACT_VALUES.add(binding["grant"])
+        return fleet_binding.public(self.found, self.configured_origin())
+
+    def binding_blocker(self, mode):
+        """The refusal for a binding that must not be used, else None. A wrong controller stops every mode;
+        a binding that cannot enroll stops only the mode that would present its grant."""
+        view = fleet_binding.public(self.found, self.configured_origin())
+        if view["state"] == "mismatch" or (mode == "here" and view["state"] not in ("none", "ok")):
+            return view
+        return None
+
+    def binding_finding(self, token_given):
+        """Validate the bound grant with the issuing controller, read-only, and say what will happen.
+        Returns (token or None, finding or None). Raises Invariant for a grant the controller refuses."""
+        binding = self.found["binding"]
+        if binding is None or token_given:
+            return None, None
+        try:
+            result = self.grant_check(binding)
+        except fleet_binding.BindingError as refusal:
+            decide.invariant(False, f"{refusal.message}; nothing was erased", refusal.fix, origin=binding["origin"])
+        if result["state"] == "unreachable":
+            note = ("the Fleet app could not be asked whether this installer's enrollment is still valid; registration after the restart decides, "
+                    "and nothing is erased before a person or the binding approves this computer")
+            return binding["grant"], decide.finding("enrollment-binding", "warn", note)
+        if result["state"] == "used":
+            return binding["grant"], decide.finding(
+                "enrollment-binding", "warn", "this installer's enrollment was already used by another computer; this one will wait for approval under Pending in the Fleet app")
+        how = (f"approved automatically with the {result['role']} role" if result["approval"] == "automatic"
+               else "then approve it under Pending in the Fleet app")
+        return binding["grant"], decide.finding(
+            "enrollment-binding", "info", f"this installer is bound to {binding['origin']} (single-use, expires {binding['expiresAt']}): the live installer enrolls this computer, {how}")
 
     def set_source(self, origin):
         decide.invariant(self.job.snapshot()['state'] in ('idle', 'done', 'failed', 'cancelled'), 'An installation is already running.')
@@ -165,6 +220,10 @@ class Wizard:
         decide.invariant(valid and parsed.hostname and not parsed.username and not parsed.password
                          and parsed.path in ('', '/') and not parsed.query and not parsed.fragment,
                          'Enter your Fleet app HTTPS origin.', 'Use an origin such as https://fleet.example.org; loopback HTTP is allowed for local testing.')
+        bound = self.found["binding"]
+        decide.invariant(bound is None or fleet_binding.normal_origin(origin) == bound["origin"],
+                         f"this installer is bound to {bound['origin'] if bound else ''}",
+                         "Use the Fleet app that issued it, or remove fleet-bind.json and download an installer from the Fleet app you mean to use.")
         self.source = str(origin).strip().rstrip('/') + '/installers/assets/fleet-installer.iso'
         self.plan = None
         return {'configured': True}
@@ -198,7 +257,14 @@ class Wizard:
             reasons.append(internal["next"].replace("Next: ", "", 1).replace(" Nothing was written.", ""))
         return reasons
 
+    def scan_tier(self, internal):
+        arch = decide.machine_arch()
+        found = [decide.finding("architecture", "ok" if arch in decide.X86 else "fail", arch,
+                                "" if arch in decide.X86 else "Run this program on an x86_64 computer. Other architectures are not supported yet.")]
+        return decide.classify_hardware(self.os_name, "here", found, internal)
+
     def scan(self):
+        binding = self.refresh_binding()
         disks, disk_error = self.disks()
         internal = decide.plan_disks(disks, "install") if not disk_error else {"ok": False, "next": disk_error}
         source_required = False
@@ -210,6 +276,7 @@ class Wizard:
         node = decide.read_kv(os.environ.get("FLEET_NODE_CONF", "/etc/fleet/node.conf"))
         return {
             "source_required": source_required,
+            "binding": binding,
             "version": VERSION,
             "os": OS_LABEL.get(self.os_name, self.os_name),
             "arch": decide.machine_arch(),
@@ -220,6 +287,9 @@ class Wizard:
             "usb": self.usb_choices(disks),
             "internal": {"ok": internal["ok"], "plain": internal.get("plain"), "id": internal.get("disk_id")},
             "here_blockers": self.here_blockers(disks, internal),
+            # What this computer could be, before any plan exists: the review repeats it
+            # with every check. USB media creation is available wherever the wizard runs.
+            "hardware": {"here": self.scan_tier(internal), "usb": decide.classify_hardware(self.os_name, "usb", [])},
             "release": {"ok": error is None, "error": error, "size": size, "advice": fleet_tls.advice(error),
                         "guidance": diagnostics.guidance(str(error), fleet_tls.advice(error), changed=False) if error else None},
             "log": decide.LOG["path"],
@@ -254,6 +324,12 @@ class Wizard:
                              "Paste the read credential of the fleet's private repository exactly as your Fleet operator gave it.")
             git_credential = parsed[1]
             decide.REDACT_VALUES.add(git_credential.strip())
+        self.refresh_binding()
+        blocked = self.binding_blocker(mode)
+        decide.invariant(blocked is None, (blocked or {}).get("detail") or "this installer's controller binding cannot be used",
+                         (blocked or {}).get("fix", ""), binding=(blocked or {}).get("state"))
+        bound_token, binding_finding = self.binding_finding(token is not None) if mode == "here" else (None, None)
+        token = token or bound_token
         disks, disk_error = self.disks()
         decide.invariant(not disk_error, "could not list the disks", disk_error or "")
         directory = decide.state_dir()
@@ -279,6 +355,8 @@ class Wizard:
                                         disk_path=internal["path"],
                                         iso_path=imaging.cache_dir(self.os_name) / "fleet-installer.iso")
             findings = preparation.review_findings(self.os_name, findings)
+            if binding_finding is not None:
+                findings.append(binding_finding)
             erase, disk_id, target = internal["plain"], internal["disk_id"], internal["path"]
             summary = (f"This erases {internal['plain']}, including this computer's operating system and every file on it, and installs a Fleet node. "
                        "Approve it in the Fleet app; its role is assigned there.")
@@ -296,10 +374,13 @@ class Wizard:
             network = {"ssid": connected_name(self.os_name), "source": "detected"}
         else:
             network = None
+        classification = decide.classify_hardware(
+            self.os_name, mode, findings, internal if mode == "here" else None, "wifi" if network else None)
         plan = {
             "id": secrets.token_hex(8), "mode": mode, "reinstall": reinstall, "token": token, "disk_id": disk_id, "path": target,
-            "wifi": wifi, "git_credential": git_credential,
-            "erase": erase, "summary": summary, "findings": findings, "network": network, "ready": not problems, "created": time.time(),
+            "wifi": wifi, "git_credential": git_credential, "classification": classification,
+            "erase": erase, "summary": summary, "findings": findings, "network": network,
+            "ready": not problems and classification["tier"] != decide.TIER_UNSUPPORTED, "created": time.time(),
         }
         with self.lock:
             decide.invariant(self.job.snapshot()["state"] in ("idle", "done", "failed", "cancelled"),
@@ -318,6 +399,10 @@ class Wizard:
             decide.invariant(plan is not None and body.get("plan_id") == plan["id"], "that plan is not the current one", "Go back and review the plan again.")
             decide.invariant(time.time() - plan["created"] <= PLAN_TTL, "that review has expired", "Review the disk and checks again.")
             decide.invariant(plan["ready"], "the plan has failed checks", "Fix the failed checks on the review page first.")
+            # Unsupported hardware is refused here, not merely warned about; a partial tier
+            # needs the person to acknowledge the exact limitation the review named.
+            decide.refuse_unsupported(plan["classification"], body.get("ack_limitations") is True)
+            plan["acknowledged"] = body.get("ack_limitations") is True
             decide.invariant(body.get("ack") is True, "the erase was not acknowledged", "Tick the box that says you understand the disk will be erased.")
             decide.invariant(body.get("disk_id") == plan["disk_id"], "the acknowledged disk is not the planned disk", "Review the plan again.")
             decide.invariant(self.job.snapshot()["state"] in ("idle", "done", "failed", "cancelled"), "a job is already running")
@@ -422,7 +507,8 @@ class Wizard:
         try:
             request = {"attempt": job.attempt, "action": "write-usb" if plan["mode"] == "usb" else "install-here", "iso": str(iso), "sha256": sha,
                        "disk_id": plan["disk_id"], "path": plan["path"], "reinstall": plan["reinstall"], "token": plan["token"], "wifi": plan.get("wifi"),
-                       "git_credential": plan.get("git_credential")}
+                       "git_credential": plan.get("git_credential"), "network": "wifi" if plan.get("network") else None,
+                       "ack_limitations": plan.get("acknowledged") is True}
             fd = os.open(scratch / "request.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as handle:
                 json.dump(request, handle)

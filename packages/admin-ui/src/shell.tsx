@@ -7,6 +7,7 @@ import {
   Button,
   Group,
   NavLink,
+  ScrollArea,
   Stack,
   Text,
 } from '@mantine/core';
@@ -71,7 +72,8 @@ export function AdminShell(props: ShellProps) {
         </Group>
       </AppShell.Header>
       <AppShell.Navbar id="admin-navigation" p="md">
-        <AppShell.Section grow>
+        {/* Scrolls on short screens so the account section stays reachable. */}
+        <AppShell.Section grow component={ScrollArea}>
           <Navigation items={props.navigation} close={close} />
         </AppShell.Section>
         <AppShell.Section>{props.account}</AppShell.Section>

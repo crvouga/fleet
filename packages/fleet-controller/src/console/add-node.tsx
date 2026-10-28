@@ -23,6 +23,8 @@ import {
   installerUrl,
 } from '../ui/lib/installers';
 import { detectedPlatform, type PlatformHints } from './platform';
+import { InstallerBinding } from './installer-binding';
+import { HardwareTiers } from './hardware-tiers';
 const ROLE_LABELS: Record<ActiveRole, string> = {
   ci: 'GitHub Actions runners',
   devbox: 'Developer workstation',
@@ -79,6 +81,8 @@ export function AddNode({ empty = false }: { empty?: boolean }) {
             ))}
           </Group>
           <Downloads />
+          <InstallerBinding />
+          <HardwareTiers />
           <Alert color="yellow">
             macOS is unsigned, and Windows can show download or publisher
             warnings. Installation can erase a disk; review the exact target and
