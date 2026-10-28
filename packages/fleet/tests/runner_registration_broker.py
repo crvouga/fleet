@@ -91,6 +91,12 @@ def handler_for(broker):
             return
 
         def reply(self, status, document, headers=None):
+            # Held until the request is logged: a client that sees the answer must
+            # also find the record (the log is written before anything is sent).
+            self.pending = (status, document, headers)
+
+        def send(self):
+            status, document, headers = self.pending
             data = json.dumps(document).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -127,6 +133,7 @@ def handler_for(broker):
                 self.reply(404, {"error": "not_found"})
             record.update(status=status, node=node)
             broker.append("requests.jsonl", record)
+            self.send()
 
         def register(self, document, record):
             node, secret = document.get("nodeId"), document.get("secret")
