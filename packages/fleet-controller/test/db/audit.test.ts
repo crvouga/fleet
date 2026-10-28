@@ -3,9 +3,8 @@ import { describe, expect, test } from 'bun:test';
 import { MemoryStore } from '../../src/testing/memory-store';
 import { useDatabase } from '../support/database';
 
-const database = useDatabase();
-
 describe('audit log', () => {
+  const database = useDatabase();
   test('SQLite store appends, filters and pages entries newest first', async () => {
     const { store, close } = await database().newStore();
     try {
