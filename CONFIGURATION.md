@@ -118,7 +118,8 @@ is no implicit provider construction inside the browser auth service.
 ### Container hosting
 
 The root `Dockerfile` packages the same controller and Litestream supervisor for
-`linux/amd64` hosting. Build without secrets with `docker build -t fleet .`.
+`linux/amd64` hosting. Build without secrets with
+`docker build --platform linux/amd64 -t fleet .`.
 It pins Bun 1.4.4 and Litestream 0.5.17, builds dashboard assets, installs frozen
 production dependencies, and runs as the unprivileged `bun` user. The entrypoint
 receives SIGTERM directly. Supply the settings above as runtime environment

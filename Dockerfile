@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
-FROM litestream/litestream:0.5.17@sha256:4b02b9859a6b6b4087d8b8944e15f7e984bd7957cba322bbeee38b0e27b9656a AS litestream
+FROM oven/bun:1.4.4-debian AS litestream
+ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tar.gz
+RUN tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin litestream \
+    && rm /tmp/litestream.tar.gz
 
 FROM oven/bun:1.4.4-debian AS manifests
 WORKDIR /app
@@ -23,6 +26,7 @@ FROM manifests AS production-dependencies
 RUN bun install --frozen-lockfile --production
 
 FROM oven/bun:1.4.4-debian AS runtime
+LABEL org.opencontainers.image.source="https://github.com/crvouga/fleet"
 WORKDIR /app
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY --from=production-dependencies /app/ ./
