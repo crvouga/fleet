@@ -26,11 +26,11 @@ const register = (
 ) =>
   store.registerNode({
     id: nodeId(short),
-    role: 'ci',
+    tokenRole: null,
     hostname: `ci-${short}`,
     secretHash: hash(secret),
     approval,
-    enrolledVia: approval === 'approved' ? 'role-token' : 'hello',
+    enrolledVia: approval === 'approved' ? 'enrollment-token' : 'hello',
     remoteAddr: '10.0.0.1',
   });
 

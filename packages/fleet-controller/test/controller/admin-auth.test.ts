@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { FleetBrowserAuth } from '../../src/auth/browser-auth';
 import { SqliteAccessStore } from '../../src/db/access-store';
 import { sha256Hex } from '../../src/auth/hash';
-import { ADMIN_TOKEN, CI_ROLE_TOKEN } from '../support/controller';
+import { ADMIN_TOKEN, CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { nodeIdOf } from '../support/fixtures';
 
@@ -48,7 +48,7 @@ describeController('admin authentication', (ctx) => {
       ADMIN_TOKEN,
       'Bearer',
       'Bearer ',
-      `Bearer ${CI_ROLE_TOKEN}`,
+      `Bearer ${CI_ENROLLMENT_TOKEN}`,
     ];
     for (const Authorization of attempts) {
       expect(
@@ -60,7 +60,7 @@ describeController('admin authentication', (ctx) => {
 
   test('a node credential does not open admin routes', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     for (const [method, path, json] of ADMIN_ROUTES) {
       const reply = await h.asNode(1, method, path, json);
       expect(reply.status).toBe(401);
@@ -69,7 +69,7 @@ describeController('admin authentication', (ctx) => {
 
   test('the bearer token opens every admin route', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     for (const [method, path, json] of ADMIN_ROUTES) {
       const reply = await h.admin(method, path, json);
       expect([200, 404]).toContain(reply.status);

@@ -290,7 +290,10 @@ describeStore('SqliteStore events and settings', (ctx) => {
     test('round-trip to the millisecond', async () => {
       const { store } = ctx();
       await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       const stamp = new Date('2026-03-04T05:06:07.891Z');
       await store.setOfflineNotified(nodeIdOf(1), stamp);

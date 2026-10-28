@@ -1,3 +1,4 @@
+import { ApproveForm } from '../components/approve-form';
 import { ActionForm } from '../components/forms';
 import { Icon } from '../components/icon';
 import { ChipList, RoleBadge } from '../components/status';
@@ -24,7 +25,15 @@ function PendingSpecs(props: { entry: FleetEntry; now: Date }) {
     .join(' · ');
   return (
     <dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
-      <Spec label="Requested role" value={view.role} />
+      <Spec label="Runs" value={view.observedRole ?? 'not reported'} />
+      <Spec
+        label="Hardware"
+        value={
+          view.hardwareCapabilities.length === 0
+            ? 'nothing detected'
+            : view.hardwareCapabilities.join(', ')
+        }
+      />
       <Spec label="CPU" value={cpu === '' ? 'unknown' : cpu} />
       <Spec label="Memory" value={formatMiB(facts.memTotalMiB)} />
       <Spec label="Kernel" value={facts.kernel ?? 'unknown'} />
@@ -74,11 +83,10 @@ function PendingCard(props: {
           </p>
         </div>
         <div class="flex gap-2">
-          <ActionForm
-            action={`/nodes/${view.id}/approve`}
+          <ApproveForm
+            nodeId={view.id}
             label={props.rejected === true ? 'Approve anyway' : 'Approve'}
-            tone="primary"
-            hidden={{ next: '/pending' }}
+            next="/pending"
           />
           {props.rejected === true ? null : (
             <ActionForm

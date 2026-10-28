@@ -16,7 +16,8 @@ export const OBSERVED_LIMITS = {
   reconcileIssue: 500,
 } as const;
 
-export const CLOSURE_PATTERN = /^(base|[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4})$/;
+export const CLOSURE_PATTERN =
+  /^(base|[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4})$/;
 export const AGE_RECIPIENT_PATTERN = /^age1[02-9ac-hj-np-z]{58}$/;
 const REVISION = /^[0-9a-f]{16}$/;
 const PHASES: readonly ReconcilePhase[] = [
@@ -54,7 +55,9 @@ export function readReconcile(
   }
   const phase = value['phase'];
   if (!PHASES.includes(phase as ReconcilePhase)) {
-    problems.list.push('reconcile.phase must be converged, progressing or blocked');
+    problems.list.push(
+      'reconcile.phase must be converged, progressing or blocked'
+    );
     return {};
   }
   const issues = readStringList(problems, 'reconcile.issues', value['issues'], {
@@ -75,9 +78,23 @@ export function readAgeRecipient(
   return recipient === null ? {} : { ageRecipient: recipient };
 }
 
+/** The next recipient while a rotation is pending: the same rules as `ageRecipient`. */
+export function readAgeRecipientNext(
+  problems: Problems,
+  value: unknown
+): Pick<HeartbeatBody, 'ageRecipientNext'> {
+  const recipient = readString(problems, 'ageRecipientNext', value, {
+    max: 62,
+    pattern: AGE_RECIPIENT_PATTERN,
+  });
+  return recipient === null ? {} : { ageRecipientNext: recipient };
+}
+
 export function readClosure(problems: Problems, value: unknown): string {
   if (typeof value === 'string' && CLOSURE_PATTERN.test(value)) return value;
-  problems.list.push('closure must be base or a flake attribute such as ci-gpu');
+  problems.list.push(
+    'closure must be base or a flake attribute such as ci-gpu'
+  );
   return 'base';
 }
 

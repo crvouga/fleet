@@ -6,7 +6,7 @@ import { startController } from '../src/controller';
 
 import {
   ADMIN_TOKEN,
-  CI_ROLE_TOKEN,
+  CI_ENROLLMENT_TOKEN,
   SESSION_SECRET,
 } from './support/controller';
 import { freePort } from './support/port';
@@ -27,7 +27,9 @@ const envFor = (path: string): ControllerEnv => ({
     AWS_SECRET_ACCESS_KEY: 'test-secret',
     FLEET_DATABASE_PATH: path,
     FLEET_ADMIN_TOKEN: ADMIN_TOKEN,
-    FLEET_ROLE_TOKEN_HASHES: JSON.stringify({ ci: sha256(CI_ROLE_TOKEN) }),
+    FLEET_ENROLLMENT_TOKENS: JSON.stringify([
+      { sha256: sha256(CI_ENROLLMENT_TOKEN), role: 'ci' },
+    ]),
   }),
   port: 0,
 });
@@ -69,7 +71,7 @@ describe.skipIf(!databaseAvailable)('startController', () => {
           role: 'ci',
           hostname: 'ci-1234',
           secret: secretOf(1),
-          roleToken: CI_ROLE_TOKEN,
+          enrollmentToken: CI_ENROLLMENT_TOKEN,
         }),
       });
       expect(registered.status).toBe(201);
@@ -101,7 +103,7 @@ describe.skipIf(!databaseAvailable)('startController', () => {
     for (const secret of [
       ADMIN_TOKEN,
       SESSION_SECRET,
-      CI_ROLE_TOKEN,
+      CI_ENROLLMENT_TOKEN,
       secretOf(1),
     ]) {
       expect(logged).not.toContain(secret);
@@ -202,7 +204,7 @@ describe.skipIf(!databaseAvailable)('startController', () => {
         AWS_SECRET_ACCESS_KEY: 'test-secret',
         FLEET_ADMIN_TOKEN: 'short-secret-value',
         FLEET_SESSION_SECRET: 'x'.repeat(40),
-        FLEET_ROLE_TOKEN_HASHES: '{}',
+        FLEET_ENROLLMENT_TOKENS: '[]',
       });
       const code = await child.exited;
       const output = `${await new Response(child.stdout).text()}${await new Response(child.stderr).text()}`;
@@ -249,7 +251,7 @@ describe.skipIf(!databaseAvailable)('startController', () => {
         PORT: String(port),
         FLEET_ADMIN_TOKEN: ADMIN_TOKEN,
         FLEET_SESSION_SECRET: SESSION_SECRET,
-        FLEET_ROLE_TOKEN_HASHES: '{}',
+        FLEET_ENROLLMENT_TOKENS: '[]',
       });
       try {
         let status = 0;

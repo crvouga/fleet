@@ -36,6 +36,13 @@ export interface FleetConfig {
    * devbox. Applied only while the node runs the devbox role; root keys stay in Git.
    */
   devbox?: { authorizedKeys?: string[] };
+  /**
+   * rotateAgeKeyAfter: a Unix time. A node whose age identity was created
+   * before then generates a next identity and reports it as
+   * `ageRecipientNext`; it promotes it once its role's SOPS file lists the
+   * next recipient (the node page's "Rotate age identity" sets it to now).
+   */
+  secrets?: { rotateAgeKeyAfter?: number };
   /** Controller-only. Never sent to a node. */
   alerts?: { offlineAfterSeconds?: number; webhookUrl?: string | null };
 }
@@ -124,6 +131,9 @@ export const RULES: Readonly<Record<Section, Readonly<Record<string, Rule>>>> =
         max: MAX_AUTHORIZED_KEYS,
         pattern: AUTHORIZED_KEY_PATTERN,
       },
+    },
+    secrets: {
+      rotateAgeKeyAfter: { kind: 'int', min: 0, max: 4102444800 },
     },
     alerts: {
       offlineAfterSeconds: { kind: 'int', min: 60, max: 86400 },

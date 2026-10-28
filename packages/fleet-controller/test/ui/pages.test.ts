@@ -80,8 +80,10 @@ describe('overview', () => {
     const page = await html(app, '/');
     expect(page).toContain('Add your first node');
     expect(page).toContain('/installers/release');
-    expect(page).toContain('Choose a role');
-    expect(page).toContain('Approve in Fleet');
+    expect(page).toContain('Install the base system');
+    expect(page).toContain('Assign a role here');
+    expect(page).not.toContain('Choose a role');
+    expect(page).toContain('Approve it here');
     expect(page).toContain('href="/add"');
   });
 
@@ -224,7 +226,9 @@ describe('pending approvals', () => {
     const page = await html(app, '/pending');
     expect(page).toContain('Pending approvals');
     expect(page).toContain('netboot-f001');
-    expect(page).toContain('Requested role');
+    expect(page).toContain('Runs');
+    expect(page).not.toContain('Requested role');
+    expect(page).toContain('No role yet');
     expect(page).toContain(`action="/nodes/${IDS.pending}/approve"`);
     expect(page).toContain('Rejected machines (1)');
     expect(page).toContain('Approve anyway');

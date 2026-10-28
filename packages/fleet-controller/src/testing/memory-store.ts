@@ -65,8 +65,7 @@ export class MemoryStore implements Store {
     existing.row = {
       ...existing.row,
       // Registration never clears an assigned role; a token only fills an empty one.
-      role:
-        previousRole ?? (approval === 'rejected' ? null : input.tokenRole),
+      role: previousRole ?? (approval === 'rejected' ? null : input.tokenRole),
       hostname: input.hostname,
       approval,
       enrolledVia: input.enrolledVia,

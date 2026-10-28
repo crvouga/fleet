@@ -19,16 +19,16 @@ const STEPS: readonly Step[] = [
     body: 'Use the recommended download below, or choose the computer you are preparing an installer for.',
   },
   {
-    title: 'Run it on the machine',
-    body: 'Open the file. It checks the hardware and asks before it changes anything.',
+    title: 'Install the base system',
+    body: 'Open the file on the machine. It checks the hardware, asks which disk to use and installs the same base system on every machine.',
   },
   {
-    title: 'Choose a role',
-    body: 'Pick what the machine is for. You can see the roles below.',
+    title: 'Approve it here',
+    body: 'The installer registers the machine with this app. Review and approve it under Pending before its disk is erased.',
   },
   {
-    title: 'Approve in Fleet',
-    body: 'The live installer registers with this app. Review and approve it under Pending before its disk is erased.',
+    title: 'Assign a role here',
+    body: 'Choose what the machine is for on its node page, or while approving. It switches to that role on its own, with no reinstall. The roles are below.',
   },
 ];
 

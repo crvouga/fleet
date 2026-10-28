@@ -47,6 +47,39 @@ async function findNode(deps: AppDeps, c: Context): Promise<NodeRow | null> {
   return NODE_ID.test(id) ? deps.store.findNode(id) : null;
 }
 
+/** Why a transition may not run, with where to send the person; null when it may. */
+function refusal(
+  rule: Transition,
+  node: NodeRow,
+  form: Record<string, unknown>,
+  next: string
+): { to: string; text: string } | null {
+  if (rule.confirm === true && form['confirm'] !== 'yes')
+    return {
+      to: `/nodes/${node.id}`,
+      text: 'Please confirm before changing this node.',
+    };
+  if (!rule.from.includes(node.approval))
+    return {
+      to: next,
+      text: `${node.hostname} is ${node.approval}, so it cannot be ${rule.done}.`,
+    };
+  return null;
+}
+
+/**
+ * Approval may assign the role in the same step; other transitions ignore it.
+ * An empty choice keeps the stored role, so a reinstalled machine keeps its role.
+ */
+function approvalRole(
+  rule: Transition,
+  form: Record<string, unknown>
+): ReturnType<typeof formRole> {
+  if (rule.to !== 'approved' || form['role'] === '')
+    return { ok: true, role: undefined };
+  return formRole(form['role']);
+}
+
 function transition(deps: AppDeps, name: string): Handler {
   const rule = TRANSITIONS[name];
   return action(deps, async (c, actor) => {
@@ -57,33 +90,31 @@ function transition(deps: AppDeps, name: string): Handler {
         kind: 'error',
         text: 'That node no longer exists.',
       });
-    const here = `/nodes/${node.id}`;
-    const next = safeNext(form['next'], here);
-    if (rule.confirm === true && form['confirm'] !== 'yes') {
-      return back(c, here, {
-        kind: 'error',
-        text: 'Please confirm before changing this node.',
-      });
-    }
-    if (!rule.from.includes(node.approval)) {
-      return back(c, next, {
-        kind: 'error',
-        text: `${node.hostname} is ${node.approval}, so it cannot be ${rule.done}.`,
-      });
-    }
-    // Approval may assign the role in the same step; other transitions ignore it.
-    const role = rule.to === 'approved' ? formRole(form['role']) : null;
-    if (role !== null && !role.ok)
-      return back(c, next, { kind: 'error', text: BAD_ROLE });
+    const next = safeNext(form['next'], `/nodes/${node.id}`);
+    const refused = refusal(rule, node, form, next);
+    if (refused !== null)
+      return back(c, refused.to, { kind: 'error', text: refused.text });
+    const role = approvalRole(rule, form);
+    if (!role.ok) return back(c, next, { kind: 'error', text: BAD_ROLE });
     await deps.store.setApproval(node.id, rule.to, actor);
-    if (role?.ok && role.role !== undefined)
-      await deps.store.assignRole(node.id, role.role, actor);
-    const as = role?.ok && role.role ? ` as ${role.role}` : '';
+    const as = await assignWith(deps, node.id, role.role, actor);
     return back(c, next, {
       kind: 'success',
       text: `${node.displayName ?? node.hostname} ${rule.done}${as}.`,
     });
   });
+}
+
+/** Assigns a role chosen alongside another action; the flash suffix that says so. */
+async function assignWith(
+  deps: AppDeps,
+  id: string,
+  role: ActiveRole | null | undefined,
+  actor: string
+): Promise<string> {
+  if (role === undefined) return '';
+  await deps.store.assignRole(id, role, actor);
+  return role === null ? '' : ` as ${role}`;
 }
 
 function remove(deps: AppDeps): Handler {

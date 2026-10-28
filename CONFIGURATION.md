@@ -62,17 +62,17 @@ S3 failures.
 
 ## Optional settings and defaults
 
-| Setting                         | Default / meaning                                                                                                                                                                                                                                                                                   |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FLEET_DATABASE_PATH`           | Absolute path to `packages/fleet-controller/data/fleet.db` in this checkout. Set an absolute path for a service installation. The file and its directory must be writable by the service user. Relative overrides resolve from the controller package working directory when using `bun run start`. |
-| `FLEET_S3_PREFIX`               | `fleet`. Use a unique prefix per independent deployment; no leading/trailing slash, empty segments or `.`/`..` segments. Reuse it when replacing the same node.                                                                                                                                     |
-| `FLEET_S3_ENDPOINT`             | AWS S3 by default. For other providers, an HTTPS origin without path/query/credentials. Loopback HTTP is allowed for local testing only.                                                                                                                                                            |
-| `AWS_REGION`                    | `us-east-1`. Set your bucket region, or `auto` for providers that require it.                                                                                                                                                                                                                       |
-| `AWS_SESSION_TOKEN`             | Unset. Supply when using temporary AWS credentials; renew credentials before expiration.                                                                                                                                                                                                            |
-| `PORT`                          | `8080`; an integer from 1 to 65535. Use an unused port above 1023 without root privileges.                                                                                                                                                                                                          |
-| `FLEET_LITESTREAM_BIN`          | `litestream` on PATH; must report version 0.5.17.                                                                                                                                                                                                                                                   |
-| `FLEET_STARTUP_TIMEOUT_SECONDS` | `60` per restore/initial-sync operation; integer 1–3600. Increase for large databases or slow object storage. A stalled startup is terminated with a nonzero exit, preserving local data for investigation. No deadline is applied to the running controller.                                       |
-| `FLEET_ROLE_TOKEN_HASHES`       | `{}`. Nodes require manual approval unless a role's SHA-256 shared-token hash is configured in this JSON map.                                                                                                                                                                                       |
+| Setting                         | Default / meaning                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FLEET_DATABASE_PATH`           | Absolute path to `packages/fleet-controller/data/fleet.db` in this checkout. Set an absolute path for a service installation. The file and its directory must be writable by the service user. Relative overrides resolve from the controller package working directory when using `bun run start`.                                  |
+| `FLEET_S3_PREFIX`               | `fleet`. Use a unique prefix per independent deployment; no leading/trailing slash, empty segments or `.`/`..` segments. Reuse it when replacing the same node.                                                                                                                                                                      |
+| `FLEET_S3_ENDPOINT`             | AWS S3 by default. For other providers, an HTTPS origin without path/query/credentials. Loopback HTTP is allowed for local testing only.                                                                                                                                                                                             |
+| `AWS_REGION`                    | `us-east-1`. Set your bucket region, or `auto` for providers that require it.                                                                                                                                                                                                                                                        |
+| `AWS_SESSION_TOKEN`             | Unset. Supply when using temporary AWS credentials; renew credentials before expiration.                                                                                                                                                                                                                                             |
+| `PORT`                          | `8080`; an integer from 1 to 65535. Use an unused port above 1023 without root privileges.                                                                                                                                                                                                                                           |
+| `FLEET_LITESTREAM_BIN`          | `litestream` on PATH; must report version 0.5.17.                                                                                                                                                                                                                                                                                    |
+| `FLEET_STARTUP_TIMEOUT_SECONDS` | `60` per restore/initial-sync operation; integer 1–3600. Increase for large databases or slow object storage. A stalled startup is terminated with a nonzero exit, preserving local data for investigation. No deadline is applied to the running controller.                                                                        |
+| `FLEET_ENROLLMENT_TOKENS`       | `[]`. Nodes require manual approval unless they present an enrollment token whose SHA-256 is listed here: a JSON array (at most 16) of `{ "sha256": "<64 hex>", "role": "<active role>" \| null }`. A matching token approves the node and assigns the role when the node has none. `FLEET_ROLE_TOKEN_HASHES` is refused at startup. |
 
 Each deployment uses one operator-owned user pool. Fleet connects directly to its
 standard OIDC provider; no shared auth relay, Google account, Vault, or original
@@ -161,11 +161,35 @@ owner approves or rejects them in the app. The live installer waits up to five
 minutes for approval before disk changes; rejection and timeout leave disks
 untouched. Its credential is copied into the installed system.
 
-`FLEET_ROLE_TOKEN_HASHES` remains optional for explicitly authorized automatic
-approval. No shared role token or Vault is required for manual approval. Roles
-with encrypted shared secrets still require their operator-owned age identity
-before installation; provide it using the private `FLEET-KEY` volume or an
-explicit wrapped-secret token. Those secrets are separate from node approval.
+The installer installs the role-less `base` system. The controller decides what
+each machine is for: approve it (optionally choosing a role), or assign, change
+or remove its role later on the node page or with `PATCH /v1/nodes/:id { role }`.
+A reinstalled machine keeps its hardware node id, so its stored role is applied
+again after approval. A role change is a drained reboot into the new closure,
+not a reinstall.
+
+`FLEET_ENROLLMENT_TOKENS` is optional, for explicitly authorized automatic
+approval. Generate a random token (for example `openssl rand -hex 32`), give it
+to the installer as the optional enrollment token, and list only its hash:
+
+```sh
+token=$(openssl rand -hex 32)
+printf %s "$token" | sha256sum   # the "sha256" value
+FLEET_ENROLLMENT_TOKENS='[{"sha256":"<hash>","role":"ci"},{"sha256":"<hash2>","role":null}]'
+```
+
+A node presenting a listed token is approved; the entry's `role` is assigned
+only when the node has none, and re-registration never clears an assigned role.
+`FLEET_ROLE_TOKEN_HASHES` is no longer read: startup fails until each old
+`{ "<role>": "<hash>" }` pair is moved to `FLEET_ENROLLMENT_TOKENS` as
+`{ "sha256": "<hash>", "role": "<role>" }` and the old variable is unset.
+
+Role secrets stay in the operator's repository, encrypted with SOPS. Each node
+creates its own age identity on first boot and reports only the public
+recipient. `GET /v1/recipients` (admin) lists the recipients of approved nodes
+by assigned role; re-encrypt each role's file to them (`sops updatekeys`) and
+merge. Fleet never holds a private age key or writes to Git. A node whose
+recipient is missing reports itself blocked until that change is merged.
 
 Set optional `FLEET_INSTALLER_DIR` to an absolute directory containing built
 installer executables, archives, the ISO or image parts, readiness metadata, and

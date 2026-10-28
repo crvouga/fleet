@@ -21,8 +21,7 @@ const deps: AppDeps = {
   revisions: { latest: async () => DEMO_LATEST },
   env: {
     adminToken: 'demo',
-
-    roleTokenHashes: {},
+    enrollmentTokens: [],
   },
   now: () => new Date(),
 };

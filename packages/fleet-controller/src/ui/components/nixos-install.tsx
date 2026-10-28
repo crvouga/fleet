@@ -11,9 +11,10 @@ export function NixosInstall() {
       </p>
       <a href="/installers/nixos">Show the native installer command</a>
       <p class="mt-2 text-fg-2">
-        On an existing fleet node, choose its current role and select Hard
-        reinstall to replace it. Disk confirmation is required and running CI
-        jobs block reinstallation.
+        On an existing fleet node, select Hard reinstall to replace it with the
+        base system. Disk confirmation is required and running CI jobs block
+        reinstallation. The machine keeps its node id, so Fleet re-applies its
+        assigned role after you approve it again.
       </p>
       <a class="mt-2 inline-block" href="/installers/nixos-guide">
         NixOS installation and hard reinstall guide

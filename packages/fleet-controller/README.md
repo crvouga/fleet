@@ -3,7 +3,14 @@
 One native Bun/Hono controller coordinates node enrollment, configuration, telemetry and recovery through its React dashboard and HTTP endpoints. Bun's built-in
 SQLite stores nodes, settings, telemetry, events, sessions and access rules.
 Litestream restores and replicates the working database to S3-compatible storage.
-Schema initialization is automatic. Production always uses Litestream.
+Schema initialization and versioned upgrades are automatic (back up first; see
+[PROTOCOL.md](PROTOCOL.md)). Production always uses Litestream.
+
+The controller is the single owner of each node's **desired state**: the
+assigned role, the closure derived from it and the node's hardware, and the
+layered settings. Nodes install a role-less `base` system, report what they
+run, and converge to what the controller serves. See
+[the architecture](../../ARCHITECTURE.md) and [the protocol](PROTOCOL.md).
 
 **Start here: [configuration and deployment](../../CONFIGURATION.md).** It lists
 all required settings, optional defaults, native installation, preflight checks,

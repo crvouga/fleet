@@ -100,6 +100,11 @@ export interface HeartbeatBody {
   readonly hardware?: { readonly capabilities: readonly Capability[] };
   /** The node's own age public key (`age1…`). Never a private key. */
   readonly ageRecipient?: string;
+  /**
+   * The next age public key while a rotation is pending: reported until the
+   * node promotes it to `ageRecipient`. Kept in the stored facts only.
+   */
+  readonly ageRecipientNext?: string;
   readonly reconcile?: ReconcileReport;
   readonly capabilities: readonly string[];
   readonly revision: string | null;
@@ -184,6 +189,8 @@ export interface NodeView extends NodeRow {
   readonly desiredRevision: string;
   readonly convergence: Convergence;
   readonly reconcileIssues: readonly string[];
+  /** The next age recipient while a rotation is pending (from the stored facts). */
+  readonly ageRecipientNext: string | null;
 }
 
 export interface HeartbeatPoint {

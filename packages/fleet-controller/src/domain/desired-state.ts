@@ -1,8 +1,4 @@
-import {
-  canonicalJson,
-  nodePayload,
-  type FleetConfig,
-} from '../config/schema';
+import { canonicalJson, nodePayload, type FleetConfig } from '../config/schema';
 import { createHash } from 'node:crypto';
 
 import { CLOSURES, type Convergence, type NodeRow, type Role } from '../types';
@@ -45,9 +41,7 @@ export function closureFor(
 }
 
 /** First 16 hex of sha256 over the canonical `{ closure, role, values }`. */
-export function desiredRevision(
-  state: Omit<DesiredState, 'revision'>
-): string {
+export function desiredRevision(state: Omit<DesiredState, 'revision'>): string {
   const content = {
     closure: state.closure,
     role: state.role,
@@ -81,7 +75,11 @@ export function desiredFor(
     node.role === null
       ? BASE_CLOSURE
       : closureFor(node.role, node.hardware?.capabilities ?? []);
-  return withRevision({ role: node.role, closure, values: nodePayload(config) });
+  return withRevision({
+    role: node.role,
+    closure,
+    values: nodePayload(config),
+  });
 }
 
 function withRevision(state: Omit<DesiredState, 'revision'>): DesiredState {

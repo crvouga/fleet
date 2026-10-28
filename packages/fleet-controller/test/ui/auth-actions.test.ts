@@ -90,7 +90,7 @@ describe('sign in', () => {
   });
 });
 
-const ACTIONS = ['approve', 'reject', 'retire', 'delete', 'edit'];
+const ACTIONS = ['approve', 'reject', 'retire', 'delete', 'edit', 'role'];
 
 describe('csrf and auth on state changes', () => {
   test('every POST refuses a foreign or missing Origin and changes nothing', async () => {

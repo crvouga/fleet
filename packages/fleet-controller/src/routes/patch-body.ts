@@ -50,6 +50,14 @@ function labelList(value: unknown, errors: string[]): string[] | undefined {
   return value as string[];
 }
 
+function definedOnly(
+  fields: Readonly<Record<string, unknown>>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined)
+  );
+}
+
 /** Only an active role may be assigned; null unassigns. Absent leaves it alone. */
 export function readAssignedRole(
   value: unknown,
@@ -81,18 +89,12 @@ export function validatePatch(input: unknown): PatchResult {
   const note = textOrNull(input['note'], 'note', MAX_NOTE, errors);
   const labels = labelList(input['labels'], errors);
   const role = readAssignedRole(input['role'], errors);
-  const patch: NodePatch = {
-    ...(displayName !== undefined ? { displayName } : {}),
-    ...(note !== undefined ? { note } : {}),
-    ...(labels !== undefined ? { labels } : {}),
-  };
-  if (
-    errors.length === 0 &&
-    Object.keys(patch).length === 0 &&
-    role === undefined
-  ) {
-    errors.push('send at least one of displayName, note, labels, role');
-  }
+  const patch = definedOnly({ displayName, note, labels }) as NodePatch;
   if (errors.length > 0) return { ok: false, errors };
+  if (Object.keys(patch).length === 0 && role === undefined)
+    return {
+      ok: false,
+      errors: ['send at least one of displayName, note, labels, role'],
+    };
   return { ok: true, value: role === undefined ? { patch } : { patch, role } };
 }

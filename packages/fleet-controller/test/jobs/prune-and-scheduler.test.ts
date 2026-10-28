@@ -40,7 +40,10 @@ describeStore('prune job', (ctx) => {
       log: silent,
     };
     await store.registerNode(
-      registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
     );
     const beat = (seconds: number) =>
       store.recordHeartbeat(
@@ -88,7 +91,10 @@ describeStore('job scheduler', (ctx) => {
     const { store } = ctx();
     const clock = new Clock(T0);
     await store.registerNode(
-      registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
     );
     await store.recordHeartbeat(nodeIdOf(1), heartbeatBody(1), null, T0);
     clock.advance(1000);
@@ -124,7 +130,10 @@ describeStore('job scheduler', (ctx) => {
     const { store } = ctx();
     const clock = new Clock(T0);
     await store.registerNode(
-      registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
     );
     await store.recordHeartbeat(
       nodeIdOf(1),

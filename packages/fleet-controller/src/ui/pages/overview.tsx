@@ -13,6 +13,7 @@ import {
 } from '../lib/attention';
 import type { FleetData } from '../lib/fleet-data';
 import { pluralize, shortRevision } from '../lib/format';
+import { UNASSIGNED } from '../lib/nodes-query';
 import { cx, tw } from '../lib/tw';
 
 export const LIVE_OVERVIEW = '/ui/fleet?view=overview';
@@ -144,7 +145,11 @@ function StatTiles(props: { data: FleetData }) {
   );
 }
 
-function RoleCard(props: { role: Role; total: number; online: number }) {
+function RoleCard(props: {
+  role: Role | typeof UNASSIGNED;
+  total: number;
+  online: number;
+}) {
   const percent = props.total === 0 ? null : (props.online / props.total) * 100;
   return (
     <a
@@ -190,6 +195,9 @@ function RoleCards(props: { data: FleetData }) {
             {...props.data.summary.byRole[role]}
           />
         ))}
+        {props.data.summary.unassigned.total === 0 ? null : (
+          <RoleCard role={UNASSIGNED} {...props.data.summary.unassigned} />
+        )}
       </div>
     </section>
   );

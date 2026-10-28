@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { hmacHex, safeEqual, sha256Hex } from '../../src/auth/hash';
 import { parseNodeCredential } from '../../src/auth/node-credential';
-import { roleTokenValid } from '../../src/auth/role-token';
+import { matchEnrollmentToken } from '../../src/auth/enrollment-token';
 import { nodeIdOf, secretOf, sha256 } from '../support/fixtures';
 
 describe('safeEqual and hashes', () => {
@@ -56,38 +56,46 @@ describe('parseNodeCredential', () => {
   });
 });
 
-describe('roleTokenValid', () => {
-  const hashes = { ci: sha256('ci-token'), web: sha256('web-token') };
+describe('matchEnrollmentToken', () => {
+  const ci = { sha256: sha256('ci-token-0001'), role: 'ci' as const };
+  const plain = { sha256: sha256('plain-token-0001'), role: null };
+  const entries = [ci, plain];
 
-  test('accepts the token for its own role only', () => {
-    expect(roleTokenValid(hashes, 'ci', 'ci-token')).toBe(true);
-    expect(roleTokenValid(hashes, 'web', 'web-token')).toBe(true);
-    expect(roleTokenValid(hashes, 'ci', 'web-token')).toBe(false);
-    expect(roleTokenValid(hashes, 'web', 'ci-token')).toBe(false);
+  test('returns the entry whose hash matches, with its role', () => {
+    expect(matchEnrollmentToken(entries, 'ci-token-0001')).toBe(ci);
+    expect(matchEnrollmentToken(entries, 'plain-token-0001')).toBe(plain);
   });
 
-  test('refuses missing, empty, wrong and padded tokens', () => {
+  test('refuses missing, empty, wrong, padded and malformed tokens', () => {
     for (const token of [
       undefined,
       '',
-      'nope',
-      'ci-token ',
-      ' ci-token',
-      'CI-TOKEN',
+      'nope-nope',
+      'ci-token-0001 ',
+      ' ci-token-0001',
+      'CI-TOKEN-0001',
+      'short',
+      'ci token 0001',
     ]) {
-      expect(roleTokenValid(hashes, 'ci', token)).toBe(false);
+      expect(matchEnrollmentToken(entries, token)).toBeNull();
     }
   });
 
-  test('a role with no configured token can never be approved this way', () => {
-    expect(roleTokenValid(hashes, 'cache', 'anything')).toBe(false);
-    expect(roleTokenValid(hashes, 'cache', '')).toBe(false);
-    expect(roleTokenValid({}, 'ci', 'ci-token')).toBe(false);
-    expect(roleTokenValid({ ci: '0'.repeat(64) }, 'ci', '')).toBe(false);
+  test('no configured tokens never approves', () => {
+    expect(matchEnrollmentToken([], 'ci-token-0001')).toBeNull();
+    expect(
+      matchEnrollmentToken([{ sha256: sha256(''), role: null }], '')
+    ).toBeNull();
   });
 
-  test('an enormous token is refused', () => {
+  test('tokens longer than 512 characters are refused', () => {
     const huge = 'x'.repeat(513);
-    expect(roleTokenValid({ ci: sha256(huge) }, 'ci', huge)).toBe(false);
+    expect(
+      matchEnrollmentToken([{ sha256: sha256(huge), role: 'ci' }], huge)
+    ).toBeNull();
+    const max = 'x'.repeat(512);
+    expect(
+      matchEnrollmentToken([{ sha256: sha256(max), role: 'ci' }], max)
+    ).not.toBeNull();
   });
 });

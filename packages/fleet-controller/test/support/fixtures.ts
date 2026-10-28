@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { RegisterInput } from '../../src/store';
-import type { HeartbeatBody, Role } from '../../src/types';
+import type { HeartbeatBody, ObservedRole } from '../../src/types';
 
 export const sha256 = (value: string): string =>
   createHash('sha256').update(value).digest('hex');
@@ -21,10 +21,10 @@ export function registerInput(
   const id = nodeIdOf(n);
   return {
     id,
-    role: 'ci',
     hostname: `ci-${id.slice(0, 4)}`,
     secretHash: sha256(secretOf(n)),
     approval: 'pending',
+    tokenRole: null,
     enrolledVia: 'hello',
     remoteAddr: '203.0.113.7',
     ...overrides,
@@ -46,9 +46,10 @@ export function heartbeatBody(
 ): HeartbeatBody {
   const id = nodeIdOf(n);
   const base: HeartbeatBody = {
-    v: 1,
+    v: 2,
     nodeId: id,
-    role: 'ci' as Role,
+    role: 'ci' as ObservedRole,
+    closure: 'ci',
     hostname: `ci-${id.slice(0, 4)}`,
     capabilities: ['gpu'],
     revision: '9f3c2a1e5b7d4c6a8e0f1a2b3c4d5e6f70819283',
@@ -64,7 +65,7 @@ export function heartbeatBody(
     sync: { rolledBack: false, healthFailure: null, paused: false },
     failedUnits: [],
     runners: { slots: 4, busy: 1 },
-    agent: { version: '1', configRevision: null },
+    agent: { version: '2', desiredRevision: null },
     events: [],
   };
   const { cpu, memory, disk, sync, agent, ...rest } = overrides;

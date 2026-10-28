@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Store } from '../../src/store';
 import {
   ADMIN_TOKEN,
-  CI_ROLE_TOKEN,
+  CI_ENROLLMENT_TOKEN,
   createHarness,
   silent,
 } from '../support/controller';
@@ -30,7 +30,7 @@ describeController('request size', (ctx) => {
 
   test('a body of exactly 64 KiB is accepted', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const base = withPadding(0).length;
     const body = withPadding(64 * KIB - base);
     expect(new TextEncoder().encode(body).length).toBe(64 * KIB);
@@ -46,7 +46,7 @@ describeController('request size', (ctx) => {
 
   test('one byte more is a 413 with the standard error shape', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const body = withPadding(64 * KIB - withPadding(0).length + 1);
     const reply = await h.call('POST', '/v1/heartbeat', {
       headers: {
@@ -104,7 +104,7 @@ describeController('request size', (ctx) => {
 describeController('malformed bodies', (ctx) => {
   test('every route that reads JSON answers 400 rather than failing', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const node = { Authorization: `Bearer ${nodeIdOf(1)}.${secretOf(1)}` };
     const admin = { Authorization: `Bearer ${ADMIN_TOKEN}` };
     const cases: [string, string, Record<string, string>][] = [
@@ -192,11 +192,11 @@ describeController('logging', (ctx) => {
     const h = createHarness(store, { controller: { log } });
     const marker = 'BODY-MARKER-4f1c9';
     await h.register(1, {
-      roleToken: CI_ROLE_TOKEN,
+      enrollmentToken: CI_ENROLLMENT_TOKEN,
       hostname: 'ci-1234',
       note: marker,
     });
-    await h.register(2, { roleToken: 'wrong-role-token-value' });
+    await h.register(2, { enrollmentToken: 'wrong-enrollment-token-value' });
     await h.asNode(
       1,
       'POST',
@@ -226,8 +226,8 @@ describeController('logging', (ctx) => {
     for (const secret of [
       secretOf(1),
       secretOf(2),
-      CI_ROLE_TOKEN,
-      'wrong-role-token-value',
+      CI_ENROLLMENT_TOKEN,
+      'wrong-enrollment-token-value',
       ADMIN_TOKEN,
       'wrong-admin-guess',
       'cookie-marker',
@@ -279,5 +279,4 @@ describe('health', () => {
     expect(reply.status).toBe(503);
     expect(Date.now() - started).toBeLessThan(2000);
   });
-
 });

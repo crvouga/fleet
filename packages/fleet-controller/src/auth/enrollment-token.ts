@@ -23,11 +23,20 @@ export function matchEnrollmentToken(
 ): EnrollmentTokenEntry | null {
   const wellFormed =
     typeof token === 'string' && ENROLLMENT_TOKEN_PATTERN.test(token);
-  const digest = sha256Hex(wellFormed ? token : '');
-  let found: EnrollmentTokenEntry | null = null;
-  for (const entry of entries.length > 0 ? entries : [null]) {
-    const same = safeEqual(digest, entry?.sha256 ?? NO_HASH);
-    if (same && entry !== null && found === null) found = entry;
-  }
+  const found = compareAll(entries, sha256Hex(wellFormed ? token : ''));
   return wellFormed ? found : null;
+}
+
+/** Compares the digest with every entry; the first match wins, nothing exits early. */
+function compareAll(
+  entries: readonly EnrollmentTokenEntry[],
+  digest: string
+): EnrollmentTokenEntry | null {
+  const candidates = entries.length > 0 ? entries : [{ sha256: NO_HASH }];
+  let found: EnrollmentTokenEntry | null = null;
+  for (const entry of candidates) {
+    const same = safeEqual(digest, entry.sha256);
+    if (same && 'role' in entry && found === null) found = entry;
+  }
+  return found;
 }

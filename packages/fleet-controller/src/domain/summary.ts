@@ -46,6 +46,11 @@ function revisionCounts(views: readonly NodeView[]): FleetSummary['revisions'] {
     .sort((a, b) => b.count - a.count || a.revision.localeCompare(b.revision));
 }
 
+function count(bucket: { total: number; online: number }, view: NodeView) {
+  bucket.total += 1;
+  if (view.status === 'online') bucket.online += 1;
+}
+
 /**
  * Counts for the overview and `GET /v1/summary`.
  *
@@ -67,10 +72,8 @@ export function summarize(views: readonly NodeView[]): FleetSummary {
   for (const view of views) {
     byStatus[view.status] += 1;
     if (view.approval !== 'approved') continue;
-    const bucket = view.role === null ? unassigned : byRole[view.role];
-    bucket.total += 1;
+    count(view.role === null ? unassigned : byRole[view.role], view);
     const facts = readFacts(view);
-    if (view.status === 'online') bucket.online += 1;
     if (facts.failedUnits.length > 0) withFailedUnits += 1;
     if (facts.rolledBack) rolledBack += 1;
     if (
