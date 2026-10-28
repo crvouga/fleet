@@ -138,9 +138,14 @@ browser owner after Fleet has restored and started:
 bun --env-file=deployment.env run access:allow owner@example.org
 ```
 
-Use the same checkout/environment and working-file path as the running service.
-Where nothing can run beside the service (container hosting), the admin token
-holder authorizes the owner over HTTP instead:
+Use the same checkout/environment and working-file path, and run it only while
+no instance owns the replica (the service is stopped and has released it): the
+command reads `<prefix>/fleet-owner.json` first and refuses while a holder is
+recorded, when the record cannot be read, or when the local file is not the
+authoritative replica (see [Writer ownership](#writer-ownership)). There is no
+option to skip that check. Where nothing can run beside the service (container
+hosting) or the service is running, the admin token holder authorizes the owner
+over HTTP instead, which goes through the owner:
 
 ```sh
 curl -fsS -X PUT -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
@@ -192,13 +197,19 @@ overlapping deployments are supported: the new container asks the old one to han
 over (see [Writer ownership](#writer-ownership)). Run exactly one replica of the
 service; autoscaling adds standbys, not capacity. On Railway, set
 `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60` so a stop without a successor can finish
-its final sync instead of being killed immediately.
+its final sync instead of being killed immediately, and point the platform
+healthcheck at `/health` (see [Health semantics](#health-semantics), the
+[shutdown budget](#shutdown-budget) and the [hosting request](#hosting-request)).
 
 `.github/workflows/publish.yml` builds and tests the Linux image on pull requests.
 The container check uses disposable Moto S3 storage to exercise readiness,
 graceful shutdown, restart persistence, fresh-container restore (configured with
 the generic `S3_*` names), an overlapping rolling hand-over, denied writes and
-refusal to start without configuration. Trusted main pushes call workspace's
+refusal to start without configuration. It also runs the single-writer drills
+(rolling deploy with SIGTERM, zero-drain SIGKILL, crash takeover, a paused zombie
+owner, simultaneous cold start, providers without conditional writes), each ending
+with a fresh-container restore and `PRAGMA integrity_check`; their offline
+orchestration self-test is `scripts/check-container-selftest.py`. Trusted main pushes call workspace's
 reusable publisher for `ghcr.io/crvouga/chrisvouga-fleet-api:<commit-sha>` and
 `:latest`. Successful publication dispatches that commit to workspace's managed
 `fleet-api` service. Hosting, secrets and DNS remain OpenTofu-owned in the
@@ -215,11 +226,13 @@ Fleet does not install units, create users or provision credentials for you.
 Put your HTTPS reverse proxy in front of port 8080 for remote browser access.
 Monitor `/health` and Litestream's logs/replica freshness. `/health` checks the
 controller/database, not ongoing S3 replication; Litestream retries transient outages.
+It answers only on the instance that owns the replica; a standby has no listener.
 
 Preserve the complete local directory across ordinary restarts, including the
 WAL/SHM, Litestream metadata and the `.generation` marker. To replace a lost host,
 use the same environment/bucket/prefix with an empty writable directory. Do not
-copy just a live `.db` file. Run restore drills against a copy under another prefix.
+copy just a live `.db` file. Run restore drills with `bun run restore:drill`, which
+refuses the prefix of a live owner; use a copy under another prefix (`--prefix`).
 
 ### Writer ownership
 
@@ -248,31 +261,344 @@ restored automatically on first start.
 - **Fencing.** An owner that cannot renew for two thirds of the expiry (timed
   from before its last successful request) stops serving at least five seconds
   before anyone may take over. A paused or partitioned owner
-  that resumes after a takeover refuses writes, stops its worker and becomes a standby.
+  that resumes after a takeover refuses writes, stops its worker and **exits
+  nonzero** (see [Fenced writers and restart policy](#fenced-writers-and-restart-policy)).
 - **Local file.** The working file is kept only when its `.generation` marker
   shows it continues the generation being restored; otherwise it is moved to
   `fleet.db.superseded` (never deleted) and restored fresh.
 
-Earlier generations are retained in the bucket; remove old ones manually if
-storage matters (never the current generation or `fleet-owner.json`).
+Defaults (renew 5 s, expire 30 s, fence 20 s, standby poll 2 s) work on Railway
+without tuning.
 
-Replication is asynchronous (one-second interval). Abrupt host loss may lose
-recent writes; S3 outages widen this window. A graceful stop lets Litestream
-perform a final sync. Retain local state if that sync fails. Do not use bucket
-lifecycle rules that independently delete active replica objects.
+#### Health semantics
+
+`/health` answers `200` only from an instance that owns the replica and serves.
+A starting or standby instance has **no listener at all** (the worker only starts
+after the instance has claimed ownership, restored and completed its first sync),
+so its `/health` is a refused connection, never a `200`. The previous owner keeps
+answering `/health` only for the few seconds its worker takes to drain during a
+hand-over, then it too has no listener.
+
+The platform healthcheck must therefore probe **`/health`**, so that a new
+deployment becomes Active only after hand-over has completed:
+
+- **No deadlock.** Hand-over does not go through the platform. The new instance
+  asks the owner through object storage while the platform still keeps the old
+  instance running (the platform removes it only after the new one is Active), and
+  the owner notices within one renewal interval (5 s). Waiting passively for the
+  old instance to exit would deadlock; asking does not.
+- **No long write outage.** The write gap is the hand-over itself: up to one
+  renewal interval to notice the request, the worker's drain, the final sync, the
+  release, and the successor's restore and initial sync, typically 10 to 20
+  seconds of `503` + `Retry-After` for writes (reads keep working until the old
+  worker stops), instead of the lease expiry (30 s) plus restore after a crash.
+- **Why a liveness-only endpoint defeats it.** If the platform probed an endpoint
+  that is `200` while the process merely lives (a standby included), the new
+  deployment would be marked Active at once. The platform would then send the old
+  instance SIGTERM and, with its default of 0 seconds of drain, SIGKILL right
+  after, before ownership moved. Every deploy would become a crash takeover: a
+  write outage of at least the lease expiry and a loss of up to the replication
+  window, instead of a hand-over with neither the long outage nor any loss.
+
+Set the healthcheck timeout comfortably above the worst healthy hand-over (at
+least 180 seconds; it is bounded by the restore and initial-sync deadlines of
+`FLEET_STARTUP_TIMEOUT_SECONDS`, 60 s each by default), so a slow restore is not
+mistaken for a failed deploy.
+
+#### Shutdown budget
+
+Everything below is derived from the code (`SHUTDOWN_GRACE_MS` in
+`src/controller.ts`; `DRAIN_GRACE_MS`, `FENCED_GRACE_MS` and the final sync in
+`src/ownership/supervisor.ts`; request and retry limits in
+`src/ownership/lease.ts` and `object-store.ts`). A graceful stop (SIGTERM, or the
+drain of a hand-over) runs these steps in order:
+
+| Step                                                 | Budget                                                                                                                                         | Typical  |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| 1. Write gate closes; mutating routes answer `503`   | immediate                                                                                                                                      | 0 s      |
+| 2. Worker stops (jobs, listener, database close)     | `SHUTDOWN_GRACE_MS` = 10 s, then it exits 1                                                                                                    | under 1  |
+| 3. Litestream exits (its own shutdown sync included) | `DRAIN_GRACE_MS` = 50 s from the SIGTERM, then SIGKILL; covers step 2 plus Litestream's own `shutdown-sync-timeout` (30 s by default upstream) | 1 s      |
+| 4. Explicit final sync (`replicate -once`)           | up to 3 attempts, each bounded by `FLEET_STARTUP_TIMEOUT_SECONDS` (60 s)                                                                       | 1 to 2 s |
+| 5. Release ownership                                 | up to 5 attempts, each request limited to 10 s                                                                                                 | under 1  |
+| Fenced owner instead (step 3 only)                   | `FENCED_GRACE_MS` = 15 s, then exit nonzero                                                                                                    | 1 s      |
+
+With healthy storage the steps sum to at most 10 s (worker) + 30 s (Litestream's
+own sync, if it needed all of it) + a final sync and release of a few seconds,
+under 45 s, so **`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60`** leaves at least 15
+seconds of margin and the shutdown never relies on Litestream's own sync (Fleet
+always syncs explicitly, because Litestream 0.5.17 exits without syncing when
+stopped before its first sync tick). The 10 s worker grace is a sub-budget of the
+60 s, not a conflict with it. The old "at least 60 s" advice is the same number.
+
+The sum is not bounded by 60 s when object storage itself is degraded: the
+explicit final sync may take up to three deadlines of 60 s. Then the platform's
+SIGKILL arrives first. That is safe, not corrupting: ownership is simply not
+released, so the next instance waits for the expiry (30 s by default) and loses at
+most the replication window (see below).
+`RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` needs no tuning: a hand-over is complete
+before the new deployment is Active, so the old instance is only an idle standby
+when the platform stops it. Leave it at the platform default; a longer overlap is
+harmless.
+
+#### Fenced writers and restart policy
+
+An owner that cannot renew within the fence window, or that sees a newer
+generation (it was paused or partitioned and another instance took over), closes
+its write gate at once, stops its worker within `FENCED_GRACE_MS` (15 s), and
+**exits nonzero**. It never acknowledges a write after that and never writes to
+the new generation.
+
+What the platform's restart policy then does: a restarted container is a new
+process with a new instance id, so it is a new deployment, not a standby. It asks
+the live owner to hand over, exactly like a rolling deploy: one ownership change,
+a brief `503` window for writes, no data loss. The previous owner then stays
+behind as an idle standby until its next deploy or SIGTERM. Use a restart policy
+of "on failure" with a retry limit (the hosting request below asks for 10), so a
+host that keeps pausing cannot flip ownership forever. With no restart policy the
+fenced container stays down and the other instance simply keeps serving.
+
+#### Data-loss bounds
+
+- **Hand-over** (rolling deploy; the old instance may be stopped with SIGTERM or
+  killed with SIGKILL as soon as the new one is healthy): no acknowledged write is
+  lost. The old owner closes its write gate before the final sync and releases
+  only after it, and the new instance serves only after restoring from that final
+  state.
+- **Crash, SIGKILL of the serving owner, host loss:** writes acknowledged within
+  the replication window before the loss can be lost: the one-second Litestream
+  sync interval plus the upload time of the last segment. An object storage
+  outage widens the window to the length of the outage. The next instance serves
+  after the expiry (30 s by default, measured by its own clock from when it last
+  saw the record change, so up to about 32 s once it is running) plus its restore
+  and initial sync.
+- **Paused or partitioned owner:** writes it acknowledged before it froze are
+  covered by the same window; after the takeover it acknowledges nothing.
+
+Replication is asynchronous. Do not use bucket lifecycle rules that
+independently delete active replica objects.
+
+**Generation retention.** Each owner writes its own replica under
+`<prefix>/generations/<n>/`. Only the current owner deletes old generations, and
+only after it has published its own generation as the authoritative `replica` in
+`fleet-owner.json`. A generation is deleted only when it is more than
+`FLEET_OWNERSHIP_RETAIN_GENERATIONS` (1–20, default 2) generations behind the
+current one **and** its newest object is older than `FLEET_OWNERSHIP_RETAIN_DAYS`
+(1–365, default 7). The current generation and the generation named by `replica`
+are never deleted. Before every batch of at most 20 deletes (one batch per renewal
+interval) the owner re-reads the owner record and stops if ownership is lost or a
+hand-over is requested. The first sweep runs shortly after the replica is
+published, then hourly. A failure is logged as a warning and never affects
+serving; the next sweep resumes. The pre-ownership replica ("generation 0", written
+directly under the prefix) is deleted only by exact Litestream file names under the
+prefix root, and only if nothing unrecognised is stored there; if in doubt it is
+kept, and you can remove it manually.
+
+#### Monitoring
+
+Under the supervisor, administrators can read `GET /v1/ownership` (`state`, `held`,
+`generation`, `holder`, `replicaGeneration`, `renewalAgeSeconds`,
+`replicaLastSyncAgeSeconds`) and these Prometheus series on `/metrics`:
+`fleet_ownership_held`, `fleet_ownership_generation`,
+`fleet_ownership_renewal_age_seconds` and `fleet_replica_last_sync_age_seconds`.
+`fleet_ownership_held` is 1 only while this instance accepts writes; it is 0 while
+handing over, draining or fenced. `fleet_replica_last_sync_age_seconds` is a
+replication-lag measure, checked every 10 s: it stays near zero (under about 10 s)
+while the replica holds everything the database has committed, including when
+idle, and grows only while committed transactions are not reaching object storage.
+Alert above about 60 s. `/health` is unchanged. Structured log events are
+`ownership.acquired`, `ownership.takeover`, `ownership.handover_requested`,
+`ownership.handover_noticed`, `ownership.handover_granted`,
+`ownership.handover_completed`, `ownership.released`, `ownership.renew_failed` and
+`ownership.self_fenced`, each with the generation and instance id and never a
+credential. A fenced writer exits with status 75.
+
+#### Every writer path goes through ownership
+
+The Litestream supervisor (`bun run start`, the container entrypoint and
+`bun run local`, which supervises the worker against loopback emulators) is the
+only process that restores, replicates and starts the worker. The other commands
+that touch the replica or the working file are guarded:
+
+- `bun run access:allow` opens the local file and writes to it, so it first reads
+  `<prefix>/fleet-owner.json` and **refuses** unless it can prove it is not a
+  second writer: an owner record with a holder (even one that crashed and has not
+  expired), a release reserved for a starting instance, an unreadable or foreign
+  record, or an unreachable bucket all refuse, and so does a local file whose
+  `.generation` marker does not match the authoritative replica generation (the
+  change would be written to a stale copy and discarded by the next restore). The
+  message points to `PUT /v1/access/:email` with the admin token, which goes
+  through the running owner. There is no flag to skip the check.
+- `bun run restore:drill` restores a replica into a temporary directory and refuses
+  a prefix with a live owner (see the manual drill below).
+- Restore drills by hand must use a copy under another prefix; the owner never
+  restores into the production working file.
+
+### Hosting request
+
+Put these settings into the `crvouga/workspace` hosting request (#162) for the
+`fleet-api` service:
+
+| Setting                 | Value                                                                                                                  |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Healthcheck path        | `/health` (200 only on the instance that owns the replica and serves)                                                  |
+| Healthcheck timeout     | at least 180 seconds                                                                                                   |
+| Replicas                | exactly 1 (no autoscaling; a second replica is only an idle standby)                                                   |
+| Drain (SIGTERM to kill) | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=60`                                                                               |
+| Overlap                 | `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` unset (platform default); hand-over completes before the new deployment is Active |
+| Restart policy          | on failure, maximum 10 retries                                                                                         |
+| Volume                  | none; state lives in object storage, the working file is disposable                                                    |
+| Stop signal             | SIGTERM (the image's `STOPSIGNAL`)                                                                                     |
+
+### Manual R2 drill
+
+Automated checks run against Moto, and Docker drills against the real image
+(`scripts/check-container.py`). They do not prove that Cloudflare R2's conditional
+writes and listings behave the same. A human runs this drill once with **dev** R2
+credentials and records the result in the pull request. Never use production
+credentials or the production prefix.
+
+Prerequisites: Bun 1.4.4, Litestream 0.5.17 on `PATH`, `bun install --frozen-lockfile`
+and `bun run build` from the repository root, `jq`, `curl`, and the AWS CLI (or any
+S3 client) for cleanup. Keep credentials out of shell history and files in the
+repository.
+
+```sh
+# One disposable prefix per drill day; the rolling and crash drills get their own.
+export DRILL_BASE="fleet-api/drill-$(date +%Y-%m-%d)"
+export FLEET_S3_BUCKET=...          # the dev bucket
+export FLEET_S3_ENDPOINT=...        # https://<account>.r2.cloudflarestorage.com
+export AWS_REGION=auto
+export AWS_ACCESS_KEY_ID=...        # dev credentials only
+export AWS_SECRET_ACCESS_KEY=...
+export FLEET_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export FLEET_OWNERSHIP_RENEW_SECONDS=1 FLEET_OWNERSHIP_EXPIRE_SECONDS=15  # shorter drill
+
+start() { # start <name> <port> <prefix>: one instance with its own disk and port; read its PID from $!
+  mkdir -p "/tmp/fleet-drill/$1"
+  FLEET_DATABASE_PATH="/tmp/fleet-drill/$1/fleet.db" PORT="$2" FLEET_S3_PREFIX="$3" \
+    bun packages/fleet-controller/src/start.ts > "/tmp/fleet-drill/$1/log" 2>&1 &
+}
+put() { # put <port> <email>: prints the HTTP status
+  curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+    "http://127.0.0.1:$1/v1/access/$2"
+}
+present() { # present <port>: every allowed email, sorted
+  curl -s -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" "http://127.0.0.1:$1/v1/access" | jq -r '.emails[]' | sort
+}
+healthy() { curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1/health"; }
+```
+
+**1. Rolling deploy.** Run each step from the repository root.
+
+```sh
+P="$DRILL_BASE/rolling"
+start a 8081 "$P"; A=$!; until [ "$(healthy 8081)" = 200 ]; do sleep 1; done
+# Write continuously to A, logging every status (the acknowledged writes are the 200s).
+( i=0; while true; do i=$((i+1)); e="drill-$i@example.test"; echo "$e $(put 8081 "$e")"; sleep 0.1; done ) > /tmp/fleet-drill/acked.log &
+WRITER=$!
+sleep 5
+start b 8082 "$P"; B=$!                       # B asks A to hand over
+until [ "$(healthy 8082)" = 200 ]; do sleep 1; done   # B is Active only after the hand-over
+kill "$WRITER"
+kill -TERM "$A"; wait "$A"; echo "A exit code: $?"   # expect 0
+awk '$2 == 200 { print $1 }' /tmp/fleet-drill/acked.log | sort > /tmp/fleet-drill/acked.txt
+present 8082 > /tmp/fleet-drill/on-b.txt
+comm -23 /tmp/fleet-drill/acked.txt /tmp/fleet-drill/on-b.txt   # expect no output: no acknowledged write lost
+grep -vc ' 200$' /tmp/fleet-drill/acked.log                     # writes refused (503) or unreachable (000) during the hand-over
+put 8082 after-rolling@example.test                             # expect 200
+present 8082 > /tmp/fleet-drill/final.txt
+kill -TERM "$B"; wait "$B"; echo "B exit code: $?"             # expect 0
+```
+
+Then restore the replica as a replacement host would, and compare it with B's
+final state. The drill command refuses while any instance still owns the prefix,
+so run it after B has stopped:
+
+```sh
+FLEET_S3_PREFIX="$P" bun run restore:drill       # prints {"generation":...,"userVersion":...,"integrity":"ok","nodes":...,"settings":...}
+start c 8083 "$P"; C=$!; until [ "$(healthy 8083)" = 200 ]; do sleep 1; done
+present 8083 | diff - /tmp/fleet-drill/final.txt && echo "C restored exactly B's state"
+kill -TERM "$C"; wait "$C"
+```
+
+While an instance still owns a prefix, `bun run restore:drill` must refuse (try
+it once while B is serving); `--prefix <other>` restores a different prefix, for
+example a copy of the replica.
+
+**2. Crash takeover.** A fresh prefix, and kill the whole process tree of A.
+
+```sh
+kill_tree() { for c in $(pgrep -P "$1"); do kill_tree "$c"; done; kill -KILL "$1" 2>/dev/null; }
+P="$DRILL_BASE/crash"
+start a 8091 "$P"; A=$!; until [ "$(healthy 8091)" = 200 ]; do sleep 1; done
+( i=0; while true; do i=$((i+1)); e="crash-$i@example.test"; echo "$e $(put 8091 "$e") $(date +%s)"; sleep 0.2; done ) > /tmp/fleet-drill/crash.log &
+WRITER=$!
+sleep 10
+KILLED=$(date +%s); kill "$WRITER"; kill_tree "$A"       # no hand-over, no release
+start b 8092 "$P"; B=$!
+until [ "$(healthy 8092)" = 200 ]; do sleep 1; done
+echo "B served $(( $(date +%s) - KILLED )) s after the kill"   # about the 15 s expiry plus restore
+grep 'taking over' /tmp/fleet-drill/b/log                      # expect one match
+# Every write acknowledged at least 5 s before the kill must be present.
+awk -v cutoff=$((KILLED-5)) '$2 == 200 && $3 <= cutoff { print $1 }' /tmp/fleet-drill/crash.log | sort > /tmp/fleet-drill/crash-acked.txt
+present 8092 > /tmp/fleet-drill/crash-on-b.txt
+comm -23 /tmp/fleet-drill/crash-acked.txt /tmp/fleet-drill/crash-on-b.txt   # expect no output
+awk '$2 == 200 { print $1 }' /tmp/fleet-drill/crash.log | sort | comm -23 - /tmp/fleet-drill/crash-on-b.txt | wc -l  # writes lost inside the window
+kill -TERM "$B"; wait "$B"
+FLEET_S3_PREFIX="$P" bun run restore:drill
+```
+
+Also confirm from the bucket listing that R2 shows the expected layout
+(`<prefix>/fleet-owner.json` and `<prefix>/generations/<n>/`), and note any
+difference from Moto, such as listing consistency or conditional-write status codes:
+
+```sh
+aws s3 ls --recursive --endpoint-url "$FLEET_S3_ENDPOINT" "s3://$FLEET_S3_BUCKET/$DRILL_BASE/" | head -40
+```
+
+**Clean up** after both drills, with no instance still running. Check the prefix
+first; this deletes everything under it:
+
+```sh
+echo "$DRILL_BASE"                      # must be fleet-api/drill-<date>, never fleet-api or production
+aws s3 rm --recursive --endpoint-url "$FLEET_S3_ENDPOINT" "s3://$FLEET_S3_BUCKET/$DRILL_BASE/"
+rm -rf /tmp/fleet-drill
+unset FLEET_ADMIN_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+```
+
+Paste this into the pull request (fill every field; leave the template's wording
+alone if a step was not run, and say so):
+
+```text
+Manual R2 drill, <date>, dev bucket <name>, prefix fleet-api/drill-<date>/
+Fleet commit <sha>, Bun 1.4.4, Litestream 0.5.17
+Rolling deploy
+  A acknowledged <n> writes; <n> refused (503) during hand-over
+  B healthy after <s> s; A exit code <0>
+  acknowledged writes missing on B: <0>
+  restore:drill: generation <n>, integrity <ok>, nodes <n>, settings <n>
+  fresh instance C restored B's state exactly: <yes/no>
+Crash takeover
+  B healthy <s> s after the kill (expiry 15 s)
+  writes acknowledged >= 5 s before the kill missing on B: <0>
+  writes lost inside the window: <n> of <n>
+  restore:drill: integrity <ok>
+R2 versus Moto differences observed (status codes, listing, timing): <none/describe>
+Prefix removed afterwards: <yes>
+```
 
 ## Troubleshooting
 
-| Failure stage                   | What to fix                                                                                                                                                                                                                                                                   |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configuration                   | Set the named settings in `deployment.env`, correct their format, and include `--env-file=deployment.env`. Removed backend settings must be unset, including blank ones.                                                                                                      |
-| Runtime / Litestream            | Install Bun 1.4.4 and Litestream 0.5.17; correct PATH or `FLEET_LITESTREAM_BIN`.                                                                                                                                                                                              |
-| Assets                          | Run `bun install --frozen-lockfile` and `bun run build`; make the built assets readable by the service user.                                                                                                                                                                  |
-| Filesystem                      | Fix directory/file ownership and write access, free disk space, or choose another `FLEET_DATABASE_PATH`.                                                                                                                                                                      |
-| Ownership                       | The provider refused a conditional write: check Put/Get/Delete permissions, endpoint and credentials, or use a provider with conditional writes. An unreadable `fleet-owner.json` means another Fleet version or tool wrote it; never delete it while an instance is running. |
-| Restore / initial replica write | Check endpoint, region, bucket/prefix, credential validity, network connectivity and List/Get/Put/Delete permissions. Read the preceding Litestream error. Startup never falls back to unreplicated operation.                                                                |
-| SQLite / schema                 | Stop other writers. Preserve corrupt files before restoring. If the schema is newer, deploy the matching newer Fleet version; never lower the schema version manually.                                                                                                        |
-| Listen                          | Free `PORT` or choose an unused unprivileged port; stop the previous instance.                                                                                                                                                                                                |
+| Failure stage                   | What to fix                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration                   | Set the named settings in `deployment.env`, correct their format, and include `--env-file=deployment.env`. Removed backend settings must be unset, including blank ones.                                                                                                                                                                                                                                   |
+| Runtime / Litestream            | Install Bun 1.4.4 and Litestream 0.5.17; correct PATH or `FLEET_LITESTREAM_BIN`.                                                                                                                                                                                                                                                                                                                           |
+| Assets                          | Run `bun install --frozen-lockfile` and `bun run build`; make the built assets readable by the service user.                                                                                                                                                                                                                                                                                               |
+| Filesystem                      | Fix directory/file ownership and write access, free disk space, or choose another `FLEET_DATABASE_PATH`.                                                                                                                                                                                                                                                                                                   |
+| Ownership                       | The provider refused a conditional write: check Put/Get/Delete permissions, endpoint and credentials, or use a provider with conditional writes. An unreadable `fleet-owner.json` means another Fleet version or tool wrote it; never delete it while an instance is running. `access:allow` or `restore:drill` refusing means an instance owns the prefix: use `PUT /v1/access/:email` or another prefix. |
+| Restore / initial replica write | Check endpoint, region, bucket/prefix, credential validity, network connectivity and List/Get/Put/Delete permissions. Read the preceding Litestream error. Startup never falls back to unreplicated operation.                                                                                                                                                                                             |
+| SQLite / schema                 | Stop other writers. Preserve corrupt files before restoring. If the schema is newer, deploy the matching newer Fleet version; never lower the schema version manually.                                                                                                                                                                                                                                     |
+| Listen                          | Free `PORT` or choose an unused unprivileged port; stop the previous instance.                                                                                                                                                                                                                                                                                                                             |
 
 `DATABASE_URL`, `FLEET_DB_PREPARE`, `FLEET_DATABASE_URL`,
 `FLEET_DATABASE_AUTH_TOKEN`, and `FLEET_STORAGE_MODE` are removed and rejected.

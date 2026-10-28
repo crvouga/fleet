@@ -157,6 +157,11 @@ export const API_SPECS: readonly Spec[] = [
   { key: 'GET /v1/nodes/:id/restarts', kind: 'read', path: at(1, '/restarts') },
   { key: 'GET /metrics', kind: 'read', path: fixed('/metrics') },
   { key: 'GET /v1/audit', kind: 'admin-read', path: fixed('/v1/audit') },
+  {
+    key: 'GET /v1/ownership',
+    kind: 'admin-read',
+    path: fixed('/v1/ownership'),
+  },
   { key: 'GET /v1/access', kind: 'admin-read', path: fixed('/v1/access') },
   {
     key: 'PUT /v1/access/:email',

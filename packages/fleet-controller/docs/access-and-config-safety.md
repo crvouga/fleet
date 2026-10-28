@@ -277,7 +277,7 @@ rollback). The node page shows the same list.
 
 ## Allowlist API (`/v1/access`)
 
-For hosts where nobody can run `bun run access:allow` beside the service, the admin token (or a signed-in administrator) manages the browser allowlist over HTTP:
+For hosts where nobody can run `bun run access:allow` beside the service (and whenever the service is running: the CLI writes the local file, so it refuses while an instance owns the replica, when the owner record cannot be read, or when the local file is not the authoritative replica), the admin token (or a signed-in administrator) manages the browser allowlist over HTTP:
 
 - `GET /v1/access` lists allowed emails (administrators only; a viewer gets 403 and a denied audit row).
 - `PUT /v1/access/:email` allows an address as an administrator. Allowing an existing address changes nothing.

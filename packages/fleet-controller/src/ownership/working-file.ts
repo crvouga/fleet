@@ -28,6 +28,16 @@ function readMarker(path: string): string | null {
 }
 
 /**
+ * True when the working file at `path` continues `generation`: its marker
+ * names that generation (a file with no marker belongs to generation 0, the
+ * layout that predates ownership).
+ */
+export function continuesGeneration(path: string, generation: number): boolean {
+  const marker = readMarker(path);
+  return marker === String(generation) || (marker === null && generation === 0);
+}
+
+/**
  * Keeps the local working file only when it continues exactly the generation
  * being restored (it may hold writes not yet replicated). Otherwise another
  * writer moved on, so it is set aside, never deleted, and restored fresh.
@@ -40,9 +50,7 @@ export function prepareWorkingFile(
     rmSync(markerOf(path), { force: true });
     return 'absent';
   }
-  const marker = readMarker(path);
-  if (marker === String(restoreFrom) || (marker === null && restoreFrom === 0))
-    return 'kept';
+  if (continuesGeneration(path, restoreFrom)) return 'kept';
   for (const suffix of SIDE_FILES) {
     const aside = `${path}.superseded${suffix}`;
     rmSync(aside, { force: true });

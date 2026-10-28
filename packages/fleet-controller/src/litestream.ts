@@ -5,8 +5,13 @@ import { stringify } from 'yaml';
 import { litestreamCredentials, type StorageConfig } from './storage';
 
 /** Generated without credentials; env expansion is disabled to preserve literal paths. */
-export function litestreamConfig(storage: StorageConfig): string {
+export function litestreamConfig(
+  storage: StorageConfig,
+  metricsPort?: number
+): string {
   return stringify({
+    // Loopback only: Litestream's Prometheus endpoint feeds the sync monitor.
+    ...(metricsPort === undefined ? {} : { addr: `127.0.0.1:${metricsPort}` }),
     dbs: [
       {
         path: storage.path,
@@ -29,10 +34,13 @@ export function litestreamConfig(storage: StorageConfig): string {
 export function configArgs(
   directory: string,
   name: string,
-  storage: StorageConfig
+  storage: StorageConfig,
+  metricsPort?: number
 ): string[] {
   const config = join(directory, `${name}.yml`);
-  writeFileSync(config, litestreamConfig(storage), { mode: 0o600 });
+  writeFileSync(config, litestreamConfig(storage, metricsPort), {
+    mode: 0o600,
+  });
   return ['-config', config, '-no-expand-env'];
 }
 

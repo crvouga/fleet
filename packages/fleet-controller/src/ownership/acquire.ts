@@ -128,7 +128,10 @@ async function requestHandover(
   );
   if (written.ok)
     ctx.log.info('asked the current writer to hand over', {
+      event: 'ownership.handover_requested',
       generation: current.generation,
+      holder: ctx.instance,
+      owner: current.holder,
     });
   return written.ok ? written.etag : null;
 }
@@ -174,9 +177,19 @@ async function attempt(
   if (claimable(ctx, current) || expired(ctx, watch, found.etag)) {
     if (current.holder !== null)
       ctx.log.warn('taking over from a writer that stopped renewing', {
+        event: 'ownership.takeover',
         generation: current.generation,
+        holder: ctx.instance,
+        previousHolder: current.holder,
       });
     const claim = await take(ctx, current, { etag: found.etag, since });
+    if (claim !== null && current.handoverTo === ctx.instance)
+      ctx.log.info('hand-over completed; this instance is the writer', {
+        event: 'ownership.handover_completed',
+        generation: claim.generation,
+        holder: ctx.instance,
+        previousGeneration: current.generation,
+      });
     return { claim, watch: null };
   }
   return waitFor(ctx, mode, current, { found: found.etag, watch });
@@ -237,7 +250,15 @@ export async function acquire(
   while (!ctx.stopped()) {
     try {
       const step = await attempt(ctx, mode, watch);
-      if (step.claim !== null) return step.claim;
+      if (step.claim !== null) {
+        ctx.log.info('acquired writer ownership', {
+          event: 'ownership.acquired',
+          generation: step.claim.generation,
+          restoreFrom: step.claim.restoreFrom,
+          holder: ctx.instance,
+        });
+        return step.claim;
+      }
       watch = step.watch;
     } catch (error) {
       if (error instanceof OwnerRecordError) throw error;

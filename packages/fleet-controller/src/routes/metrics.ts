@@ -6,6 +6,7 @@ import { ROLES, type NodeStatus, type NodeView } from '../types';
 
 import { adminRoute } from './guards';
 import { loadViews } from './node-views';
+import { ownershipMetrics } from './ownership-status';
 import { resourceMetrics } from './resource-metrics';
 import { runnerHealthMetrics } from './runner-health-metrics';
 
@@ -120,7 +121,10 @@ export function mountMetrics(app: Hono, deps: AppDeps): void {
       const runnerHealth = await runnerHealthMetrics(deps);
       const text =
         renderMetrics(await loadViews(deps), deps.now()) +
-        runnerHealth.map((line) => `${line}\n`).join('');
+        runnerHealth.map((line) => `${line}\n`).join('') +
+        ownershipMetrics(deps.now().getTime())
+          .map((line) => `${line}\n`)
+          .join('');
       return c.body(text, 200, {
         'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
         'Cache-Control': 'no-store',

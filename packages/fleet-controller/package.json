@@ -25,6 +25,7 @@
     "test:browser": "bun test ./test/auth/browser-journey.test.ts",
     "start": "bun src/start.ts",
     "access:allow": "bun src/db/allow-email.ts",
+    "restore:drill": "bun src/ownership/restore-drill.ts",
     "check:config": "bun src/start.ts --check",
     "dev:controller": "bun run dev",
     "dev:managed": "FLEET_DEV_MODE=managed bun run dev"

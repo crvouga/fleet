@@ -14,15 +14,27 @@ import { createDb } from '../db/client';
 import { StartupError, databaseFailure } from '../startup-error';
 import type { StorageConfig } from '../storage';
 import { acquire, type Claim, type OwnershipContext } from './acquire';
+import { startBackground } from './background';
 import { keepAlive, type KeepAlive } from './keep-alive';
 import { Lease } from './lease';
 import { generationPrefix } from './record';
+import { DEFAULT_RETENTION, type RetentionPolicy } from './retention-policy';
+import { freeLoopbackPort } from './replica-sync';
+import { OWNERSHIP_STATUS_ENV } from './status';
 import type { Shutdown } from './shutdown';
 import { markGeneration, prepareWorkingFile } from './working-file';
 import { WRITE_GATE_ENV } from './write-gate';
 
-/** Covers the worker's own 10 s shutdown grace plus Litestream's final sync. */
+/**
+ * Covers the worker's own 10 s shutdown grace plus Litestream's final sync when
+ * storage is healthy. Under degraded storage the final sync can outlast it (up
+ * to three attempts of FLEET_STARTUP_TIMEOUT_SECONDS) and the platform's SIGKILL
+ * arrives first: ownership is then not released and the successor takes over
+ * after expiry (see CONFIGURATION.md, Writer ownership).
+ */
 const DRAIN_GRACE_MS = 50_000;
+/** Exit status of a writer that lost ownership (self-fenced). */
+const FENCED_EXIT_CODE = 75;
 /** A fenced holder's writes go to an abandoned generation; stop it promptly. */
 const FENCED_GRACE_MS = 15_000;
 
@@ -33,6 +45,8 @@ export interface WriterOptions {
   readonly worker: string;
   readonly ctx: OwnershipContext;
   readonly shutdown: Shutdown;
+  /** Which old generations the owner may delete; defaults to 2 generations and 7 days. */
+  readonly retention?: RetentionPolicy;
 }
 
 type Served =
@@ -47,7 +61,8 @@ const at = (storage: StorageConfig, generation: number): StorageConfig => ({
 async function prepare(
   options: WriterOptions,
   claim: Claim,
-  directory: string
+  directory: string,
+  metricsPort: number
 ): Promise<string[]> {
   const { binary, storage, log } = options;
   const local = prepareWorkingFile(storage.path, claim.restoreFrom);
@@ -74,7 +89,12 @@ async function prepare(
   } catch (error) {
     throw databaseFailure(error);
   }
-  return configArgs(directory, 'replica', at(storage, claim.generation));
+  return configArgs(
+    directory,
+    'replica',
+    at(storage, claim.generation),
+    metricsPort
+  );
 }
 
 async function initialSync(
@@ -144,11 +164,14 @@ async function settle(event: Event, running: Running): Promise<Served> {
   const generation = lease.claim.generation;
   if (event === 'lost') {
     // Another instance owns a newer generation; this one's writes are abandoned.
-    log.error('writer ownership lost; stopped accepting writes', {
+    // Exit nonzero (the platform's restart policy brings it back as a new
+    // deployment, which asks the live owner to hand over): a fenced process
+    // never lingers as a writer candidate that could be mistaken for healthy.
+    log.error('writer ownership lost; stopped accepting writes and exiting', {
       generation,
     });
     await stopWithin(child, FENCED_GRACE_MS);
-    return { kind: 'standby' };
+    return { kind: 'exited', code: FENCED_EXIT_CODE };
   }
   if (event !== 'exited')
     log.info(
@@ -177,22 +200,39 @@ async function serve(
 ): Promise<Served> {
   const lease = new Lease(options.ctx, claim);
   const gate = join(directory, 'write-gate');
-  const alive = keepAlive(lease, options.ctx, gate);
+  const statusFile = join(directory, 'ownership-status');
+  const synced: { at: number | null } = { at: null };
+  const metricsPort = freeLoopbackPort();
+  const alive = keepAlive(lease, options.ctx, gate, {
+    path: statusFile,
+    lastSyncAt: () => synced.at,
+  });
   try {
-    const common = await prepare(options, claim, directory);
+    const common = await prepare(options, claim, directory, metricsPort);
     await initialSync(options, claim, common);
     if (!(await lease.confirmReplica()))
       throw new StartupError(
         'ownership',
         'Could not record this generation as the authoritative replica in object storage. Check connectivity and Put permissions; the next start retries. The Fleet controller did not start listening.'
       );
+    synced.at = Date.now();
+    alive.refresh();
     const child = spawnLitestream(
       options.binary,
       ['replicate', ...common, '-exec', options.worker],
       at(options.storage, claim.generation),
-      { [WRITE_GATE_ENV]: gate }
+      { [WRITE_GATE_ENV]: gate, [OWNERSHIP_STATUS_ENV]: statusFile }
     );
+    const background = startBackground({
+      ctx: options.ctx,
+      lease,
+      policy: options.retention ?? DEFAULT_RETENTION,
+      log: options.log,
+      metricsPort,
+      onSynced: (atWall) => (synced.at = atWall),
+    });
     const event = await nextEvent(child, alive, options.shutdown);
+    background.stop();
     alive.closeGate();
     const target = at(options.storage, claim.generation);
     return await settle(event, {

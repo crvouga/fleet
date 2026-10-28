@@ -14,6 +14,7 @@ import { mountAdminEvents } from './routes/admin-events';
 import { mountAdminNodes } from './routes/admin-nodes';
 import { mountAdminOperations } from './routes/admin-operations';
 import { mountAdminAudit } from './routes/admin-audit';
+import { mountOwnershipStatus } from './routes/ownership-status';
 import { mountAdminIssues } from './routes/admin-issues';
 import { internalError } from './issues/error-response';
 import { mountAdminSettings } from './routes/admin-settings';
@@ -90,6 +91,7 @@ function mountAdminApi(app: Hono, deps: AppDeps): void {
   mountAdminAccess(app, deps);
   mountAdminOperations(app, deps);
   mountAdminAudit(app, deps);
+  mountOwnershipStatus(app, deps);
   mountAdminIssues(app, deps);
   mountGithub(app, deps);
   mountAdminEvents(app, deps);

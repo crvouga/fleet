@@ -21,6 +21,7 @@ export class Lease {
   private state: LeaseState = 'held';
   private replicated = false;
   private replicaPublished = false;
+  private replicaSeen: number | null = null;
 
   constructor(
     private readonly ctx: OwnershipContext,
@@ -32,6 +33,21 @@ export class Lease {
   /** Monotonic time until which this holder may acknowledge writes. */
   writableUntil(): number {
     return this.state === 'lost' ? 0 : this.renewedAt + this.ctx.timing.fenceMs;
+  }
+
+  /** Where this holder stands, for monitoring and for the retention sweep. */
+  get current(): LeaseState {
+    return this.state;
+  }
+
+  /** The authoritative replica generation at the last successful renewal; null before any. */
+  get replicaGeneration(): number | null {
+    return this.replicaSeen;
+  }
+
+  /** Monotonic time of the last successful renewal (or of the claim). */
+  get lastRenewedAt(): number {
+    return this.renewedAt;
   }
 
   private ours(record: OwnerRecord): boolean {
@@ -48,23 +64,33 @@ export class Lease {
     const found = await this.ctx.store.get(ownerKey(this.ctx.prefix));
     const record = found === null ? null : parseOwner(found.body);
     if (found === null || record === null || !this.ours(record)) {
-      this.state = 'lost';
+      this.fence(
+        record === null
+          ? 'the owner record is missing'
+          : 'another instance owns a newer generation',
+        record
+      );
       return true;
     }
+    const replica = this.replicated ? this.claim.generation : record.replica;
     const written = await this.ctx.store.put(
       ownerKey(this.ctx.prefix),
-      serializeOwner({
-        ...record,
-        beat: record.beat + 1,
-        replica: this.replicated ? this.claim.generation : record.replica,
-      }),
+      serializeOwner({ ...record, beat: record.beat + 1, replica }),
       { ifMatch: found.etag }
     );
     if (!written.ok) return false;
     this.renewedAt = started;
     this.replicaPublished = this.replicated;
-    if (record.handoverTo !== null && this.state === 'held')
+    this.replicaSeen = replica;
+    if (record.handoverTo !== null && this.state === 'held') {
       this.state = 'handover';
+      this.ctx.log.info('hand-over requested of the current writer', {
+        event: 'ownership.handover_noticed',
+        generation: this.claim.generation,
+        holder: this.ctx.instance,
+        to: record.handoverTo,
+      });
+    }
     return true;
   }
 
@@ -75,12 +101,28 @@ export class Lease {
       for (let round = 0; round < 3 && !(await this.renewOnce()); round += 1);
     } catch (error) {
       this.ctx.log.warn('could not renew writer ownership', {
+        event: 'ownership.renew_failed',
         generation: this.claim.generation,
+        holder: this.ctx.instance,
         error: errorDetails(error),
       });
     }
-    if (this.ctx.now() >= this.writableUntil()) this.state = 'lost';
+    if (this.ctx.now() >= this.writableUntil())
+      this.fence('could not renew within the fencing window', null);
     return this.state;
+  }
+
+  /** Stops acknowledging writes for good; the first call logs why. */
+  private fence(reason: string, observed: OwnerRecord | null): void {
+    if (this.state === 'lost') return;
+    this.state = 'lost';
+    this.ctx.log.error('self-fenced: stopped acknowledging writes', {
+      event: 'ownership.self_fenced',
+      generation: this.claim.generation,
+      holder: this.ctx.instance,
+      reason,
+      ...(observed === null ? {} : { observedGeneration: observed.generation }),
+    });
   }
 
   /**
@@ -106,6 +148,21 @@ export class Lease {
       serializeOwner({ ...record, holder: null, beat: record.beat + 1 }),
       { ifMatch: found.etag }
     );
+    if (written.ok)
+      this.ctx.log.info(
+        record.handoverTo === null
+          ? 'released writer ownership'
+          : 'handed over writer ownership',
+        {
+          event:
+            record.handoverTo === null
+              ? 'ownership.released'
+              : 'ownership.handover_granted',
+          generation: this.claim.generation,
+          holder: this.ctx.instance,
+          ...(record.handoverTo === null ? {} : { to: record.handoverTo }),
+        }
+      );
     return written.ok;
   }
 

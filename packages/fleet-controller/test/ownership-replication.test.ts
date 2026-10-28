@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { freePort } from './support/port';
+import { killTree, processTree } from './support/process-tree';
 
 /**
  * Rolling-deploy drills with real Litestream against disposable S3 storage
@@ -88,26 +89,38 @@ async function healthy(instance: Instance, timeoutMs = 30_000): Promise<void> {
 
 const auth = { Authorization: `Bearer ${token}` };
 
-/** Writes the fleet heartbeat interval; returns the HTTP status (0 when unreachable). */
+/**
+ * Every drill write is a unique, idempotent allowlist entry (`drill-<n>`): it
+ * needs no revision precondition, so a 200 is an acknowledged write and
+ * "nothing acknowledged was lost" is a plain set-inclusion check.
+ */
+const drillEmail = (value: number) => `drill-${value}@example.test`;
+
+/** Returns the HTTP status (0 when unreachable). */
 async function write(instance: Instance, value: number): Promise<number> {
-  return fetch(`${instance.base}/v1/settings/fleet`, {
+  return fetch(`${instance.base}/v1/access/${drillEmail(value)}`, {
     method: 'PUT',
-    headers: { ...auth, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ heartbeat: { intervalSeconds: value } }),
+    headers: auth,
   }).then(
     (r) => r.status,
     () => 0
   );
 }
 
-async function read(instance: Instance): Promise<number | undefined> {
-  const response = await fetch(`${instance.base}/v1/settings/fleet`, {
+async function emails(instance: Instance): Promise<string[]> {
+  const response = await fetch(`${instance.base}/v1/access`, {
     headers: auth,
   });
-  const body = (await response.json()) as {
-    value: { heartbeat?: { intervalSeconds?: number } };
-  };
-  return body.value.heartbeat?.intervalSeconds;
+  return ((await response.json()) as { emails: string[] }).emails;
+}
+
+/** The highest drill value present, or undefined when none is. */
+async function read(instance: Instance): Promise<number | undefined> {
+  const values = (await emails(instance))
+    .map((email) => /^drill-(\d+)@example\.test$/.exec(email)?.[1])
+    .filter((value): value is string => value !== undefined)
+    .map(Number);
+  return values.length === 0 ? undefined : Math.max(...values);
 }
 
 async function stop(instance: Instance): Promise<number> {
@@ -141,7 +154,7 @@ const newPrefix = () => `ownership-test/${randomBytes(8).toString('hex')}`;
 
 afterEach(() => {
   for (const instance of spawned.splice(0)) {
-    instance.child.kill('SIGKILL');
+    killTree(instance.child.pid);
     rmSync(instance.directory, { recursive: true, force: true });
   }
 });
@@ -155,6 +168,7 @@ describe.skipIf(!enabled)('single writer across overlapping instances', () => {
 
     const b = startInstance(prefix, await freePort());
     let acknowledged = 30;
+    const everyAcknowledged = [30];
     let value = 31;
     let refused = 0;
     // Keep writing to the old instance until the new one is serving.
@@ -165,8 +179,10 @@ describe.skipIf(!enabled)('single writer across overlapping instances', () => {
       ))
     ) {
       const status = await write(a, value);
-      if (status === 200) acknowledged = value;
-      else refused += 1;
+      if (status === 200) {
+        acknowledged = value;
+        everyAcknowledged.push(value);
+      } else refused += 1;
       value += 1;
       if (b.child.exitCode !== null) throw new Error(b.output());
       await Bun.sleep(50);
@@ -178,6 +194,10 @@ describe.skipIf(!enabled)('single writer across overlapping instances', () => {
       );
     expect(refused).toBeGreaterThan(0); // The old writer stopped acknowledging during hand-over.
     expect(await read(b)).toBe(acknowledged);
+    // Not only the newest: every acknowledged write survived the hand-over.
+    const onB = await emails(b);
+    for (const value of everyAcknowledged)
+      expect(onB).toContain(drillEmail(value));
     expect(await write(b, 500)).toBe(200);
     // The old instance is a standby now: alive, not serving writes, and stops cleanly.
     expect(a.child.exitCode).toBeNull();
@@ -194,7 +214,8 @@ describe.skipIf(!enabled)('single writer across overlapping instances', () => {
     await healthy(a);
     expect(await write(a, 41)).toBe(200);
     await Bun.sleep(2_500); // Past the 1 s replication interval.
-    a.child.kill('SIGKILL');
+    // A container kill takes the whole process tree, not only the supervisor.
+    killTree(a.child.pid);
     await a.child.exited;
     const b = startInstance(prefix, await freePort());
     await healthy(b, 60_000);
@@ -206,26 +227,14 @@ describe.skipIf(!enabled)('single writer across overlapping instances', () => {
     await freshRestoreHas(prefix, 41);
   }, 180_000);
 
-  test('a paused writer that resumes after a takeover refuses writes and steps down', async () => {
+  test('a paused writer that resumes after a takeover refuses writes and exits nonzero', async () => {
     const prefix = newPrefix();
     const a = startInstance(prefix, await freePort());
     await healthy(a);
     expect(await write(a, 51)).toBe(200);
     await Bun.sleep(2_500);
     // Freeze the whole old instance (supervisor, Litestream and worker), as a hung host would.
-    const pids = [a.child.pid];
-    const listing = Bun.spawnSync(['pgrep', '-P', String(a.child.pid)]);
-    pids.push(
-      ...listing.stdout.toString().split('\n').filter(Boolean).map(Number)
-    );
-    for (const pid of [...pids])
-      pids.push(
-        ...Bun.spawnSync(['pgrep', '-P', String(pid)])
-          .stdout.toString()
-          .split('\n')
-          .filter(Boolean)
-          .map(Number)
-      );
+    const pids = processTree(a.child.pid);
     for (const pid of pids) process.kill(pid, 'SIGSTOP');
     const b = startInstance(prefix, await freePort());
     await healthy(b, 60_000);
@@ -233,10 +242,14 @@ describe.skipIf(!enabled)('single writer across overlapping instances', () => {
     for (const pid of pids) process.kill(pid, 'SIGCONT');
     // Immediately after resuming, the old worker must not acknowledge a write.
     expect(await write(a, 666)).not.toBe(200);
-    await Bun.sleep(4_000);
+    // A fenced writer exits nonzero instead of lingering as a standby.
+    const fencedCode = await Promise.race([
+      a.child.exited,
+      Bun.sleep(30_000).then(() => -1),
+    ]);
+    expect(fencedCode).toBe(75);
     expect(a.output()).toContain('writer ownership lost');
     expect(await read(b)).toBe(52);
-    expect(await stop(a)).toBe(0);
     expect(await stop(b)).toBe(0);
     await freshRestoreHas(prefix, 52);
   }, 180_000);

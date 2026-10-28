@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+import { killTree } from './support/process-tree';
 import { freePort } from './support/port';
 import { nodeIdOf, secretOf } from './support/fixtures';
 
@@ -65,7 +66,7 @@ test.skipIf(!enabled)(
         child.exited,
         Bun.sleep(15000).then(() => -999),
       ]);
-      if (code === -999) child.kill('SIGKILL');
+      if (code === -999) killTree(child.pid);
       expect(code).toBe(0);
     };
     let child = spawn();
@@ -92,16 +93,23 @@ test.skipIf(!enabled)(
         body: JSON.stringify({ heartbeat: { intervalSeconds: 90 } }),
       });
       expect(settings.status).toBe(200);
-      const owner = Bun.spawn(
+      // The owner CLI would be a second writer beside the live owner: it refuses.
+      const cli = Bun.spawn(
         [process.execPath, 'src/db/allow-email.ts', 'owner@example.org'],
         {
           cwd: join(import.meta.dir, '..'),
           env,
           stdout: 'ignore',
-          stderr: 'inherit',
+          stderr: 'ignore',
         }
       );
-      expect(await owner.exited).toBe(0);
+      expect(await cli.exited).toBe(1);
+      // Authorization goes through the owner over HTTP instead.
+      const owner = await fetch(`${base}/v1/access/owner@example.org`, {
+        method: 'PUT',
+        headers,
+      });
+      expect(owner.status).toBe(200);
       await Bun.sleep(2200);
       await stop(child);
       // Simulate loss of all local state; the bucket is the only surviving data source.
@@ -180,7 +188,7 @@ test.skipIf(!enabled || !process.env['FLEET_TEST_DENIED_BUCKET'])(
         )
       ).toBe(false);
     } finally {
-      child.kill('SIGKILL');
+      killTree(child.pid);
       rmSync(directory, { recursive: true, force: true });
     }
   },
