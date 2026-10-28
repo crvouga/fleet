@@ -36,6 +36,9 @@ interface Draft {
   autoRemove: boolean;
   grace: number;
   interval: number;
+  queueStall: number;
+  noRunners: number;
+  registrationFailing: number;
 }
 
 function draftOf(value: IntegrationData): Draft {
@@ -52,6 +55,9 @@ function draftOf(value: IntegrationData): Draft {
     autoRemove: value.policy.orphanAutoRemoval,
     grace: value.policy.orphanGraceSeconds,
     interval: value.policy.syncIntervalSeconds,
+    queueStall: value.policy.queueStallMinutes,
+    noRunners: value.policy.noRunnersMinutes,
+    registrationFailing: value.policy.registrationFailingMinutes,
   };
 }
 
@@ -71,6 +77,9 @@ function bodyOf(draft: Draft) {
       orphanAutoRemoval: draft.autoRemove,
       orphanGraceSeconds: draft.grace,
       syncIntervalSeconds: draft.interval,
+      queueStallMinutes: draft.queueStall,
+      noRunnersMinutes: draft.noRunners,
+      registrationFailingMinutes: draft.registrationFailing,
     },
   };
 }
@@ -146,6 +155,48 @@ function Target({
   );
 }
 
+function HealthThresholds({
+  draft,
+  patch,
+  disabled,
+}: {
+  draft: Draft;
+  patch: Patch;
+  disabled: boolean;
+}) {
+  return (
+    <Group grow align="flex-start">
+      <NumberInput
+        label="Queue stalled after (minutes)"
+        description="A queued job waiting this long with no idle runner opens an incident."
+        min={1}
+        max={1440}
+        disabled={disabled}
+        value={draft.queueStall}
+        onChange={(v) => patch({ queueStall: Number(v) || 10 })}
+      />
+      <NumberInput
+        label="No runners online after (minutes)"
+        description="No online runner while a CI node reports."
+        min={1}
+        max={1440}
+        disabled={disabled}
+        value={draft.noRunners}
+        onChange={(v) => patch({ noRunners: Number(v) || 10 })}
+      />
+      <NumberInput
+        label="Registration failing after (minutes)"
+        description="A node reports it cannot register runners."
+        min={1}
+        max={1440}
+        disabled={disabled}
+        value={draft.registrationFailing}
+        onChange={(v) => patch({ registrationFailing: Number(v) || 5 })}
+      />
+    </Group>
+  );
+}
+
 function Policy({
   draft,
   patch,
@@ -210,6 +261,7 @@ function Policy({
         value={draft.grace}
         onChange={(v) => patch({ grace: Number(v) || 1800 })}
       />
+      <HealthThresholds draft={draft} patch={patch} disabled={disabled} />
     </Stack>
   );
 }

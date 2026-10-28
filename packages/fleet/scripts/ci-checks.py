@@ -12,7 +12,7 @@ import subprocess
 GROUPS = ("roles", "runtime", "lifecycle", "image")
 SPECIAL = {
     "runtime": {"vm", "devbox-vm", "native-vm", "cattle-vm", "wifi-vm"},
-    "lifecycle": {"lifecycle", "follow-up"},
+    "lifecycle": {"lifecycle", "follow-up", "runner-registration-vm"},
     "image": {"installer"},
 }
 CACHEABLE = {"runtime", "lifecycle"}

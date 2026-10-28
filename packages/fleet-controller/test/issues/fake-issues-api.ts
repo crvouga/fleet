@@ -1,3 +1,4 @@
+import { shaped } from '../github/contract/skeleton';
 import { freePort } from '../support/port';
 
 export interface FakeIssue {
@@ -10,6 +11,34 @@ export interface FakeIssue {
   updated_at: string;
   html_url: string;
   pull_request?: unknown;
+}
+
+const DOCS = 'https://docs.github.com/rest';
+
+/** GitHub's error body: `message` and `documentation_url` (validation-error requires both). */
+export const errorBody = (message: string) => ({
+  message,
+  documentation_url: DOCS,
+});
+
+/** The issue as GitHub sends it, from what the fake models. */
+function issueJson(issue: FakeIssue, repository: string) {
+  const { labels, ...rest } = issue;
+  return shaped('issue', {
+    ...rest,
+    id: 1_000 + issue.number,
+    url: `https://api.github.com/repos/${repository}/issues/${issue.number}`,
+    // GitHub sends label objects, though the schema also allows plain names.
+    labels: labels.map((name, index) => ({
+      id: index + 1,
+      node_id: `LA_${index + 1}`,
+      url: `https://api.github.com/repos/${repository}/labels/${encodeURIComponent(name)}`,
+      name,
+      color: 'ededed',
+      default: false,
+      description: null,
+    })),
+  });
 }
 
 export interface Injection {
@@ -108,10 +137,10 @@ export class FakeIssuesApi {
     body: unknown
   ): Promise<Response> {
     if (request.headers.get('authorization') !== `Bearer ${this.token}`)
-      return this.json(401, { message: 'Bad credentials' });
+      return this.json(401, errorBody('Bad credentials'));
     const base = `/repos/${this.repository}/issues`;
     if (!url.pathname.startsWith(base))
-      return this.json(404, { message: 'Not Found' });
+      return this.json(404, errorBody('Not Found'));
     return this.routeIssues(
       request,
       url.pathname.slice(base.length),
@@ -130,21 +159,25 @@ export class FakeIssuesApi {
     if (request.method === 'POST' && rest === '')
       return this.create(body as Record<string, unknown>);
     const comment = /^\/(\d+)\/comments$/.exec(rest);
-    if (request.method === 'POST' && comment !== null) {
-      this.comments.push({
-        number: Number(comment[1]),
-        body: String((body as Record<string, unknown>)['body']),
-      });
-      return this.json(201, { id: this.comments.length });
-    }
+    if (request.method === 'POST' && comment !== null)
+      return this.comment(Number(comment[1]), body as Record<string, unknown>);
     const one = /^\/(\d+)$/.exec(rest);
     const found =
       one === null
         ? undefined
         : this.issues.find((i) => i.number === Number(one[1]));
     return request.method === 'GET' && found !== undefined
-      ? this.json(200, found)
-      : this.json(404, { message: 'Not Found' });
+      ? this.json(200, issueJson(found, this.repository))
+      : this.json(404, errorBody('Not Found'));
+  }
+
+  private comment(number: number, body: Record<string, unknown>): Response {
+    const text = String(body['body']);
+    this.comments.push({ number, body: text });
+    return this.json(
+      201,
+      shaped('issue-comment', { id: this.comments.length, body: text })
+    );
   }
 
   private list(url: URL): Response {
@@ -156,7 +189,8 @@ export class FakeIssuesApi {
       .filter((issue) => since === null || issue.updated_at >= since)
       .filter((issue) => state === 'all' || issue.state === state)
       .sort((a, b) => b.number - a.number)
-      .slice((page - 1) * per, page * per);
+      .slice((page - 1) * per, page * per)
+      .map((issue) => issueJson(issue, this.repository));
     return this.json(200, rows);
   }
 
@@ -174,14 +208,14 @@ export class FakeIssuesApi {
       html_url: `https://github.com/${this.repository}/issues/${number}`,
     };
     this.issues.push(issue);
-    return this.json(201, issue);
+    return this.json(201, issueJson(issue, this.repository));
   }
 }
 
 export const status =
   (code: number, message = 'injected', headers: Record<string, string> = {}) =>
   () =>
-    new Response(JSON.stringify({ message }), {
+    new Response(JSON.stringify(errorBody(message)), {
       status: code,
       headers: { 'content-type': 'application/json', ...headers },
     });

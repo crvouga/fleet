@@ -13,6 +13,9 @@ export interface IntegrationData {
     orphanAutoRemoval: boolean;
     orphanGraceSeconds: number;
     syncIntervalSeconds: number;
+    queueStallMinutes: number;
+    noRunnersMinutes: number;
+    registrationFailingMinutes: number;
   };
   status: 'unconfigured' | 'ok' | 'degraded' | 'error';
   lastSyncAt: string | null;
@@ -80,6 +83,20 @@ export interface RunnersData {
     repositories: string[];
   }[];
   unplaced: string[];
+  health: {
+    available: boolean;
+    runnersOnline: number;
+    queuedFleetJobs: number;
+    oldestQueuedSeconds: number;
+    queueStalled: boolean;
+    conditions: {
+      rule: string;
+      nodeId: string | null;
+      nodeLabel: string | null;
+      severity: 'info' | 'warn' | 'error';
+      message: string;
+    }[];
+  };
 }
 
 export interface Check {

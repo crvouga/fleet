@@ -42,14 +42,17 @@ operator ── key in env ──▶ controller ── App JWT → installation 
 
 ### Policy
 
-| Key                      | Default | Meaning                                                                                             |
-| ------------------------ | ------- | --------------------------------------------------------------------------------------------------- |
-| `extraLabels`            | `[]`    | Routing labels added to every CI node's runners that no setting overrides.                          |
-| `maxNodesPerRepository`  | `0`     | A repository is placed on at most this many nodes; `0` means every eligible node.                   |
-| `repositoryRequirements` | `{}`    | `{"owner/name": ["gpu"]}`: only nodes whose hardware capabilities or labels include these serve it. |
-| `orphanAutoRemoval`      | `false` | When `true` the controller deletes orphan runners after the grace period. Off: it only flags them.  |
-| `orphanGraceSeconds`     | `1800`  | How long a runner must stay an orphan before removal (60 to 2592000).                               |
-| `syncIntervalSeconds`    | `60`    | How often the controller reads GitHub (15 to 3600).                                                 |
+| Key                          | Default | Meaning                                                                                                                |
+| ---------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `extraLabels`                | `[]`    | Routing labels added to every CI node's runners that no setting overrides.                                             |
+| `maxNodesPerRepository`      | `0`     | A repository is placed on at most this many nodes; `0` means every eligible node.                                      |
+| `repositoryRequirements`     | `{}`    | `{"owner/name": ["gpu"]}`: only nodes whose hardware capabilities or labels include these serve it.                    |
+| `orphanAutoRemoval`          | `false` | When `true` the controller deletes orphan runners after the grace period. Off: it only flags them.                     |
+| `orphanGraceSeconds`         | `1800`  | How long a runner must stay an orphan before removal (60 to 2592000).                                                  |
+| `syncIntervalSeconds`        | `60`    | How often the controller reads GitHub (15 to 3600).                                                                    |
+| `queueStallMinutes`          | `10`    | A queued fleet job waiting this long with no idle runner able to take it opens a "queue stalled" incident (1 to 1440). |
+| `noRunnersMinutes`           | `10`    | No online Fleet runner for this long while a CI node reports opens "no runners online" (1 to 1440).                    |
+| `registrationFailingMinutes` | `5`     | A node's `FLEET_GITHUB_*` registration issue persisting this long opens "runner registration failing" (1 to 1440).     |
 
 ## API
 
@@ -121,6 +124,31 @@ bodies, tokens and keys are never logged or stored. Calls use bounded
 exponential backoff with jitter; after three consecutive temporary failures, or
 one rate limit, a circuit opens and calls fail fast until the wait is over.
 Status changes record an event and an audit entry.
+
+## Runner health incidents
+
+After every successful sync the controller checks, from the data it just
+mirrored, whether the fleet is actually serving jobs, and records one event per
+change (so incidents open and close once, and a restart repeats nothing):
+
+- **Job queue stalled** (`runner_queue_stalled` / `runner_queue_ok`): a queued
+  job that asks for fleet labels (`self-hosted` with `nixos` or `ci`) has waited
+  longer than `queueStallMinutes` and no online, idle runner can take it.
+- **No CI runners online** (`runners_offline` / `runners_ok`): GitHub lists no
+  online Fleet runner for `noRunnersMinutes` while an approved CI node is online,
+  which means registration is failing.
+- **Runner registration failing** (`runner_registration_failing` /
+  `runner_registration_ok`, per node): the node reports a registration problem
+  (`FLEET_GITHUB_KEY`, `FLEET_GITHUB_SCOPE`, `FLEET_GITHUB_UNAVAILABLE`,
+  `FLEET_RUNNER_RESTARTING`, ...) for `registrationFailingMinutes`.
+
+They show on **Runners** (a "Runner health" panel), on **Incidents** and as the
+metrics `fleet_runner_queue_stalled`, `fleet_runners_online` and
+`fleet_ci_jobs_queued_oldest_seconds` (omitted while the integration is
+unconfigured or its mirror is stale). If `alerts.webhookUrl` is set, each opening
+and closing is also posted there. Closing waits two minutes for the condition to
+stay gone, so a value hovering at a threshold does not flap. See
+[`automated-checks.md`](automated-checks.md) for what this does and does not prove.
 
 ## Placement
 

@@ -36,9 +36,11 @@ def free_port():
 class Stack:
     """The real fleet controller in its own process, with its own throwaway SQLite database."""
 
-    def __init__(self, enrollment_token):
+    def __init__(self, enrollment_token, extra_env=None):
+        """`extra_env` reaches only the controller process (for example a loopback
+        GitHub API URL and a throwaway App key), never the test's own environment."""
         env = dict(os.environ)
-        env.update({"FLEET_E2E_ENROLLMENT_TOKEN": enrollment_token})
+        env.update({"FLEET_E2E_ENROLLMENT_TOKEN": enrollment_token, **(extra_env or {})})
         self.process = subprocess.Popen(
             ["bun", str(STACK)],
             cwd=CONTROLLER_PACKAGE,
@@ -165,3 +167,118 @@ class NodeFiles:
 
 def query(url):
     return parse_qs(urlparse(url).query)
+
+
+# ---- runner_control.py as a node runs it ------------------------------------------
+
+_WRAPPER = '''\
+import json, os, runpy, sys, time, urllib.request
+
+sleeps = []
+if os.environ.get("E2E_RECORD_SLEEP") == "1":
+    time.sleep = lambda seconds: sleeps.append(seconds)
+redirect = os.environ.get("E2E_GITHUB_REDIRECT")
+if redirect:
+    real = urllib.request.urlopen
+    def urlopen(request, *args, **kwargs):
+        if request.full_url.startswith("https://api.github.com"):
+            request.full_url = redirect + request.full_url[len("https://api.github.com"):]
+        return real(request, *args, **kwargs)
+    urllib.request.urlopen = urlopen
+code = 0
+try:
+    runpy.run_path(os.environ["E2E_SCRIPT"], run_name="__main__")
+except SystemExit as stop:
+    code = stop.code
+finally:
+    with open(os.environ["E2E_SLEEP_LOG"], "w") as log:
+        json.dump(sleeps, log)
+sys.exit(code)
+'''
+
+# A node's Python has PyJWT; the machine running the tests may not. This stand-in signs
+# RS256 with `openssl` so the legacy direct-GitHub path still makes a genuine JWT.
+_JWT_SHIM = '''\
+import base64, json, subprocess, tempfile, os
+
+def _b64(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+def encode(claims, key, algorithm="RS256"):
+    assert algorithm == "RS256"
+    head = _b64(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    body = _b64(json.dumps(claims).encode())
+    with tempfile.TemporaryDirectory() as work:
+        private = os.path.join(work, "key.pem")
+        with open(private, "w") as stream:
+            stream.write(key)
+        os.chmod(private, 0o600)
+        signature = subprocess.run(["openssl", "dgst", "-sha256", "-sign", private], input=(head + "." + body).encode(),
+                                   capture_output=True, check=True).stdout
+    return head + "." + body + "." + _b64(signature)
+'''
+
+
+def runner_tools(directory):
+    """Writes the wrapper (and a PyJWT stand-in when the real one is missing) outside the
+    script directory. Returns (wrapper_path, extra PYTHONPATH entries)."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    wrapper = directory / "run_runner_control.py"
+    wrapper.write_text(_WRAPPER)
+    try:
+        __import__("jwt")
+        return wrapper, []
+    except ImportError:
+        shim = directory / "shim"
+        shim.mkdir(exist_ok=True)
+        (shim / "jwt.py").write_text(_JWT_SHIM)
+        return wrapper, [str(shim)]
+
+
+class RegisterResult:
+    def __init__(self, process, output, sleeps, status_file, used_file):
+        self.returncode = process.returncode
+        self.stdout = process.stdout
+        self.stderr = process.stderr
+        self.output = Path(output)
+        self.sleeps = sleeps
+        self.status_file = Path(status_file)
+        self.used_file = Path(used_file)
+
+    @property
+    def text(self):
+        return self.stdout + self.stderr
+
+    def recorded_status(self):
+        return json.loads(self.status_file.read_text()) if self.status_file.exists() else None
+
+
+def run_runner_control(node, api_url, tools, slot, target, *, label="run", key_path=None, app="", installation="",
+                       record_sleep=True, github_redirect=None, env_extra=None, timeout=120):
+    """`runner_control.py register repository TARGET APP INSTALL KEY OUTPUT` with the node's own
+    environment (only its identity files). The wrapper records the sleeps the script asked for
+    (and does not perform them when `record_sleep`), and can point the legacy direct-GitHub path
+    at a loopback fake. The node's environment never contains a GitHub App key."""
+    wrapper, pythonpath = tools
+    work = node.root / "registration" / label
+    work.mkdir(parents=True, exist_ok=True)
+    output, used, status, sleep_log = work / "tokens" / slot, work / "assign-used" / slot, work / "status.json", work / "sleeps.json"
+    env = node.env(api_url)
+    env.update({
+        "FLEET_SLOT": slot, "FLEET_ASSIGN_USED_FILE": str(used), "FLEET_REGISTER_STATUS": str(status),
+        "E2E_SCRIPT": str(ROOT / "scripts" / "runner_control.py"), "E2E_SLEEP_LOG": str(sleep_log),
+        "E2E_RECORD_SLEEP": "1" if record_sleep else "0",
+    })
+    if github_redirect:
+        env["E2E_GITHUB_REDIRECT"] = github_redirect
+    if pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    env.update(env_extra or {})
+    process = subprocess.run(
+        [sys.executable, str(wrapper), "register", "repository", target, app, installation,
+         str(key_path or (work / "no-such-app-key")), str(output)],
+        env=env, capture_output=True, text=True, timeout=timeout,
+    )
+    sleeps = json.loads(sleep_log.read_text()) if sleep_log.exists() else []
+    return RegisterResult(process, output, sleeps, status, used)

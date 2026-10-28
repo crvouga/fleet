@@ -1,0 +1,117 @@
+# Copy to a trusted PRIVATE project as .github/workflows/fleet-canary.yml and replace
+# the two YOUR_* commands. Never copy it to a public repository: it routes to
+# `self-hosted` runners and its job refuses to run unless the repository is private.
+#
+# What it proves, on a schedule and on demand, with no real work attached: a job
+# routed with `runs-on: [self-hosted, nixos, ci]` is picked up in reasonable time,
+# actions/checkout works there, a committed symlink checks out as a symlink, the slot
+# has its tools, the project's pinned devShell enters, the real toolchain runs, and the
+# headless browser starts with its sandbox enabled. The last step fails the run when the
+# job waited in the queue longer than FLEET_CANARY_MAX_QUEUE_SECONDS. A second hosted
+# job (`watchdog`) fails the run when the canary job is still queued after that long,
+# which is the case no step inside the canary can see.
+#
+# Detection that needs no workflow at all (queue stalled, no runners online, a node that
+# cannot register) runs in the Fleet controller and appears under Incidents; this
+# canary is the end-to-end complement: real GitHub, real checkout, real devShell.
+# See packages/fleet-controller/docs/automated-checks.md.
+name: Fleet canary
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: fleet-canary
+  cancel-in-progress: false
+env:
+  # Longest acceptable wait between the job being queued and a runner starting it.
+  FLEET_CANARY_MAX_QUEUE_SECONDS: '600'
+  # The project's real toolchain check and headless-browser smoke test, run inside its
+  # pinned devShell. They must exit non-zero on failure; a warning is not qualification.
+  FLEET_CANARY_TOOLCHAIN: YOUR_PROJECT_TOOLCHAIN_CHECK
+  FLEET_CANARY_BROWSER: YOUR_HEADLESS_BROWSER_SMOKE_TEST
+jobs:
+  canary:
+    # Same guard as runner-check.yml: never on a public repository.
+    if: github.event.repository.private
+    runs-on: [self-hosted, nixos, ci]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: A committed symlink is checked out as a symlink, and a new one can be made
+        run: |
+          link="$(git ls-files -s | awk '$1 == 120000 { print $4; exit }')"
+          if [ -z "$link" ]; then
+            echo "::error title=Fleet canary::No committed symlink found. Commit one (ln -s README.md .fleet-canary-link) so this check proves symlinks survive checkout."
+            exit 1
+          fi
+          test -L "$link" || { echo "::error title=Fleet canary::$link was committed as a symlink but was checked out as a plain file"; exit 1; }
+          test -e "$link" || { echo "::error title=Fleet canary::$link is a dangling symlink"; exit 1; }
+          deep="$RUNNER_TEMP/canary"
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do deep="$deep/0123456789"; done
+          mkdir -p "$deep"
+          ln -s "$PWD/$link" "$deep/created-link"
+          test -L "$deep/created-link"
+      - name: Tool versions of the slot
+        run: |
+          bash --version | head -n 1
+          git --version
+          gh --version | head -n 1
+          nix --version
+      - name: Enter the pinned devShell and run the real toolchain
+        run: |
+          case "$FLEET_CANARY_TOOLCHAIN" in YOUR_*) echo "::error title=Fleet canary::Replace FLEET_CANARY_TOOLCHAIN with the project's real check"; exit 1;; esac
+          nix develop --command bash -euo pipefail -c "$FLEET_CANARY_TOOLCHAIN"
+      - name: Headless browser starts with its sandbox enabled
+        run: |
+          case "$FLEET_CANARY_BROWSER" in YOUR_*) echo "::error title=Fleet canary::Replace FLEET_CANARY_BROWSER with the project's browser smoke test"; exit 1;; esac
+          nix develop --command bash -euo pipefail -c "$FLEET_CANARY_BROWSER"
+      - name: Fail when the job waited too long for a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_NAME: ${{ github.job }}
+        run: |
+          # The jobs of this run attempt; the job with this id was created when it was
+          # queued and started when a runner picked it up.
+          answer="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.name == env.JOB_NAME)][0] | [.created_at, .started_at] | @tsv')"
+          created="$(printf '%s' "$answer" | cut -f1)"
+          started="$(printf '%s' "$answer" | cut -f2)"
+          if [ -z "$created" ] || [ -z "$started" ]; then
+            echo "::error title=Fleet canary::Could not read this job's created and started times from the Actions API"
+            exit 1
+          fi
+          waited=$(( $(date -u -d "$started" +%s) - $(date -u -d "$created" +%s) ))
+          echo "Queued for ${waited}s (limit ${FLEET_CANARY_MAX_QUEUE_SECONDS}s)"
+          if [ "$waited" -gt "$FLEET_CANARY_MAX_QUEUE_SECONDS" ]; then
+            echo "::error title=Fleet canary::The job waited ${waited}s for a runner (limit ${FLEET_CANARY_MAX_QUEUE_SECONDS}s). Check Runners and Incidents in the Fleet dashboard."
+            exit 1
+          fi
+  watchdog:
+    # Hosted, private repositories only; catches a canary job that is never picked up.
+    if: github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fail when the canary job is still queued after the limit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$(( $(date +%s) + FLEET_CANARY_MAX_QUEUE_SECONDS ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "canary")][0].status')"
+            if [ "$status" != "queued" ] && [ "$status" != "waiting" ] && [ "$status" != "pending" ]; then
+              echo "The canary job is $status: a runner picked it up in time."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error title=Fleet canary::The canary job is still queued after ${FLEET_CANARY_MAX_QUEUE_SECONDS}s: no runner picked it up. Check Runners and Incidents in the Fleet dashboard."
+          exit 1

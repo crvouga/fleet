@@ -13,6 +13,7 @@ import { ErrorNotice, PageHeading } from '@pkgs/admin-ui/components';
 import { useCallback, useEffect, useState } from 'react';
 import type { ConsoleState } from './model';
 import { IntegrationForm } from './runners-config';
+import { HealthPanel } from './runners-health';
 import { readJson, type JobData, type RunnersData } from './runners-api';
 import { JobsPanel, PlacementPanel, RunnersPanel } from './runners-tables';
 
@@ -210,6 +211,7 @@ export function Runners(_props: { state: ConsoleState }) {
         <Stack gap="lg">
           <Notice data={data} />
           <Summary data={data} />
+          <HealthPanel health={data.health} />
           <JobsPanel
             jobs={jobs.jobs}
             filter={filter}

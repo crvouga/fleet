@@ -15,6 +15,9 @@
     cp ${../scripts/node_readiness.py} "$out/node_readiness.py"
     cp ${../scripts/telemetry.py} "$out/telemetry.py"
     cp ${../scripts/telemetry_hw.py} "$out/telemetry_hw.py"
+    # telemetry.py imports it: without this copy the agent cannot even start.
+    # jobScripts below keeps its own path so job-hook units are not rebuilt by agent edits.
+    cp ${../scripts/runner_job.py} "$out/runner_job.py"
     cp ${../scripts/recovery.py} "$out/recovery.py"
     cp ${../scripts/node_state.py} "$out/node_state.py"
   '';

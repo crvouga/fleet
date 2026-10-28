@@ -15,6 +15,12 @@ export interface GithubPolicy {
   /** How long a runner must stay an orphan before it may be removed. */
   readonly orphanGraceSeconds: number;
   readonly syncIntervalSeconds: number;
+  /** A queued fleet job waiting this long with no idle runner opens a `runner_queue` incident. */
+  readonly queueStallMinutes: number;
+  /** No online Fleet runner for this long while a CI node reports opens `runners_offline`. */
+  readonly noRunnersMinutes: number;
+  /** A node's runner registration issue persisting this long opens `runner_registration`. */
+  readonly registrationFailingMinutes: number;
 }
 
 export interface IntegrationInput {

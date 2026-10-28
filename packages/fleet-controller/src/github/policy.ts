@@ -1,4 +1,9 @@
 import { validateConfig } from '../config/schema';
+import {
+  DEFAULT_NO_RUNNERS_MINUTES,
+  DEFAULT_QUEUE_STALL_MINUTES,
+  DEFAULT_REGISTRATION_MINUTES,
+} from '../domain/runner-health';
 
 import type { GithubPolicy, GithubScope, IntegrationInput } from './types';
 
@@ -9,6 +14,9 @@ export const DEFAULT_POLICY: GithubPolicy = {
   orphanAutoRemoval: false,
   orphanGraceSeconds: 1800,
   syncIntervalSeconds: 60,
+  queueStallMinutes: DEFAULT_QUEUE_STALL_MINUTES,
+  noRunnersMinutes: DEFAULT_NO_RUNNERS_MINUTES,
+  registrationFailingMinutes: DEFAULT_REGISTRATION_MINUTES,
 };
 
 export type Parsed<T> =
@@ -95,8 +103,31 @@ function labelsOf(value: unknown, errors: string[]): string[] {
   return [...((checked.value.runners?.extraLabels as string[]) ?? [])];
 }
 
+const MINUTES: readonly [number, number] = [1, 1440];
+
+/** Thresholds of the runner health incidents (`domain/runner-health.ts`), in minutes. */
+function healthThresholds(source: Json, errors: string[]) {
+  const minutes = (name: string, fallback: number) =>
+    bounded(source[name], name, MINUTES, errors) ?? fallback;
+  return {
+    queueStallMinutes: minutes(
+      'queueStallMinutes',
+      DEFAULT_POLICY.queueStallMinutes
+    ),
+    noRunnersMinutes: minutes(
+      'noRunnersMinutes',
+      DEFAULT_POLICY.noRunnersMinutes
+    ),
+    registrationFailingMinutes: minutes(
+      'registrationFailingMinutes',
+      DEFAULT_POLICY.registrationFailingMinutes
+    ),
+  };
+}
+
 function numbers(source: Json, errors: string[]) {
   return {
+    ...healthThresholds(source, errors),
     maxNodesPerRepository:
       bounded(
         source['maxNodesPerRepository'],

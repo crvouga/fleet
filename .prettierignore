@@ -6,3 +6,4 @@ bun.lock
 .ci
 result*
 __pycache__
+packages/fleet-controller/test/github/contract/openapi.subset.json

@@ -17,9 +17,11 @@ import { formatDuration } from '../ui/lib/format';
 import { useJson } from './use-json';
 
 /** The /v1/incidents reply as JSON delivers it: times are ISO strings. */
-interface IncidentJson {
+export interface IncidentJson {
   id: string;
-  nodeId: string;
+  rule: string;
+  /** Null for a fleet-wide incident (job queue stalled, no runners online). */
+  nodeId: string | null;
   nodeLabel: string | null;
   title: string;
   subject: string | null;
@@ -52,9 +54,15 @@ function IncidentRow({
     <Table.Tr>
       {showNode ? (
         <Table.Td>
-          <Anchor size="sm" href={`/nodes/${incident.nodeId}`}>
-            {incident.nodeLabel ?? incident.nodeId.slice(0, 8)}
-          </Anchor>
+          {incident.nodeId === null ? (
+            <Anchor size="sm" href="/runners">
+              Runners
+            </Anchor>
+          ) : (
+            <Anchor size="sm" href={`/nodes/${incident.nodeId}`}>
+              {incident.nodeLabel ?? incident.nodeId.slice(0, 8)}
+            </Anchor>
+          )}
         </Table.Td>
       ) : null}
       <Table.Td>

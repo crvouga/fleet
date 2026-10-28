@@ -2,6 +2,11 @@ import { readFacts } from '../ui/lib/facts';
 import type { AppDeps } from '../deps';
 import type { NodeRow } from '../types';
 
+import {
+  loadHealthInput,
+  runnerHealthView,
+  type RunnerHealthView,
+} from './health';
 import { orphanReason, type OrphanReason } from './orphans';
 import { placementFor, RUNNER_ROLE } from './runner-defaults';
 import type { GithubRuntime } from './runtime';
@@ -72,6 +77,8 @@ export interface RunnersView {
     readonly repositories: readonly string[];
   }[];
   readonly unplaced: readonly string[];
+  /** Queue and runner health, derived from the same data as the incidents. */
+  readonly health: RunnerHealthView;
 }
 
 const failed = (job: CiJob): boolean =>
@@ -215,5 +222,9 @@ export async function runnersView(
       repositories: placement.plan.byNode.get(node.id) ?? [],
     })),
     unplaced: placement.plan.unplaced,
+    health: runnerHealthView(
+      await loadHealthInput(runtime, deps.store, integration, deps.now()),
+      integration
+    ),
   };
 }

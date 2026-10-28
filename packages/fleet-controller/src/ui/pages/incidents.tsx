@@ -23,12 +23,18 @@ function IncidentRowView(props: {
           {incident.title}
           {incident.subject === null ? '' : ` (${incident.subject})`}
         </span>
-        {props.showNode ? (
+        {props.showNode && incident.nodeId !== null ? (
           <>
             {' '}
             <a href={`/nodes/${incident.nodeId}`}>
               {incident.nodeLabel ?? incident.nodeId.slice(0, 8)}
             </a>
+          </>
+        ) : null}
+        {props.showNode && incident.nodeId === null ? (
+          <>
+            {' '}
+            <a href="/runners">Runners</a>
           </>
         ) : null}
         <div class="text-xs text-fg-2">{incident.message}</div>

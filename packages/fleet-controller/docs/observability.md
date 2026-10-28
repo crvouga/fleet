@@ -139,14 +139,16 @@ repeatedly (the stateless edge comparison has no memory between reports).
 stored): an opening event starts an incident for (node, rule, subject), the
 matching closing event ends it.
 
-| rule                                              | opens               | closes                                                   |
-| ------------------------------------------------- | ------------------- | -------------------------------------------------------- |
-| offline                                           | `offline`           | `recovered`                                              |
-| units                                             | `units_failed`      | `units_recovered` (when every failed unit has recovered) |
-| disk (per mount)                                  | `disk_high`         | `disk_ok`                                                |
-| rollback                                          | `rollback`          | `rollback_cleared`                                       |
-| reconcile                                         | `reconcile_blocked` | `role_converged`                                         |
-| disk_health, gpu_hot, throttling, memory_pressure | the events above    | their `_ok` partners                                     |
+| rule                                                | opens                                     | closes                                                   |
+| --------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------- |
+| offline                                             | `offline`                                 | `recovered`                                              |
+| units                                               | `units_failed`                            | `units_recovered` (when every failed unit has recovered) |
+| disk (per mount)                                    | `disk_high`                               | `disk_ok`                                                |
+| rollback                                            | `rollback`                                | `rollback_cleared`                                       |
+| reconcile                                           | `reconcile_blocked`                       | `role_converged`                                         |
+| disk_health, gpu_hot, throttling, memory_pressure   | the events above                          | their `_ok` partners                                     |
+| runner_queue, runners_offline (fleet-wide, no node) | `runner_queue_stalled`, `runners_offline` | `runner_queue_ok`, `runners_ok`                          |
+| runner_registration (per node)                      | `runner_registration_failing`             | `runner_registration_ok`                                 |
 
 A repeated opening event only escalates severity; a closing event with nothing
 open is ignored; duplicate event ids are collapsed, so deriving twice gives the

@@ -9,6 +9,7 @@ import { SqliteStore } from '../../../src/db/sqlite-store';
 import type { AppDeps, AppEnv } from '../../../src/deps';
 import { withGithub } from '../../../src/github/compose';
 import type { GithubRuntime } from '../../../src/github/runtime';
+import type { FetchLike } from '../../../src/github/transport';
 import { Clock, ADMIN_TOKEN, silent, testEnv } from '../../support/controller';
 import {
   nodeIdOf,
@@ -76,6 +77,8 @@ export interface HarnessOptions {
   /** Reuse these (a restarted controller talks to the same GitHub, at the same time). */
   readonly fake?: FakeGithub;
   readonly clock?: Clock;
+  /** What the controller's GitHub client sends requests through (the contract tests record it). */
+  readonly fetch?: FetchLike;
 }
 
 /** The real SQLite store, the real routes and a loopback fake GitHub. */
@@ -109,7 +112,7 @@ export async function createGithubHarness(
   };
   const deps = withGithub(base, db, {
     log: logger,
-    fetch,
+    fetch: options.fetch ?? fetch,
     tuning: {
       sleep: async (ms) => {
         sleeps.push(ms);

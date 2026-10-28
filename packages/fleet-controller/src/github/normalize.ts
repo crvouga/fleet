@@ -62,12 +62,13 @@ export function jobFromGithub(
   const created = date(job['created_at']);
   if (id === null || runId === null || created === null) return null;
   const runnerName = text(job['runner_name']);
+  const status = statusOf(job['status']);
   return {
     id,
     repository,
     runId,
     name: (text(job['name']) ?? 'job').slice(0, 200),
-    status: statusOf(job['status']),
+    status,
     conclusion: text(job['conclusion']),
     labels: labelNames(job['labels']).slice(0, 20),
     runnerId: integer(job['runner_id']),
@@ -75,7 +76,8 @@ export function jobFromGithub(
     nodeId: null,
     htmlUrl: httpsUrl(job['html_url']),
     createdAt: created,
-    startedAt: date(job['started_at']),
+    // GitHub always sends started_at; for a job that has not started it is the creation time.
+    startedAt: status === 'queued' ? null : date(job['started_at']),
     completedAt: date(job['completed_at']),
     updatedAt: now,
     source,

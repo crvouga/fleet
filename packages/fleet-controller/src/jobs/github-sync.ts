@@ -3,6 +3,7 @@ import { errorDetails } from '@pkgs/logger';
 import { runGithubSync } from '../github/sync';
 
 import type { JobDeps } from './offline-notifier';
+import { runRunnerHealthSafely } from './runner-health';
 
 /**
  * The scheduler's GitHub task: one level-triggered pass. It does nothing (and
@@ -23,6 +24,13 @@ export async function runGithubSyncJob(deps: JobDeps): Promise<void> {
         held: outcome.held,
         error: outcome.error,
       });
+    }
+    // Health incidents follow the mirrored data: only after a pass that read
+    // GitHub successfully, or to close them once the integration is gone.
+    if (outcome.ran && outcome.status === 'ok') {
+      await runRunnerHealthSafely(deps, deps.github, true);
+    } else if (outcome.skipped === 'unconfigured') {
+      await runRunnerHealthSafely(deps, deps.github, false);
     }
   } catch (error) {
     deps.log.error('github sync failed', { error: errorDetails(error) });

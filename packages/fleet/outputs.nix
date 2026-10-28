@@ -165,6 +165,8 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
       vm = import ./tests/vm.nix (testArgs // { settings = import ./fleet.nix; });
       lifecycle = import ./tests/lifecycle.nix testArgs;
       follow-up = import ./tests/follow-up.nix testArgs;
+      # The controller-brokered runner path: token via the fleet controller, resource control, gate.
+      runner-registration-vm = import ./tests/runner-registration.nix testArgs;
       update-units = import ./tests/update-units.nix {
         inherit pkgs lib;
         roles = lib.getAttrs roles.published (self.lib.mkFleet {

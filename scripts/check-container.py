@@ -7,6 +7,12 @@ import sys
 import time
 from urllib.request import Request, urlopen
 
+# The schema version this image must create or upgrade to (packages/fleet-controller/src/db/migrations.ts).
+EXPECTED_SCHEMA_VERSION = 3
+READ_SCHEMA_VERSION = ("const {Database}=require('bun:sqlite');"
+                       "const db=new Database(process.env.FLEET_DATABASE_PATH,{readonly:true});"
+                       "process.stdout.write(String(db.query('PRAGMA user_version').get().user_version))")
+
 import boto3
 
 
@@ -86,6 +92,19 @@ def main():
                 assert response.status == 200
                 return response.read().decode()
 
+        def audit_entries():
+            request = Request(base + "/v1/audit?limit=1", headers={"Authorization": "Bearer " + token})
+            with urlopen(request, timeout=5) as response:
+                assert response.status == 200
+                assert "no-store" in response.headers.get("Cache-Control", "")
+                return json.load(response)["entries"]
+
+        def assert_schema(name, when):
+            # Read-only, inside the container, from the database the controller itself opened.
+            version = int(docker("exec", name, "bun", "-e", READ_SCHEMA_VERSION))
+            assert version == EXPECTED_SCHEMA_VERSION, f"{when}: database schema is {version}, expected {EXPECTED_SCHEMA_VERSION}"
+            assert audit_entries() is not None, f"{when}: the schema-3 audit endpoint is not answering"
+
         def stop(name):
             docker("stop", "-t", "65", name)
             assert docker("inspect", "-f", "{{.State.ExitCode}}", name) == "0"
@@ -97,16 +116,19 @@ def main():
         assert "FLEET_ADMIN_TOKEN" in invalid.stdout + invalid.stderr
         name = start("fleet-container-test")
         ready(name)
+        assert_schema(name, "fresh database")
         settings("PUT", {"heartbeat": {"intervalSeconds": 91}})
         stop(name)
         docker("start", name)
         ready(name)
+        assert_schema(name, "after restart")
         assert "91" in settings(), "ordinary restart lost settings"
         stop(name)
         docker("rm", name)
         # Entire local filesystem is gone; same prefix restores the durable replica.
         name = start("fleet-container-test")
         ready(name)
+        assert_schema(name, "restored replica")
         assert "91" in settings(), "replacement failed to restore settings"
         stop(name)
         denied = start("fleet-container-denied")
@@ -116,7 +138,7 @@ def main():
                 raise AssertionError("write-denied container accepted traffic")
         except OSError:
             pass
-        print("PASS: configuration refusal, readiness, graceful stop, restart, fresh restore, denied writes")
+        print("PASS: configuration refusal, readiness, schema version, graceful stop, restart, fresh restore, denied writes")
     finally:
         for name in names:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)

@@ -1,5 +1,8 @@
+import type { Incident } from '../../domain/incidents';
 import type { JobRow, RunnerRow, RunnersView } from '../../github/views';
 import { formatDuration } from '../lib/format';
+
+import { IncidentsTable } from './incidents';
 
 /** Why there is nothing to show, in words an operator can act on. */
 export function connectionNotice(view: RunnersView): string | null {
@@ -61,6 +64,56 @@ function Status(props: { view: RunnersView }) {
           value={String(capacity.waiting)}
         />
       </dl>
+    </section>
+  );
+}
+
+/** Queue and runner health: what the incidents below are derived from. */
+function Health(props: {
+  view: RunnersView;
+  incidents: readonly Incident[];
+  now: Date;
+}) {
+  const { health } = props.view;
+  if (!health.available) return null;
+  return (
+    <section class="card mb-6 p-5" aria-label="Runner health">
+      <h2 class="text-base font-semibold">Runner health</h2>
+      <dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+        <Fact label="Runners online" value={String(health.runnersOnline)} />
+        <Fact
+          label="Queued fleet jobs"
+          value={String(health.queuedFleetJobs)}
+        />
+        <Fact
+          label="Oldest queued job"
+          value={formatDuration(health.oldestQueuedSeconds)}
+        />
+        <Fact
+          label="Queue"
+          value={health.queueStalled ? 'stalled' : 'moving'}
+        />
+      </dl>
+      {health.conditions.map((condition) => (
+        <p
+          key={`${condition.rule}:${condition.nodeId ?? ''}`}
+          class="mt-3 text-sm text-warn"
+          role="status"
+        >
+          {condition.nodeLabel === null ? '' : `${condition.nodeLabel}: `}
+          {condition.message}
+        </p>
+      ))}
+      {props.incidents.length === 0 ? null : (
+        <div class="mt-4">
+          <h3 class="text-sm font-semibold">Open incidents</h3>
+          <IncidentsTable
+            incidents={props.incidents}
+            now={props.now}
+            showNode
+          />
+        </div>
+      )}
     </section>
   );
 }
@@ -184,10 +237,18 @@ function Jobs(props: { jobs: readonly JobRow[] }) {
 export function RunnersBody(props: {
   view: RunnersView;
   jobs: readonly JobRow[];
+  /** Open runner incidents (queue stalled, no runners online, registration failing). */
+  incidents?: readonly Incident[];
+  now?: Date;
 }) {
   return (
     <div>
       <Status view={props.view} />
+      <Health
+        view={props.view}
+        incidents={props.incidents ?? []}
+        now={props.now ?? new Date()}
+      />
       <Runners runners={props.view.runners} />
       <Jobs jobs={props.jobs} />
     </div>

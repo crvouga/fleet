@@ -17,13 +17,18 @@ export type IncidentRuleId =
   | 'disk_health'
   | 'gpu_hot'
   | 'throttling'
-  | 'memory_pressure';
+  | 'memory_pressure'
+  | 'runner_queue'
+  | 'runners_offline'
+  | 'runner_registration';
 
 interface Rule {
   readonly id: IncidentRuleId;
   readonly title: string;
   readonly open: string;
   readonly close: string;
+  /** Events may carry no node: the incident is about the whole fleet (runners, queue). */
+  readonly fleet?: boolean;
 }
 
 export const INCIDENT_RULES: readonly Rule[] = [
@@ -71,6 +76,26 @@ export const INCIDENT_RULES: readonly Rule[] = [
     open: 'memory_pressure_high',
     close: 'memory_pressure_ok',
   },
+  {
+    id: 'runner_queue',
+    title: 'CI job queue stalled',
+    open: 'runner_queue_stalled',
+    close: 'runner_queue_ok',
+    fleet: true,
+  },
+  {
+    id: 'runners_offline',
+    title: 'No CI runners online',
+    open: 'runners_offline',
+    close: 'runners_ok',
+    fleet: true,
+  },
+  {
+    id: 'runner_registration',
+    title: 'Runner registration failing',
+    open: 'runner_registration_failing',
+    close: 'runner_registration_ok',
+  },
 ];
 
 /** Every event kind that can open or close an incident, for narrowing a store query. */
@@ -81,7 +106,8 @@ export const INCIDENT_EVENT_KINDS: readonly string[] = INCIDENT_RULES.flatMap(
 export interface Incident {
   /** Stable: node, rule, subject and the opening event. */
   readonly id: string;
-  readonly nodeId: string;
+  /** Null for a fleet-wide incident (queue stalled, no runners online). */
+  readonly nodeId: string | null;
   readonly nodeLabel: string | null;
   readonly rule: IncidentRuleId;
   readonly title: string;
@@ -106,7 +132,7 @@ const LEGACY_UNITS = '*';
 
 interface Live {
   readonly rule: Rule;
-  readonly nodeId: string;
+  readonly nodeId: string | null;
   readonly subject: string;
   readonly units: Set<string>;
   nodeLabel: string | null;
@@ -133,7 +159,7 @@ function subjectOf(rule: Rule, event: EventRow): string {
   return rule.id === 'disk' ? mountOf(event) : '';
 }
 
-function begin(rule: Rule, event: EventRow, nodeId: string): Live {
+function begin(rule: Rule, event: EventRow, nodeId: string | null): Live {
   const units = new Set<string>();
   if (rule.id === 'units')
     for (const unit of strings(event.data['units']) ?? [LEGACY_UNITS])
@@ -178,7 +204,7 @@ function finish(live: Live, close: EventRow | null, now: Date): Incident {
     Math.round(((end ?? now).getTime() - opener.at.getTime()) / 1000)
   );
   return {
-    id: `${live.nodeId}:${rule.id}:${live.subject}:${opener.id}`,
+    id: `${live.nodeId ?? 'fleet'}:${rule.id}:${live.subject}:${opener.id}`,
     nodeId: live.nodeId,
     nodeLabel: live.nodeLabel,
     rule: rule.id,
@@ -192,7 +218,7 @@ function finish(live: Live, close: EventRow | null, now: Date): Incident {
     openEventId: opener.id,
     closeEventId: close?.id ?? null,
     message: live.message,
-    reportHref: `/report-issue?kind=node&event=${opener.id}`,
+    reportHref: `/report-issue?kind=${live.nodeId === null ? 'workload' : 'node'}&event=${opener.id}`,
   };
 }
 
@@ -217,12 +243,10 @@ export function deriveIncidents(
   const live = new Map<string, Live>();
   const done: Incident[] = [];
   for (const event of ordered(events)) {
-    if (event.nodeId === null) continue;
     const opening = opens.get(event.kind);
-    const closing = closers.get(event.kind);
-    const rule = opening ?? closing;
-    if (rule === undefined) continue;
-    const key = `${event.nodeId}\u0000${rule.id}\u0000${subjectOf(rule, event)}`;
+    const rule = opening ?? closers.get(event.kind);
+    if (rule === undefined || !aboutAnIncident(rule, event)) continue;
+    const key = `${event.nodeId ?? ''}\u0000${rule.id}\u0000${subjectOf(rule, event)}`;
     const current = live.get(key);
     if (opening !== undefined) {
       if (current === undefined)
@@ -235,6 +259,11 @@ export function deriveIncidents(
   }
   const open = [...live.values()].map((item) => finish(item, null, now));
   return [...done, ...open].sort((a, b) => b.openEventId - a.openEventId);
+}
+
+/** A node event, or a fleet-wide one for the rules that have no node. */
+function aboutAnIncident(rule: Rule, event: EventRow): boolean {
+  return event.nodeId !== null || rule.fleet === true;
 }
 
 export interface IncidentFilter {

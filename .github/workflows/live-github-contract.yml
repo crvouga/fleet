@@ -1,0 +1,92 @@
+name: Live GitHub contract
+# Weekly proof that the controller's real GitHub client still works against the real
+# GitHub API with the exact permissions a runner needs: App JWT accepted, installation
+# token minted, target reachable, runners listed (paged), a registration token minted
+# and discarded, rate-limit headers present. It registers NO runner and runs NO job
+# (packages/fleet-controller/scripts/live-github-contract.ts; what it does and does not
+# prove is in packages/fleet-controller/docs/automated-checks.md).
+#
+# This is a PUBLIC repository: the job runs on a GitHub-hosted runner only, has no pull
+# request trigger (a fork can never reach the credentials), and never prints the key, a
+# token or the full target name. The target is a throwaway private repository or
+# organization that holds nothing.
+#
+# One-time setup (repository owner, Settings > Secrets and variables > Actions):
+#
+#  1. Create a DEDICATED test GitHub App (never the production App) with
+#       Repository permissions:    Administration: Read and write
+#       (for an organization target instead: Organization permissions:
+#        Self-hosted runners: Read and write)
+#     No webhook, no other permission, "Only on this account". Generate a private key.
+#  2. Create a throwaway PRIVATE test repository (or test organization) and install the
+#     App on it only. It needs no code and no runner.
+#  3. Add these Actions variables (not secrets):
+#       FLEET_LIVE_GITHUB_APP_ID           the App's numeric ID
+#       FLEET_LIVE_GITHUB_INSTALLATION_ID  the installation's numeric ID (from the
+#                                          installation URL .../installations/<id>)
+#       FLEET_LIVE_GITHUB_TARGET           owner/repo, or the organization name
+#       FLEET_LIVE_GITHUB_SCOPE            repository (default) or organization
+#     and this Actions secret:
+#       FLEET_LIVE_GITHUB_APP_PRIVATE_KEY  the whole .pem file
+#  4. Run it once: Actions > Live GitHub contract > Run workflow.
+#
+# Without the secret the job succeeds with a notice and checks nothing, so this
+# repository and every fork stay green. A broken contract fails the run with an
+# actionable message (exit 1; exit 2 means GitHub was temporarily unavailable or rate
+# limiting: rerun). GitHub disables scheduled workflows after 60 days without repository
+# activity; a manual run re-enables it.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: live-github-contract
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  contract:
+    name: Live GitHub contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Decide whether this repository is configured for the check
+        id: config
+        env:
+          HAS_KEY: ${{ secrets.FLEET_LIVE_GITHUB_APP_PRIVATE_KEY != '' }}
+          HAS_APP_ID: ${{ vars.FLEET_LIVE_GITHUB_APP_ID != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ] && [ "$HAS_APP_ID" != "true" ]; then
+            echo "::notice title=Live GitHub contract skipped::Set the secret FLEET_LIVE_GITHUB_APP_PRIVATE_KEY and the variables FLEET_LIVE_GITHUB_APP_ID, FLEET_LIVE_GITHUB_INSTALLATION_ID, FLEET_LIVE_GITHUB_TARGET (see the header of this workflow) to enable it. Nothing was checked."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            # Any one of them present means the operator meant to configure it: a
+            # missing remainder is reported by the script as a failure, not hidden.
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check out the check
+        if: steps.config.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            packages/fleet-controller/scripts
+            packages/fleet-controller/src/github
+      - name: Install Bun
+        if: steps.config.outputs.run == 'true'
+        # From the npm registry at the version CI uses; no third-party action.
+        run: npm install --global bun@1.4.4
+      - name: Run the live contract
+        if: steps.config.outputs.run == 'true'
+        env:
+          FLEET_LIVE_GITHUB_APP_ID: ${{ vars.FLEET_LIVE_GITHUB_APP_ID }}
+          FLEET_LIVE_GITHUB_INSTALLATION_ID: ${{ vars.FLEET_LIVE_GITHUB_INSTALLATION_ID }}
+          FLEET_LIVE_GITHUB_TARGET: ${{ vars.FLEET_LIVE_GITHUB_TARGET }}
+          FLEET_LIVE_GITHUB_SCOPE: ${{ vars.FLEET_LIVE_GITHUB_SCOPE }}
+          FLEET_LIVE_GITHUB_APP_PRIVATE_KEY: ${{ secrets.FLEET_LIVE_GITHUB_APP_PRIVATE_KEY }}
+        # The script prints a redacted summary, writes it to the job summary, and never
+        # emits the key or a token; no result file is uploaded as an artifact.
+        run: bun packages/fleet-controller/scripts/live-github-contract.ts

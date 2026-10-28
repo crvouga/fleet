@@ -10,31 +10,10 @@ import {
   WEBHOOK_SECRET,
   type GithubHarness,
 } from './testing/harness';
+import { ping, workflowJob, workflowRun } from './testing/webhook-payloads';
 
 const sign = (body: string, secret = WEBHOOK_SECRET) =>
   `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
-
-function workflowJob(over: Record<string, unknown> = {}, action = 'queued') {
-  return {
-    action,
-    repository: { full_name: 'acme/app' },
-    workflow_job: {
-      id: 501,
-      run_id: 90,
-      name: 'test',
-      status: action === 'completed' ? 'completed' : action,
-      conclusion: action === 'completed' ? 'success' : null,
-      labels: ['self-hosted', 'ci'],
-      runner_id: null,
-      runner_name: null,
-      html_url: 'https://github.com/acme/app/actions/runs/90/job/501',
-      created_at: '2026-10-14T11:58:00Z',
-      started_at: null,
-      completed_at: null,
-      ...over,
-    },
-  };
-}
 
 describe('POST /v1/github/webhook', () => {
   let h: GithubHarness;
@@ -175,15 +154,12 @@ describe('POST /v1/github/webhook', () => {
     other.repository.full_name = 'evil/other';
     expect((await send(other)).body.result).toBe('ignored');
     expect(await h.github.store.getJob(505)).toBeNull();
-    expect((await send({ zen: 'ok' }, 'ping')).body.result).toBe('pong');
+    expect((await send(ping(), 'ping')).body.result).toBe('pong');
     expect((await send({}, 'star')).body.result).toBe('ignored');
   });
 
   test('a workflow_run asks the poller to run now', async () => {
-    const reply = await send(
-      { action: 'completed', workflow_run: { id: 1 } },
-      'workflow_run'
-    );
+    const reply = await send(workflowRun(), 'workflow_run');
     expect(reply.body.result).toBe('sync-requested');
   });
 

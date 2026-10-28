@@ -5,7 +5,7 @@ import { createController } from '../../src/app';
 import type { AppDeps } from '../../src/deps';
 import { withIssues } from '../../src/issues/compose';
 import { MemoryIssueStore } from '../../src/issues/memory-store';
-import type { IssueTuning } from '../../src/issues/runtime';
+import type { IssueFetch, IssueTuning } from '../../src/issues/runtime';
 import { mountUi } from '../../src/routes/ui';
 import {
   createTestDeps,
@@ -50,6 +50,8 @@ export interface HarnessOptions {
   readonly api?: FakeIssuesApi;
   readonly seed?: boolean;
   readonly random?: () => number;
+  /** What the controller's GitHub issues client sends requests through (the contract tests record it). */
+  readonly fetch?: IssueFetch;
 }
 
 export async function issueHarness(
@@ -91,6 +93,7 @@ export async function issueHarness(
       log: silent,
       tuning: { ...FAST, ...options.tuning },
       random: options.random ?? (() => 0.5),
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     }
   ) as IssueHarness['deps'];
   const app = createController(deps, { log: silent });
