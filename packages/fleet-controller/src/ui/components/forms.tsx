@@ -36,7 +36,8 @@ export function ActionForm(props: {
 
 /**
  * A destructive action behind an explicit second step. A details element
- * needs no JavaScript: opening it reveals what will happen and the button.
+ * needs no JavaScript: opening it reveals what will happen, asks the person to
+ * type the node's name and shows the button. The server checks the name too.
  */
 export function Confirm(props: {
   summary: string;
@@ -44,7 +45,11 @@ export function Confirm(props: {
   action: string;
   button: string;
   id: string;
+  /** The text that must be typed, normally the node's label. */
+  expected: string;
+  hidden?: Readonly<Record<string, string>>;
 }) {
+  const field = `${props.id}-confirm`;
   return (
     <details
       id={props.id}
@@ -58,8 +63,25 @@ export function Confirm(props: {
         action={props.action}
         class="space-y-3 border-t border-bad/20 px-3 py-3"
       >
-        <input type="hidden" name="confirm" value="yes" />
+        {Object.entries(props.hidden ?? {}).map(([name, value]) => (
+          <input key={name} type="hidden" name={name} value={value} />
+        ))}
         <p class="text-sm text-fg-2">{props.warning}</p>
+        <div>
+          <label for={field} class="text-sm font-medium">
+            {`Type ${props.expected} to confirm`}
+          </label>
+          <input
+            id={field}
+            name="confirm"
+            type="text"
+            required
+            autocomplete="off"
+            spellcheck={false}
+            class="field mt-1"
+            placeholder={props.expected}
+          />
+        </div>
         <button type="submit" class="btn btn-danger">
           {props.button}
         </button>

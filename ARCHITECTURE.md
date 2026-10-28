@@ -301,6 +301,16 @@ role and its reported hardware. A `ci-gpu` node whose NVIDIA device is not
 detected would be assigned `ci` and reboot into it; check
 `hardware.capabilities` on the node pages before merging if you run GPU nodes.
 
+## Operations built on the same model
+
+These follow the principles above (controller records intent, nodes converge and report, nothing is pushed as a command). Each has a normative document under `packages/fleet-controller/docs/`:
+
+- **Operations and audit** ([operations.md](packages/fleet-controller/docs/operations.md)): drain, restart, replace and decommission are state machines whose intent is desired state (`maintenance.restartAfter`, cordon) and whose completion is proven by observed state. Every administrative action lands in the audit log; destructive ones require a typed confirmation checked on the server.
+- **Access and configuration safety** ([access-and-config-safety.md](packages/fleet-controller/docs/access-and-config-safety.md)): viewer/admin roles, node credential rotation and immediate revocation, optimistic concurrency, dry-run impact and acknowledgement for settings, and per-node desired-state history.
+- **GitHub runners** ([github-runners.md](packages/fleet-controller/docs/github-runners.md)): the GitHub App key lives only on the controller; nodes ask it for short-lived registration tokens. Jobs, runners, orphans and placement are visible in the controller.
+- **Issue reporting** ([issue-reporting.md](packages/fleet-controller/docs/issue-reporting.md)), **observability** ([observability.md](packages/fleet-controller/docs/observability.md)) and **installer binding and enrollment grants** ([installer-enrollment.md](packages/fleet-controller/docs/installer-enrollment.md)).
+- **Verification** ([verification.md](packages/fleet-controller/docs/verification.md)): requirement-to-test traceability and what is not verified.
+
 ## Boundaries
 
 - **Local mode** (no controller) has no approval, recipients endpoint or fleet

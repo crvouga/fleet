@@ -30,7 +30,7 @@ async function waitFor(
 }
 
 describeStore('prune job', (ctx) => {
-  test('keeps seven days, deletes older, and says how many', async () => {
+  test('keeps thirty days by default, deletes older, and says how many', async () => {
     const { store } = ctx();
     const clock = new Clock(T0);
     const deps: JobDeps = {
@@ -52,20 +52,50 @@ describeStore('prune job', (ctx) => {
         null,
         new Date(T0.getTime() + seconds * 1000)
       );
-    await beat(-8 * DAY);
-    await beat(-7 * DAY - 1);
-    await beat(-7 * DAY);
+    await beat(-31 * DAY);
+    await beat(-30 * DAY - 1);
+    await beat(-30 * DAY);
     await beat(-DAY);
     await beat(0);
-    expect(HEARTBEAT_RETENTION_MS).toBe(7 * DAY * 1000);
+    expect(HEARTBEAT_RETENTION_MS).toBe(30 * DAY * 1000);
     expect(await runPrune(deps)).toBe(2);
     const left = await store.listHeartbeats(
       nodeIdOf(1),
-      new Date(T0.getTime() - 30 * DAY * 1000)
+      new Date(T0.getTime() - 90 * DAY * 1000)
     );
     expect(left).toHaveLength(3);
-    expect(left[0]?.at.getTime()).toBe(T0.getTime() - 7 * DAY * 1000);
+    expect(left[0]?.at.getTime()).toBe(T0.getTime() - 30 * DAY * 1000);
     expect(await runPrune(deps)).toBe(0);
+  });
+
+  test('honours the configured retention and falls back to the default for an invalid one', async () => {
+    const { store } = ctx();
+    const clock = new Clock(T0);
+    await store.registerNode(
+      registerInput(1, {
+        approval: 'approved',
+        enrolledVia: 'enrollment-token',
+      })
+    );
+    for (const days of [3, 2, 1]) {
+      await store.recordHeartbeat(
+        nodeIdOf(1),
+        heartbeatBody(1),
+        null,
+        new Date(T0.getTime() - days * DAY * 1000)
+      );
+    }
+    const deps: JobDeps = {
+      store,
+      now: clock.now,
+      fetch: noFetch,
+      log: silent,
+      heartbeatRetentionDays: 2,
+    };
+    // Exactly two days old is kept; three days old is deleted.
+    expect(await runPrune(deps)).toBe(1);
+    expect(await runPrune({ ...deps, heartbeatRetentionDays: 0 })).toBe(0);
+    expect(await runPrune({ ...deps, heartbeatRetentionDays: 1 })).toBe(1);
   });
 
   test('leaves events and settings history alone', async () => {
@@ -139,7 +169,7 @@ describeStore('job scheduler', (ctx) => {
       nodeIdOf(1),
       heartbeatBody(1),
       null,
-      new Date(T0.getTime() - 9 * DAY * 1000)
+      new Date(T0.getTime() - 40 * DAY * 1000)
     );
     const jobs = startJobs(
       { store, now: clock.now, fetch: noFetch, log: silent },

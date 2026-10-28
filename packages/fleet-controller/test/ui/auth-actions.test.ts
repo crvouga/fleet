@@ -177,9 +177,16 @@ describe('node actions', () => {
 
   test('reject only works on pending nodes', async () => {
     const { app, deps } = populated();
-    expect((await post(app, `/nodes/${IDS.pending}/reject`)).status).toBe(303);
+    await post(app, `/nodes/${IDS.pending}/reject`);
+    expect((await deps.store.findNode(IDS.pending))?.approval).toBe('pending');
+    const typed = await post(app, `/nodes/${IDS.pending}/reject`, {
+      confirm: 'netboot-f001',
+    });
+    expect(typed.status).toBe(303);
     expect((await deps.store.findNode(IDS.pending))?.approval).toBe('rejected');
-    const res = await post(app, `/nodes/${IDS.online}/reject`);
+    const res = await post(app, `/nodes/${IDS.online}/reject`, {
+      confirm: 'Build 1',
+    });
     expect((await deps.store.findNode(IDS.online))?.approval).toBe('approved');
     expect(
       await html(app, res.headers.get('location') ?? '/', cookiesFrom(res))
@@ -196,21 +203,41 @@ describe('node actions', () => {
         noConfirm.headers.get('location') ?? '/',
         cookiesFrom(noConfirm)
       )
-    ).toContain('confirm before');
+    ).toContain('type its name (Build 1)');
     await post(app, `/nodes/${IDS.online}/delete`);
     expect(await deps.store.findNode(IDS.online)).not.toBeNull();
-    const retired = await post(app, `/nodes/${IDS.online}/retire`, {
+    const wrong = await post(app, `/nodes/${IDS.online}/retire`, {
       confirm: 'yes',
+    });
+    expect((await deps.store.findNode(IDS.online))?.approval).toBe('approved');
+    expect(wrong.headers.get('location')).toBe(`/nodes/${IDS.online}`);
+    const retired = await post(app, `/nodes/${IDS.online}/retire`, {
+      confirm: 'Build 1',
     });
     expect(retired.status).toBe(303);
     expect((await deps.store.findNode(IDS.online))?.approval).toBe('retired');
     const deleted = await post(app, `/nodes/${IDS.online}/delete`, {
-      confirm: 'yes',
+      confirm: 'Build 1',
     });
     expect(deleted.headers.get('location')).toBe('/nodes');
     expect(await deps.store.findNode(IDS.online)).toBeNull();
     expect(await html(app, '/nodes', cookiesFrom(deleted))).toContain(
       'Build 1 deleted.'
+    );
+    const trail = (await deps.store.listAudit({ limit: 50 })).filter(
+      (entry) => entry.targetId === IDS.online
+    );
+    expect(
+      trail.map((entry) => [entry.action, entry.outcome]).reverse()
+    ).toEqual([
+      ['node.retire', 'denied'],
+      ['node.delete', 'denied'],
+      ['node.retire', 'denied'],
+      ['node.retire', 'success'],
+      ['node.delete', 'success'],
+    ]);
+    expect(new Set(trail.map((entry) => entry.actor))).toEqual(
+      new Set(['tester'])
     );
   });
 

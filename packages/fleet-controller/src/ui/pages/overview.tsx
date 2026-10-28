@@ -1,3 +1,5 @@
+import type { IssueLink } from '../../issues/types';
+import { EventReport, ReportIssueLink } from '../components/report-issue';
 import { type EventRow, type Role } from '../../types';
 import { visibleRoles } from '../../domain/summary';
 import { AddNodeSteps } from '../components/add-node';
@@ -300,6 +302,9 @@ function AttentionRow(props: { item: AttentionItem; now: Date }) {
         </p>
         <p class="mt-0.5 text-sm text-fg-2">{props.item.message}</p>
       </div>
+      {props.item.level === 'info' ? null : (
+        <ReportIssueLink target={{ kind: 'node', nodeId: entry.view.id }} />
+      )}
       <p class="hidden text-xs text-fg-3 sm:block">
         seen <Time at={entry.view.lastSeenAt} now={props.now} />
       </p>
@@ -346,7 +351,12 @@ function AttentionPanel(props: { items: readonly AttentionItem[]; now: Date }) {
   );
 }
 
-export function EventList(props: { events: readonly EventRow[]; now: Date }) {
+export function EventList(props: {
+  events: readonly EventRow[];
+  now: Date;
+  /** Open issue reports by event id, to show where a failure was already reported. */
+  issues?: ReadonlyMap<number, IssueLink>;
+}) {
   return (
     <ul class="divide-y divide-line">
       {props.events.map((event) => (
@@ -367,6 +377,7 @@ export function EventList(props: { events: readonly EventRow[]; now: Date }) {
               · {event.kind} · <Time at={event.at} now={props.now} />
             </p>
           </div>
+          <EventReport event={event} link={props.issues?.get(event.id)} />
         </li>
       ))}
     </ul>

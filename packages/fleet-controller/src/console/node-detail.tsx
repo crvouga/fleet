@@ -29,9 +29,12 @@ import { NodeCharts } from './node-charts';
 import { NodeReadiness } from './node-readiness';
 import { NodeRecovery } from './node-recovery';
 import { NodeTelemetry } from './node-telemetry';
+import { NodeHistory } from './restart-panel';
 import { NodeEdit, NodeManage } from './node-edit';
+import { NodeOperations } from './node-operations';
 import { NodeDesiredState } from './node-desired';
 import { EventFeed } from './events';
+import { NodeReportStrip } from './report-issue-link';
 export function NodeDetail({
   state,
   id,
@@ -72,8 +75,15 @@ export function NodeDetail({
         }
       />
       <NodeNotices entry={entry} />
-      <NodeDesiredState entry={entry} reload={reload} />
+      <NodeDesiredState
+        entry={entry}
+        reload={reload}
+        history={state.desiredHistory ?? []}
+        credential={state.credential}
+        readOnly={state.role === 'viewer'}
+      />
       <NodeReadiness entry={entry} />
+      <NodeOperations entry={entry} state={state} reload={reload} />
       <NodeRecovery
         entry={entry}
         events={state.events}
@@ -209,13 +219,16 @@ function NodePanels({
   reload: () => void;
 }) {
   return (
-    <SimpleGrid cols={{ base: 1, lg: 2 }}>
-      <NodeFacts entry={entry} />
-      <Stack>
-        <NodeEdit entry={entry} reload={reload} />
-        <NodeManage entry={entry} reload={reload} />
-      </Stack>
-    </SimpleGrid>
+    <>
+      <NodeHistory nodeId={entry.view.id} />
+      <SimpleGrid cols={{ base: 1, lg: 2 }}>
+        <NodeFacts entry={entry} />
+        <Stack>
+          <NodeEdit entry={entry} reload={reload} />
+          <NodeManage entry={entry} reload={reload} />
+        </Stack>
+      </SimpleGrid>
+    </>
   );
 }
 
@@ -243,6 +256,7 @@ function NodeNotices({ entry }: { entry: FleetEntry }) {
           <Text size="sm">{entry.view.note}</Text>
         </Paper>
       )}
+      <NodeReportStrip entry={entry} />
     </>
   );
 }

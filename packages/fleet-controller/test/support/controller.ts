@@ -84,6 +84,35 @@ export function testEnv(overrides: Partial<AppEnv> = {}): AppEnv {
   };
 }
 
+/**
+ * The admin token as a careful script: a settings write names the revision it
+ * read (If-Match) and acknowledges exactly the warnings its dry run reported.
+ * Tests of the safety rules themselves call `call` with explicit headers.
+ */
+async function adminWritesSettings(
+  call: Harness['call'],
+  path: string,
+  json: unknown
+): Promise<Reply> {
+  const headers = { Authorization: `Bearer ${ADMIN_TOKEN}` };
+  const read = await call('GET', path, { headers });
+  const revision: unknown = read.body?.revision;
+  const match =
+    typeof revision === 'number' && revision > 0
+      ? { 'If-Match': String(revision) }
+      : {};
+  const dry = await call('PUT', `${path}?dryRun=1`, {
+    headers: { ...headers, ...match },
+    json,
+  });
+  const codes: unknown = dry.body?.acknowledgementRequired;
+  const acknowledge = Array.isArray(codes) ? codes.join(',') : '';
+  return call('PUT', path, {
+    headers: { ...headers, ...match, 'X-Fleet-Acknowledge': acknowledge },
+    json,
+  });
+}
+
 export function createHarness(
   store: Store,
   options: HarnessOptions = {}
@@ -130,10 +159,12 @@ export function createHarness(
     clock,
     call,
     admin: (method, path, json) =>
-      call(method, path, {
-        headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
-        ...(json !== undefined ? { json } : {}),
-      }),
+      method === 'PUT' && /^\/v1\/settings\/[^/?]+$/.test(path)
+        ? adminWritesSettings(call, path, json)
+        : call(method, path, {
+            headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+            ...(json !== undefined ? { json } : {}),
+          }),
     asNode: (n, method, path, json) =>
       call(method, path, {
         headers: { Authorization: `Bearer ${nodeIdOf(n)}.${secretOf(n)}` },

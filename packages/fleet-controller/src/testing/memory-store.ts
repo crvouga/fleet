@@ -1,5 +1,26 @@
 import type { FleetConfig, Scope } from '../config/schema';
+import {
+  acceptNext,
+  matchSecret,
+  promote,
+  registered,
+  requestRotation,
+  revoke,
+  statusOf,
+  type CredentialRecord,
+  type CredentialResult,
+  type CredentialStatus,
+} from '../domain/credential-rotation';
+import {
+  DESIRED_HISTORY_KEEP,
+  desiredChangeCause,
+  type DesiredHistoryRow,
+  type DesiredSnapshot,
+} from '../domain/desired-history';
+import { SettingsConflictError } from '../domain/settings-conflict';
 import { storedEvent, unseen } from '../domain/event-keys';
+import { MemoryOperations } from './memory-operations';
+import { MemoryGrants } from '../enrollment/memory-grants';
 import { boundedHistory, compactTelemetry } from '../domain/heartbeat-history';
 import { diskPercent, readFacts } from '../ui/lib/facts';
 import type {
@@ -27,15 +48,42 @@ interface Stored {
   row: NodeRow;
   secretHash: string;
   points: HeartbeatPoint[];
+  /** Credential lifecycle beyond the current hash (rotation, revocation). */
+  nextHash?: string | null;
+  rotateRequestedAt?: Date | null;
+  rotatedAt?: Date | null;
+  revokedAt?: Date | null;
+}
+
+function credentialOf(stored: Stored): CredentialRecord {
+  return {
+    currentHash: stored.secretHash,
+    nextHash: stored.nextHash ?? null,
+    rotateRequestedAt: stored.rotateRequestedAt ?? null,
+    rotatedAt: stored.rotatedAt ?? null,
+    revokedAt: stored.revokedAt ?? null,
+  };
+}
+
+function applyCredential(stored: Stored, record: CredentialRecord): void {
+  stored.secretHash = record.currentHash;
+  stored.nextHash = record.nextHash;
+  stored.rotateRequestedAt = record.rotateRequestedAt;
+  stored.rotatedAt = record.rotatedAt;
+  stored.revokedAt = record.revokedAt;
 }
 
 /** A faithful, simple in-memory Store for tests and the design demo. */
 export class MemoryStore implements Store {
+  readonly operations = new MemoryOperations();
+  readonly grants = new MemoryGrants();
   private readonly nodes = new Map<string, Stored>();
   private readonly events: EventRow[] = [];
   private readonly settings = new Map<string, SettingsRow>();
   private readonly history: SettingsHistoryRow[] = [];
   private readonly auditRows: AuditRow[] = [];
+  private readonly desired = new Map<string, DesiredHistoryRow[]>();
+  private nextDesiredId = 1;
   private nextAuditId = 1;
   private nextEventId = 1;
   private nextHistoryId = 1;
@@ -45,6 +93,32 @@ export class MemoryStore implements Store {
   async health(): Promise<void> {}
 
   async registerNode(
+    input: RegisterInput
+  ): Promise<{ node: NodeRow; created: boolean }> {
+    const wasRevoked = this.nodes.get(input.id)?.revokedAt instanceof Date;
+    // A revoked node never returns approved by itself; a person decides.
+    const result = await this.register(wasRevoked ? demoted(input) : input);
+    if (wasRevoked) await this.noteReregistered(result.node);
+    return result;
+  }
+
+  private async noteReregistered(node: NodeRow): Promise<void> {
+    this.record(
+      node,
+      'credential_reregistered',
+      'info',
+      'A node with a revoked credential registered again. It waits for a person to approve it.'
+    );
+    await this.audit({
+      actor: `node:${node.id.slice(0, 4)}`,
+      action: 'credential.reregistered',
+      targetKind: 'node',
+      targetId: node.id,
+      detail: { forcedApproval: 'pending' },
+    });
+  }
+
+  private async register(
     input: RegisterInput
   ): Promise<{ node: NodeRow; created: boolean }> {
     const existing = this.nodes.get(input.id);
@@ -70,7 +144,10 @@ export class MemoryStore implements Store {
       existing.row.approval === 'rejected' ? 'rejected' : input.approval;
     const approvedNow =
       approval === 'approved' && existing.row.approval !== 'approved';
-    existing.secretHash = input.secretHash;
+    applyCredential(
+      existing,
+      registered(credentialOf(existing), input.secretHash)
+    );
     const previousRole = existing.row.role;
     existing.row = {
       ...existing.row,
@@ -97,11 +174,108 @@ export class MemoryStore implements Store {
     secretHash: string
   ): Promise<NodeRow | null> {
     const stored = this.nodes.get(id);
-    if (stored === undefined || stored.secretHash !== secretHash) return null;
+    if (stored === undefined) return null;
+    const match = matchSecret(credentialOf(stored), secretHash, this.clock());
+    if (match === 'none') return null;
+    if (match === 'next') this.promoteNext(stored);
     const { approval } = stored.row;
     return approval === 'rejected' || approval === 'retired'
       ? null
       : stored.row;
+  }
+
+  private promoteNext(stored: Stored): void {
+    applyCredential(stored, promote(credentialOf(stored), this.clock()));
+    this.record(
+      stored.row,
+      'credential_rotated',
+      'info',
+      'Node credential rotated: the node now uses its new secret.'
+    );
+  }
+
+  async credentialStatus(id: string): Promise<CredentialStatus | null> {
+    const stored = this.nodes.get(id);
+    return stored === undefined
+      ? null
+      : statusOf(credentialOf(stored), this.clock());
+  }
+
+  async requestCredentialRotation(
+    id: string
+  ): Promise<CredentialResult<'revoked'>> {
+    const stored = this.nodes.get(id);
+    if (stored === undefined) return { ok: false, reason: 'unknown_node' };
+    const now = this.clock();
+    const outcome = requestRotation(credentialOf(stored), now);
+    if (!outcome.ok) return outcome;
+    applyCredential(stored, outcome.record);
+    return {
+      ok: true,
+      changed: outcome.changed,
+      status: statusOf(outcome.record, now),
+    };
+  }
+
+  async submitNextCredential(
+    id: string,
+    nextHash: string
+  ): Promise<CredentialResult<'revoked' | 'not_requested' | 'same_secret'>> {
+    const stored = this.nodes.get(id);
+    if (stored === undefined) return { ok: false, reason: 'unknown_node' };
+    const now = this.clock();
+    const outcome = acceptNext(credentialOf(stored), nextHash, now);
+    if (!outcome.ok) return outcome;
+    applyCredential(stored, outcome.record);
+    return {
+      ok: true,
+      changed: outcome.changed,
+      status: statusOf(outcome.record, now),
+    };
+  }
+
+  async revokeCredential(id: string): Promise<CredentialResult> {
+    const stored = this.nodes.get(id);
+    if (stored === undefined) return { ok: false, reason: 'unknown_node' };
+    const now = this.clock();
+    const record = credentialOf(stored);
+    if (record.revokedAt !== null)
+      return { ok: true, changed: false, status: statusOf(record, now) };
+    const revoked = revoke(
+      record,
+      now,
+      `memory-${this.nextAuditId}-${now.getTime()}`
+    );
+    applyCredential(stored, revoked);
+    return { ok: true, changed: true, status: statusOf(revoked, now) };
+  }
+
+  async recordDesired(
+    nodeId: string,
+    desired: DesiredSnapshot,
+    cause?: string
+  ): Promise<boolean> {
+    if (!this.nodes.has(nodeId)) return false;
+    const rows = this.desired.get(nodeId) ?? [];
+    const last = rows.at(-1);
+    if (last?.revision === desired.revision) return false;
+    rows.push({
+      id: this.nextDesiredId++,
+      nodeId,
+      revision: desired.revision,
+      desired,
+      at: this.clock(),
+      cause: cause ?? desiredChangeCause(last?.desired ?? null, desired),
+    });
+    this.desired.set(nodeId, rows.slice(-DESIRED_HISTORY_KEEP));
+    return true;
+  }
+
+  async desiredHistory(
+    nodeId: string,
+    limit: number
+  ): Promise<readonly DesiredHistoryRow[]> {
+    return [...(this.desired.get(nodeId) ?? [])].reverse().slice(0, limit);
   }
 
   async listNodes(): Promise<readonly NodeRow[]> {
@@ -243,6 +417,7 @@ export class MemoryStore implements Store {
       `${actor} deleted ${stored.row.hostname}`
     );
     this.nodes.delete(id);
+    this.desired.delete(id);
     // Events keep the node's label but no longer point at a node.
     for (let index = 0; index < this.events.length; index += 1) {
       const event = this.events[index];
@@ -304,6 +479,9 @@ export class MemoryStore implements Store {
       .filter(
         (event) => query.beforeId === undefined || event.id < query.beforeId
       )
+      .filter(
+        (event) => query.kinds === undefined || query.kinds.includes(event.kind)
+      )
       .sort((a, b) => b.id - a.id)
       .slice(0, query.limit);
   }
@@ -319,15 +497,20 @@ export class MemoryStore implements Store {
   async putSettings(
     scope: Scope,
     value: FleetConfig,
-    actor: string
+    actor: string,
+    expectedRevision?: number
   ): Promise<SettingsRow> {
     const now = this.clock();
+    const previous = this.settings.get(scope)?.revision ?? 0;
+    if (expectedRevision !== undefined && expectedRevision !== previous)
+      throw new SettingsConflictError(previous, expectedRevision);
     const doc = { ...value } as Readonly<Record<string, unknown>>;
     const row: SettingsRow = {
       scope,
       value: doc,
       updatedAt: now,
       updatedBy: actor,
+      revision: previous + 1,
     };
     this.settings.set(scope, row);
     this.history.push({
@@ -365,6 +548,14 @@ export class MemoryStore implements Store {
           (now.getTime() - row.lastSeenAt.getTime()) / 1000 >
             offlineAfterSeconds
       );
+  }
+
+  async claimOfflineNotice(id: string, at: Date): Promise<boolean> {
+    const stored = this.nodes.get(id);
+    if (stored === undefined || stored.row.offlineNotifiedAt !== null)
+      return false;
+    stored.row = { ...stored.row, offlineNotifiedAt: at };
+    return true;
   }
 
   async setOfflineNotified(id: string, at: Date | null): Promise<void> {
@@ -451,6 +642,16 @@ export class MemoryStore implements Store {
     });
     this.nextEventId += 1;
   }
+}
+
+/** What a revoked node's registration is treated as: pending, no token role. */
+function demoted(input: RegisterInput): RegisterInput {
+  return {
+    ...input,
+    approval: 'pending',
+    tokenRole: null,
+    enrolledVia: 'hello',
+  };
 }
 
 function blankRow(input: RegisterInput, now: Date): NodeRow {

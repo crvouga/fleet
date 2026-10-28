@@ -19,7 +19,12 @@ import {
 import { availability, bucketize } from '../lib/series';
 import { cx, tw } from '../lib/tw';
 import { DesiredStatePanel } from './node-desired';
+import type { CredentialStatus } from '../../domain/credential-rotation';
+import type { AnnotatedDesiredRow } from '../../domain/desired-history';
 import { TelemetrySnapshot } from './node-telemetry';
+import type { Incident } from '../../domain/incidents';
+import type { RestartHistory } from '../../domain/restart-history';
+import { NodeIncidentsPanel, RestartHistoryPanel } from './incidents';
 import {
   EditPanel,
   EffectiveConfig,
@@ -298,6 +303,13 @@ export interface NodeDetailProps {
   readonly data: FleetData;
   readonly points: readonly HeartbeatPoint[];
   readonly events: readonly EventRow[];
+  /** Desired-document history (newest first) and the credential state; viewers cannot act on them. */
+  readonly desiredHistory?: readonly AnnotatedDesiredRow[];
+  readonly credential?: CredentialStatus | null;
+  readonly readOnly?: boolean;
+  /** Derived from events: this node's restarts and incidents. */
+  readonly restarts?: RestartHistory | null;
+  readonly incidents?: readonly Incident[];
 }
 
 export function NodeHeaderMeta(props: { entry: FleetEntry }) {
@@ -328,11 +340,23 @@ export function NodeDetailBody(props: NodeDetailProps) {
         <div class="space-y-6 lg:col-span-2">
           <Charts entry={entry} points={points} now={data.now} />
           <TelemetrySnapshot entry={entry} now={data.now} />
+          {props.restarts ? (
+            <RestartHistoryPanel history={props.restarts} now={data.now} />
+          ) : null}
+          {props.incidents ? (
+            <NodeIncidentsPanel incidents={props.incidents} now={data.now} />
+          ) : null}
           <EffectiveConfig view={entry.view} documents={data.documents} />
           <NodeTimeline events={events} now={data.now} />
         </div>
         <div class="space-y-6">
-          <DesiredStatePanel view={entry.view} />
+          <DesiredStatePanel
+            view={entry.view}
+            history={props.desiredHistory ?? []}
+            credential={props.credential ?? null}
+            readOnly={props.readOnly ?? false}
+            now={data.now}
+          />
           <FactsPanel entry={entry} data={data} />
           <EditPanel view={entry.view} />
           <ManagePanel view={entry.view} />

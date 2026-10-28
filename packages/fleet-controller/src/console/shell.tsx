@@ -2,8 +2,12 @@
 import { Badge, Button, Divider, Stack, Text } from '@mantine/core';
 import {
   IconActivity,
+  IconAlertTriangle,
+  IconBrandGithub,
   IconAdjustments,
   IconDashboard,
+  IconHistory,
+  IconListCheck,
   IconLogout,
   IconPlus,
   IconServer,
@@ -18,6 +22,10 @@ const items = [
   { href: '/nodes', label: 'Nodes', icon: IconServer },
   { href: '/pending', label: 'Pending approvals', icon: IconShieldCheck },
   { href: '/events', label: 'Events', icon: IconActivity },
+  { href: '/incidents', label: 'Incidents', icon: IconAlertTriangle },
+  { href: '/runners', label: 'Runners', icon: IconBrandGithub },
+  { href: '/operations', label: 'Operations', icon: IconListCheck },
+  { href: '/audit', label: 'Audit log', icon: IconHistory },
   { href: '/settings', label: 'Settings', icon: IconAdjustments },
   { href: '/access', label: 'Access', icon: IconUsers },
   { href: '/add', label: 'Add a node', icon: IconPlus },
@@ -31,13 +39,15 @@ export function FleetShell({
   path: string;
   children: ReactNode;
 }) {
-  const navigation = items.map((item) => ({
-    href: item.href,
-    label: item.label,
-    icon: <item.icon size={19} />,
-    active: item.href === '/' ? path === '/' : path.startsWith(item.href),
-    ...(item.href === '/pending' ? { count: data.fleet.pendingCount } : {}),
-  }));
+  const navigation = items
+    .filter((item) => item.href !== '/audit' || data.role !== 'viewer')
+    .map((item) => ({
+      href: item.href,
+      label: item.label,
+      icon: <item.icon size={19} />,
+      active: item.href === '/' ? path === '/' : path.startsWith(item.href),
+      ...(item.href === '/pending' ? { count: data.fleet.pendingCount } : {}),
+    }));
   const fixture = document
     .querySelector('meta[name="fleet-data-source"]')
     ?.getAttribute('content');

@@ -107,6 +107,27 @@ export function hardware(p: Problems, raw: Record<string, unknown>) {
   return samples;
 }
 
+const NETWORK_COUNTS = [
+  'receiveErrors',
+  'transmitErrors',
+  'receiveDropped',
+  'transmitDropped',
+] as const;
+
+/** Error/drop deltas appear only when the agent reports them; null means unknown. */
+function networkCounts(
+  p: Problems,
+  path: string,
+  item: Record<string, unknown>
+): Record<string, number | null> {
+  return Object.fromEntries(
+    NETWORK_COUNTS.filter((key) => item[key] !== undefined).map((key) => [
+      key,
+      measurement(p, `${path}.${key}`, item[key]),
+    ])
+  );
+}
+
 export function network(p: Problems, raw: unknown): Telemetry['network'] {
   const result = entries(
     p,
@@ -130,6 +151,7 @@ export function network(p: Problems, raw: unknown): Telemetry['network'] {
         `${path}.transmitBytesPerSecond`,
         item['transmitBytesPerSecond']
       ),
+      ...networkCounts(p, path, item),
     })
   );
   unique(

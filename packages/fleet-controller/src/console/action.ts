@@ -5,10 +5,12 @@ export function useAction(reload: () => void) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [problem, setProblem] = useState<ActionProblem | null>(null);
   async function run(path: string, values: Record<string, string>) {
     setBusy(true);
     setError('');
     setSuccess('');
+    setProblem(null);
     try {
       const response = await fetch(path, {
         method: 'POST',
@@ -34,15 +36,30 @@ export function useAction(reload: () => void) {
       return true;
     } catch (cause) {
       setError(messageOf(cause));
+      setProblem(cause instanceof ActionFailure ? cause.problem : null);
       return false;
     } finally {
       setBusy(false);
     }
   }
-  return { run, busy, error, success };
+  return { run, busy, error, success, problem };
 }
 
-interface ActionResponse {
+/** Machine-readable detail of a refused action: a code to branch on and what the server listed. */
+export interface ActionProblem {
+  code?: string;
+  issues?: { code: string; message: string; blocking: boolean }[];
+}
+class ActionFailure extends Error {
+  constructor(
+    message: string,
+    readonly problem: ActionProblem
+  ) {
+    super(message);
+  }
+}
+
+interface ActionResponse extends ActionProblem {
   error?: string;
   errors?: string[];
   redirect?: string;
@@ -56,8 +73,12 @@ async function readActionResponse(response: Response): Promise<ActionResponse> {
     ? await response.json()
     : { error: await response.text() };
   if (!response.ok)
-    throw new Error(
-      [result.error, ...(result.errors ?? [])].filter(Boolean).join(' ')
+    throw new ActionFailure(
+      [result.error, ...(result.errors ?? [])].filter(Boolean).join(' '),
+      {
+        ...(result.code ? { code: result.code } : {}),
+        ...(result.issues ? { issues: result.issues } : {}),
+      }
     );
   if (result.flash?.kind === 'error') throw new Error(result.flash.text);
   return result;

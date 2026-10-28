@@ -130,7 +130,12 @@ export function mergeConfig(...layers: readonly FleetConfig[]): FleetConfig {
   return out as FleetConfig;
 }
 
-export type Scope = 'fleet' | `role:${Role}` | `node:${string}`;
+export type Scope =
+  | 'fleet'
+  | `role:${Role}`
+  | `node:${string}`
+  /** Derived, never stored: the GitHub integration's defaults for a runner node. */
+  | `placement:${string}`;
 
 const NODE_SCOPE = /^node:[0-9a-f]{64}$/;
 
@@ -141,6 +146,8 @@ export function isScope(value: string): value is Scope {
 }
 
 export interface ScopeDocuments {
+  /** Lowest priority: defaults derived from the GitHub integration. */
+  readonly defaults?: FleetConfig;
   readonly fleet: FleetConfig;
   readonly role: FleetConfig;
   readonly node: FleetConfig;
@@ -148,7 +155,12 @@ export interface ScopeDocuments {
 
 /** Fleet, then the node's role, then the node itself. The later one wins. */
 export function resolveConfig(documents: ScopeDocuments): FleetConfig {
-  return mergeConfig(documents.fleet, documents.role, documents.node);
+  return mergeConfig(
+    documents.defaults ?? {},
+    documents.fleet,
+    documents.role,
+    documents.node
+  );
 }
 
 /** What a node is sent: everything except the controller-only section. */

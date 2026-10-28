@@ -186,12 +186,13 @@ describe('node detail', () => {
   test('retire and delete are behind a confirmation step', async () => {
     const { app } = populated();
     const page = await html(app, `/nodes/${IDS.online}`);
-    expect(page).toMatch(
-      /<details id="retire"[\s\S]*?name="confirm" value="yes"/
-    );
-    expect(page).toMatch(
-      /<details id="delete"[\s\S]*?name="confirm" value="yes"/
-    );
+    for (const id of ['retire', 'delete'])
+      expect(page).toMatch(
+        new RegExp(
+          `<details id="${id}"[\\s\\S]*?<label for="${id}-confirm"[^>]*>Type Build 1 to confirm[\\s\\S]*?name="confirm"`
+        )
+      );
+    expect(page).not.toContain('name="confirm" value="yes"');
   });
 
   test('unknown or malformed ids are 404 pages', async () => {

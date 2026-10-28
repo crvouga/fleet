@@ -39,7 +39,7 @@ export function installNavigation() {
     const url = new URL(link.href);
     if (
       url.origin !== location.origin ||
-      !/^\/(?:nodes(?:\/[a-f0-9]{64})?|settings(?:\/[^/]+)?|pending|events|add|access)?$/.test(
+      !/^\/(?:nodes(?:\/[a-f0-9]{64})?|settings(?:\/[^/]+)?|pending|events|incidents|operations|audit|runners|report-issue|add|access)?$/.test(
         url.pathname
       )
     )

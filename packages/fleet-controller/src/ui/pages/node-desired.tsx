@@ -2,6 +2,10 @@ import type { Child } from 'hono/jsx';
 
 import { ACTIVE_ROLES, type NodeView, type Role } from '../../types';
 import { CopyableCode } from '../components/copy';
+import { ActionForm, Confirm } from '../components/forms';
+import { Time } from '../components/time';
+import type { CredentialStatus } from '../../domain/credential-rotation';
+import type { AnnotatedDesiredRow } from '../../domain/desired-history';
 import { ChipList, ConvergenceBadge } from '../components/status';
 
 /** Active roles, plus a retired role the node still carries so it stays visible. */
@@ -150,8 +154,126 @@ function Issues(props: { issues: readonly string[] }) {
   );
 }
 
+function CredentialSummary(props: { credential: CredentialStatus }) {
+  const { credential } = props;
+  if (credential.revokedAt !== null)
+    return (
+      <p role="status" class="text-sm text-bad">
+        Credential revoked. The node is locked out; if it registers again it
+        waits for a person to approve it.
+      </p>
+    );
+  if (credential.rotationPending)
+    return (
+      <p role="status" class="text-sm text-fg-2">
+        Rotation in progress: the node offered a new secret. Both work until it
+        reports with the new one.
+      </p>
+    );
+  if (credential.rotateRequestedAt !== null)
+    return (
+      <p role="status" class="text-sm text-fg-2">
+        Rotation requested: the node rotates on its next heartbeat.
+      </p>
+    );
+  return (
+    <p class="text-sm text-fg-2">
+      {credential.rotatedAt === null
+        ? 'The credential has not been rotated.'
+        : 'The credential was rotated.'}
+    </p>
+  );
+}
+
+/** Rotate or revoke the node's secret (plain POST forms; admins only, enforced by the server). */
+function CredentialPanel(props: {
+  view: NodeView;
+  credential: CredentialStatus;
+  readOnly: boolean;
+}) {
+  const { view, credential, readOnly } = props;
+  const locked = readOnly || credential.revokedAt !== null;
+  return (
+    <div class="space-y-2">
+      <h3 class="eyebrow">Node credential</h3>
+      <CredentialSummary credential={credential} />
+      {locked ? null : (
+        <div class="space-y-2">
+          <ActionForm
+            action={`/nodes/${view.id}/credential/rotate`}
+            label="Rotate credential"
+            small
+          />
+          <Confirm
+            id="revoke-credential"
+            summary="Revoke credential"
+            button="Revoke credential"
+            action={`/nodes/${view.id}/credential/revoke`}
+            expected={view.label}
+            warning="The node is locked out immediately. Use this for a lost or compromised machine. If it registers again it waits for approval; reject it to keep it out."
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function causeText(cause: string | null): string {
+  if (cause === null) return 'changed';
+  if (cause === 'initial') return 'first document recorded';
+  if (cause.startsWith('settings:'))
+    return `settings saved (${cause.slice('settings:'.length)})`;
+  return cause.replaceAll(',', ', ');
+}
+
+/** Every distinct desired document this node was told, newest first; a return to an earlier one is a rollback. */
+function DesiredHistoryPanel(props: {
+  rows: readonly AnnotatedDesiredRow[];
+  now: Date;
+}) {
+  return (
+    <div>
+      <h3 class="eyebrow">Desired-state history</h3>
+      {props.rows.length === 0 ? (
+        <p class="mt-1 text-sm text-fg-2">
+          Nothing recorded yet. A row is added when the node is told a different
+          desired document.
+        </p>
+      ) : (
+        <ol class="mt-1 space-y-1 text-sm">
+          {props.rows.map((row, index) => (
+            <li key={row.id} class="flex flex-wrap items-center gap-2">
+              <code class="font-mono text-xs">{row.revision}</code>
+              {index === 0 ? (
+                <span class="rounded bg-ok-soft px-1.5 py-0.5 text-xs font-medium text-ok">
+                  current
+                </span>
+              ) : null}
+              {row.revertsTo === null ? null : (
+                <span class="rounded bg-warn-soft px-1.5 py-0.5 text-xs font-medium">
+                  rollback to #{row.revertsTo}
+                </span>
+              )}
+              <span class="text-fg-2">{causeText(row.cause)}</span>
+              <span class="text-xs text-fg-3">
+                <Time at={row.at} now={props.now} />
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 /** What Fleet wants this node to run against what it reports it runs. */
-export function DesiredStatePanel(props: { view: NodeView }) {
+export function DesiredStatePanel(props: {
+  view: NodeView;
+  history?: readonly AnnotatedDesiredRow[];
+  credential?: CredentialStatus | null;
+  readOnly?: boolean;
+  now?: Date;
+}) {
   const { view } = props;
   return (
     <section class="card card-pad space-y-4" aria-labelledby="desired-title">
@@ -161,6 +283,17 @@ export function DesiredStatePanel(props: { view: NodeView }) {
       <RoleForm view={view} />
       <StateFacts view={view} />
       <AgeRotation view={view} />
+      {props.credential ? (
+        <CredentialPanel
+          view={view}
+          credential={props.credential}
+          readOnly={props.readOnly ?? false}
+        />
+      ) : null}
+      <DesiredHistoryPanel
+        rows={props.history ?? []}
+        now={props.now ?? new Date()}
+      />
       <Issues issues={view.reconcileIssues} />
     </section>
   );

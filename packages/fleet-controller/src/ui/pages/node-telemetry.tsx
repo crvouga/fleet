@@ -1,46 +1,7 @@
 import type { Telemetry } from '../../telemetry';
-import type { Child } from 'hono/jsx';
 import type { FleetEntry } from '../lib/fleet-data';
 import { bytes, runLink, telemetryFresh } from '../lib/telemetry';
-function SampleTable(props: {
-  title: string;
-  headings: string[];
-  rows: Child[][];
-}) {
-  return (
-    <section>
-      <h3 class="mt-4 font-semibold">{props.title}</h3>
-      {props.rows.length ? (
-        <div class="overflow-x-auto">
-          <table class="w-full text-left text-sm">
-            <thead>
-              <tr>
-                {props.headings.map((name) => (
-                  <th key={name} class="p-2">
-                    {name}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {props.rows.map((row, index) => (
-                <tr key={index}>
-                  {row.map((value, cell) => (
-                    <td key={cell} class="p-2">
-                      {value ?? 'Unavailable'}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p class="text-sm text-fg-3">No measurements reported.</p>
-      )}
-    </section>
-  );
-}
+import { HealthSnapshot, SampleTable } from './telemetry-health';
 export function TelemetrySnapshot(props: { entry: FleetEntry; now: Date }) {
   const sample = props.entry.facts.telemetry;
   if (!sample)
@@ -69,6 +30,10 @@ export function TelemetrySnapshot(props: { entry: FleetEntry; now: Date }) {
         <p key={index}>{issue}</p>
       ))}
       <HardwareSnapshot sample={sample} />
+      <HealthSnapshot
+        sample={sample}
+        stale={!telemetryFresh(props.entry, props.now)}
+      />
       <SampleTable
         title="Runner activity"
         headings={['Slot', 'State', 'Job', 'GitHub run', 'Hook result']}

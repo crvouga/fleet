@@ -235,6 +235,16 @@ async function main() {
         review.includes('Test internal SSD'),
         'review names the internal disk'
       );
+      assert.equal(
+        await page.locator('#hardware-tier').getAttribute('data-tier'),
+        'supported',
+        'the review states the hardware tier before anything is erased'
+      );
+      assert.equal(
+        await page.locator('#ack-limits').count(),
+        0,
+        'a supported computer needs no limitation acknowledgement'
+      );
       assert.ok(
         review.includes('What happens next') &&
           review.includes('FLEET INSTALLER') &&

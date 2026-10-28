@@ -4,6 +4,8 @@ import {
   effectiveConfig,
   offlineAfterSeconds,
 } from '../domain/effective-config';
+import type { GithubRuntime } from '../github/runtime';
+import type { IssuesRuntime } from '../issues/runtime';
 import type { Store } from '../store';
 import type { NodeRow } from '../types';
 
@@ -17,6 +19,12 @@ export interface JobDeps {
     init?: RequestInit
   ) => Promise<Response>;
   readonly log: Logger;
+  /** The GitHub integration, when the controller runs it (jobs/github-sync.ts). */
+  readonly github?: GithubRuntime | undefined;
+  /** One-click issue reporting, when the controller runs it (jobs/issue-sync.ts). */
+  readonly issues?: IssuesRuntime | undefined;
+  /** Heartbeat history retention in days (jobs/retention.ts); 30 when absent. */
+  readonly heartbeatRetentionDays?: number | undefined;
 }
 
 /** The smallest `alerts.offlineAfterSeconds` the schema allows. */
@@ -32,10 +40,11 @@ async function announce(
   node: NodeRow,
   webhookUrl: string | null | undefined,
   now: Date
-): Promise<void> {
+): Promise<boolean> {
   const label = node.displayName ?? node.hostname;
   const silent = Math.round(silentSeconds(node, now));
-  await deps.store.setOfflineNotified(node.id, now);
+  // The claim is atomic: when sweeps overlap, only one of them announces.
+  if (!(await deps.store.claimOfflineNotice(node.id, now))) return false;
   await deps.store.addEvent({
     nodeId: node.id,
     nodeLabel: label,
@@ -47,7 +56,7 @@ async function announce(
       lastSeenAt: node.lastSeenAt?.toISOString() ?? null,
     },
   });
-  if (webhookUrl === undefined || webhookUrl === null) return;
+  if (webhookUrl === undefined || webhookUrl === null) return true;
   await postWebhook(deps, webhookUrl, {
     text: `${label} (${node.role ?? 'unassigned'}) is offline: no report for ${silent} seconds`,
     kind: 'offline',
@@ -55,6 +64,7 @@ async function announce(
     lastSeenAt: node.lastSeenAt?.toISOString() ?? null,
     at: now.toISOString(),
   });
+  return true;
 }
 
 /**
@@ -74,8 +84,8 @@ export async function runOfflineSweep(deps: JobDeps): Promise<number> {
     const config = effectiveConfig(settings, node);
     if (silentSeconds(node, now) <= offlineAfterSeconds(config)) continue;
     try {
-      await announce(deps, node, config.alerts?.webhookUrl, now);
-      announced += 1;
+      if (await announce(deps, node, config.alerts?.webhookUrl, now))
+        announced += 1;
     } catch (err: unknown) {
       deps.log.error('offline notice failed', {
         node: node.id,

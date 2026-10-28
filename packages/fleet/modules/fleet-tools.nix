@@ -7,12 +7,14 @@
   scripts = pkgs.runCommand "fleet-node-scripts" { } ''
     mkdir -p "$out"
     cp ${../scripts/cattle.py} "$out/cattle.py"
+    cp ${../scripts/credential_rotation.py} "$out/credential_rotation.py"
     cp ${../scripts/fleet_roles.py} "$out/fleet_roles.py"
     cp ${../scripts/fleetconf.py} "$out/fleetconf.py"
     cp ${../scripts/agent.py} "$out/agent.py"
     cp ${../scripts/fleet_target.py} "$out/fleet_target.py"
     cp ${../scripts/node_readiness.py} "$out/node_readiness.py"
     cp ${../scripts/telemetry.py} "$out/telemetry.py"
+    cp ${../scripts/telemetry_hw.py} "$out/telemetry_hw.py"
     cp ${../scripts/recovery.py} "$out/recovery.py"
     cp ${../scripts/node_state.py} "$out/node_state.py"
   '';
@@ -40,7 +42,7 @@ in {
   # fleet-agent run|once|status|retire. A shell started by hand gets the same
   # Controller address as the unit.
   agent = pkgs.writeShellScriptBin "fleet-agent" ''
-    export PATH=${lib.makeBinPath [ pkgs.iproute2 pkgs.systemd pkgs.coreutils pkgs.age ]}:$PATH
+    export PATH=${lib.makeBinPath [ pkgs.iproute2 pkgs.systemd pkgs.coreutils pkgs.age pkgs.smartmontools ]}:$PATH
     export FLEET_API_URL="''${FLEET_API_URL-${apiUrl}}"
     exec ${python} ${scripts}/agent.py "$@"
   '';

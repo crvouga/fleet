@@ -146,9 +146,10 @@ describe('saving settings', () => {
       'sync.paused': 'true',
       'reboot.enabled': 'false',
       'disk.alertPercent': '',
-      'runners.repositories':
-        'crvouga/fleet\n crvouga/other ,crvouga/third',
+      'runners.repositories': 'crvouga/fleet\n crvouga/other ,crvouga/third',
       'runners.extraLabels': 'team-a',
+      // Pausing updates and rebooting everywhere is destabilising: confirmed.
+      acknowledge: 'fleet_sync_paused,fleet_reboot_disabled',
     });
     expect(res.status).toBe(303);
     expect(res.headers.get('location')).toBe('/settings/fleet');
@@ -229,7 +230,7 @@ describe('saving settings', () => {
       { disk: { alertPercent: 80 } },
       'chris'
     );
-    await post(app, '/settings/fleet', { mode: 'form' });
+    await post(app, '/settings/fleet', { mode: 'form', expectedRevision: '1' });
     expect((await deps.store.getSettings('fleet'))?.value).toEqual({});
   });
 });
@@ -309,6 +310,7 @@ describe('the webhook secret', () => {
     );
     await post(app, '/settings/fleet', {
       mode: 'form',
+      expectedRevision: '1',
       'alerts.webhookUrl': '',
     });
     expect((await deps.store.getSettings('fleet'))?.value).toEqual({
@@ -318,6 +320,7 @@ describe('the webhook secret', () => {
     expect(raw).toContain('https://hooks.example.com/…');
     await post(app, '/settings/fleet', {
       mode: 'raw',
+      expectedRevision: '2',
       raw: '{"alerts":{"webhookUrl":"https://hooks.example.com/…"}}',
     });
     expect((await deps.store.getSettings('fleet'))?.value).toEqual({
@@ -325,6 +328,7 @@ describe('the webhook secret', () => {
     });
     await post(app, '/settings/fleet', {
       mode: 'form',
+      expectedRevision: '3',
       'alerts.webhookUrl': 'https://new.example.com/x',
     });
     expect((await deps.store.getSettings('fleet'))?.value).toEqual({
@@ -332,6 +336,7 @@ describe('the webhook secret', () => {
     });
     await post(app, '/settings/fleet', {
       mode: 'form',
+      expectedRevision: '4',
       'alerts.webhookUrl.__clear': '1',
     });
     expect((await deps.store.getSettings('fleet'))?.value).toEqual({});
@@ -355,7 +360,7 @@ describe('history and restore', () => {
     expect(page).toContain('dana');
     expect(page).toContain('chris');
     expect(page).toContain('>current<');
-    expect(page.match(/Restore this version/g)).toHaveLength(1);
+    expect(page.match(/Roll back to this version/g)).toHaveLength(1);
     expect(page).toContain('action="/settings/fleet/restore"');
   });
 
@@ -375,6 +380,7 @@ describe('history and restore', () => {
     const oldest = history[history.length - 1];
     const res = await post(app, '/settings/fleet/restore', {
       historyId: String(oldest?.id),
+      expectedRevision: '2',
     });
     expect(res.status).toBe(303);
     expect((await deps.store.getSettings('fleet'))?.value).toEqual({
@@ -382,8 +388,11 @@ describe('history and restore', () => {
     });
     expect(await deps.store.settingsHistory('fleet', 10)).toHaveLength(3);
     expect(await html(app, '/settings/fleet', cookiesFrom(res))).toContain(
-      'Previous version restored.'
+      'Rolled back to the earlier version.'
     );
+    // The history says so plainly, with the entry it returned to.
+    const page = await html(app, '/settings/fleet');
+    expect(page).toContain(`rollback to #${oldest?.id}`);
   });
 
   test('restoring an unknown version changes nothing', async () => {
@@ -395,6 +404,7 @@ describe('history and restore', () => {
     );
     const res = await post(app, '/settings/fleet/restore', {
       historyId: '9999',
+      expectedRevision: '1',
     });
     expect(await html(app, '/settings/fleet', cookiesFrom(res))).toContain(
       'cannot be restored'

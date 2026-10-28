@@ -74,6 +74,7 @@ export async function selectEvents(
   db: Db,
   query: EventQuery
 ): Promise<EventRow[]> {
+  const kinds = query.kinds ? JSON.stringify(query.kinds.slice(0, 64)) : null;
   const rows = await db`
     select * from events
     where (${query.nodeId ?? null} is null or node_id = ${query.nodeId ?? null})
@@ -81,6 +82,8 @@ export async function selectEvents(
            or severity = ${query.severity ?? null}
            or (${query.severity ?? null} = 'warn' and severity = 'error'))
       and (${query.beforeId ?? null} is null or id < ${query.beforeId ?? null})
+      and (${kinds} is null
+           or kind in (select value from json_each(${kinds})))
     order by id desc
     limit ${query.limit}`;
   return rows.map(toEventRow);

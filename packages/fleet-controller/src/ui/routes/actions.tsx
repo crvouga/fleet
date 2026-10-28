@@ -1,6 +1,7 @@
 import type { Context, Hono } from 'hono';
 
 import type { AppDeps } from '../../deps';
+import { confirmationMatches } from '../../domain/operations';
 import {
   ACTIVE_ROLES,
   isActiveRole,
@@ -10,19 +11,40 @@ import {
 } from '../../types';
 import { parseEdit } from '../lib/node-edit';
 import { action, back, safeNext, type Handler } from './guard';
+import { recorder, typedPrompt } from './action-support';
+import { registerOperationActions } from './operation-actions';
 import { registerRecoveryActions } from './recovery-actions';
 
 interface Transition {
+  readonly verb: string;
   readonly to: Approval;
   readonly from: readonly Approval[];
   readonly done: string;
+  /** Destructive: the person must type the node's name (`confirm` field). */
   readonly confirm?: boolean;
 }
 
 const TRANSITIONS: Readonly<Record<string, Transition>> = {
-  approve: { to: 'approved', from: ['pending', 'rejected'], done: 'approved' },
-  reject: { to: 'rejected', from: ['pending'], done: 'rejected' },
-  retire: { to: 'retired', from: ['approved'], done: 'retired', confirm: true },
+  approve: {
+    verb: 'approve',
+    to: 'approved',
+    from: ['pending', 'rejected'],
+    done: 'approved',
+  },
+  reject: {
+    verb: 'reject',
+    to: 'rejected',
+    from: ['pending'],
+    done: 'rejected',
+    confirm: true,
+  },
+  retire: {
+    verb: 'retire',
+    to: 'retired',
+    from: ['approved'],
+    done: 'retired',
+    confirm: true,
+  },
 };
 
 const NODE_ID = /^[0-9a-f]{64}$/;
@@ -47,22 +69,31 @@ async function findNode(deps: AppDeps, c: Context): Promise<NodeRow | null> {
   return NODE_ID.test(id) ? deps.store.findNode(id) : null;
 }
 
+function missing(c: Context): Response {
+  return back(c, '/nodes', {
+    kind: 'error',
+    text: 'That node no longer exists.',
+  });
+}
+
 /** Why a transition may not run, with where to send the person; null when it may. */
 function refusal(
   rule: Transition,
   node: NodeRow,
   form: Record<string, unknown>,
   next: string
-): { to: string; text: string } | null {
-  if (rule.confirm === true && form['confirm'] !== 'yes')
+): { to: string; text: string; outcome: 'denied' | 'failed' } | null {
+  if (rule.confirm === true && !confirmationMatches(form['confirm'], node))
     return {
       to: `/nodes/${node.id}`,
-      text: 'Please confirm before changing this node.',
+      text: typedPrompt(node, rule.verb),
+      outcome: 'denied',
     };
   if (!rule.from.includes(node.approval))
     return {
       to: next,
       text: `${node.hostname} is ${node.approval}, so it cannot be ${rule.done}.`,
+      outcome: 'failed',
     };
   return null;
 }
@@ -83,21 +114,47 @@ function approvalRole(
 function transition(deps: AppDeps, name: string): Handler {
   const rule = TRANSITIONS[name];
   return action(deps, async (c, actor) => {
+    const audit = recorder(deps, actor);
     const form = await body(c);
     const node = await findNode(deps, c);
-    if (rule === undefined || node === null)
-      return back(c, '/nodes', {
-        kind: 'error',
-        text: 'That node no longer exists.',
-      });
+    if (rule === undefined || node === null) {
+      await audit(
+        name,
+        { id: null, outcome: 'failed' },
+        {
+          reason: 'not_found',
+        }
+      );
+      return missing(c);
+    }
     const next = safeNext(form['next'], `/nodes/${node.id}`);
     const refused = refusal(rule, node, form, next);
-    if (refused !== null)
+    if (refused !== null) {
+      await audit(
+        name,
+        { id: node.id, outcome: refused.outcome },
+        {
+          reason:
+            refused.outcome === 'denied'
+              ? 'confirmation_required'
+              : 'invalid_state',
+          from: node.approval,
+        }
+      );
       return back(c, refused.to, { kind: 'error', text: refused.text });
+    }
     const role = approvalRole(rule, form);
     if (!role.ok) return back(c, next, { kind: 'error', text: BAD_ROLE });
     await deps.store.setApproval(node.id, rule.to, actor);
     const as = await assignWith(deps, node.id, role.role, actor);
+    await audit(
+      name,
+      { id: node.id },
+      {
+        from: node.approval,
+        ...(role.role === undefined ? {} : { role: role.role }),
+      }
+    );
     return back(c, next, {
       kind: 'success',
       text: `${node.displayName ?? node.hostname} ${rule.done}${as}.`,
@@ -119,20 +176,38 @@ async function assignWith(
 
 function remove(deps: AppDeps): Handler {
   return action(deps, async (c, actor) => {
+    const audit = recorder(deps, actor);
     const form = await body(c);
     const node = await findNode(deps, c);
-    if (node === null)
-      return back(c, '/nodes', {
-        kind: 'error',
-        text: 'That node no longer exists.',
-      });
-    if (form['confirm'] !== 'yes') {
+    if (node === null) {
+      await audit(
+        'delete',
+        { id: null, outcome: 'failed' },
+        {
+          reason: 'not_found',
+        }
+      );
+      return missing(c);
+    }
+    if (!confirmationMatches(form['confirm'], node)) {
+      await audit(
+        'delete',
+        { id: node.id, outcome: 'denied' },
+        {
+          reason: 'confirmation_required',
+        }
+      );
       return back(c, `/nodes/${node.id}`, {
         kind: 'error',
-        text: 'Please confirm before deleting a node.',
+        text: typedPrompt(node, 'delete'),
       });
     }
-    await deps.store.deleteNode(node.id, actor);
+    const removed = await deps.store.deleteNode(node.id, actor);
+    await audit(
+      'delete',
+      { id: node.id, ...(removed ? {} : { outcome: 'failed' as const }) },
+      { hostname: node.hostname, approval: node.approval }
+    );
     return back(c, '/nodes', {
       kind: 'success',
       text: `${node.displayName ?? node.hostname} deleted.`,
@@ -142,16 +217,38 @@ function remove(deps: AppDeps): Handler {
 
 function edit(deps: AppDeps): Handler {
   return action(deps, async (c, actor) => {
+    const audit = recorder(deps, actor);
     const node = await findNode(deps, c);
-    if (node === null)
-      return back(c, '/nodes', {
-        kind: 'error',
-        text: 'That node no longer exists.',
-      });
+    if (node === null) {
+      await audit(
+        'patch',
+        { id: null, outcome: 'failed' },
+        {
+          reason: 'not_found',
+        }
+      );
+      return missing(c);
+    }
     const parsed = parseEdit(await body(c));
     const here = `/nodes/${node.id}`;
-    if (!parsed.ok) return back(c, here, { kind: 'error', text: parsed.error });
+    if (!parsed.ok) {
+      await audit(
+        'patch',
+        { id: node.id, outcome: 'failed' },
+        {
+          reason: 'invalid_request',
+        }
+      );
+      return back(c, here, { kind: 'error', text: parsed.error });
+    }
     await deps.store.patchNode(node.id, parsed.patch, actor);
+    await audit(
+      'patch',
+      { id: node.id },
+      {
+        changed: Object.keys(parsed.patch),
+      }
+    );
     return back(c, here, { kind: 'success', text: 'Saved.' });
   });
 }
@@ -159,17 +256,39 @@ function edit(deps: AppDeps): Handler {
 /** Assign, change or (with an empty value) unassign the node's role. */
 function assign(deps: AppDeps): Handler {
   return action(deps, async (c, actor) => {
+    const audit = recorder(deps, actor);
     const node = await findNode(deps, c);
-    if (node === null)
-      return back(c, '/nodes', {
-        kind: 'error',
-        text: 'That node no longer exists.',
-      });
+    if (node === null) {
+      await audit(
+        'role',
+        { id: null, outcome: 'failed' },
+        {
+          reason: 'not_found',
+        }
+      );
+      return missing(c);
+    }
     const here = `/nodes/${node.id}`;
     const role = formRole((await body(c))['role'] ?? '');
-    if (!role.ok || role.role === undefined)
+    if (!role.ok || role.role === undefined) {
+      await audit(
+        'role',
+        { id: node.id, outcome: 'failed' },
+        {
+          reason: 'invalid_role',
+        }
+      );
       return back(c, here, { kind: 'error', text: BAD_ROLE });
+    }
     await deps.store.assignRole(node.id, role.role, actor);
+    await audit(
+      'role',
+      { id: node.id },
+      {
+        from: node.role,
+        to: role.role,
+      }
+    );
     const label = node.displayName ?? node.hostname;
     return back(c, here, {
       kind: 'success',
@@ -189,4 +308,5 @@ export function registerActions(app: Hono, deps: AppDeps): void {
   app.post('/nodes/:id/delete', remove(deps));
   app.post('/nodes/:id/edit', edit(deps));
   registerRecoveryActions(app, deps);
+  registerOperationActions(app, deps);
 }

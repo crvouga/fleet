@@ -144,10 +144,18 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
         };
         node = configured.nixosConfigurations.devbox.config;
         template = configured.nixosConfigurations.ci.config;
+        unmanaged = (self.lib.mkFleet {
+          shared.repo.url = "https://github.com/example/machines.git";
+        }).nixosConfigurations.ci.config;
         valid = node.systemd.services.fleet-agent.environment.FLEET_API_URL == "https://fleet.example.org"
           && node.systemd.timers.fleet-sync.timerConfig.OnUnitInactiveSec == "60s"
-          && builtins.attrNames template.services.github-runners == [ ]
-          && (builtins.fromJSON template.environment.etc."fleet/bootstrap.json".text).installBlocked != [ ];
+          # A controller owns GitHub access: slots exist with no per-machine
+          # GitHub settings, and nothing blocks the node on them.
+          && builtins.attrNames template.services.github-runners != [ ]
+          && (builtins.fromJSON template.environment.etc."fleet/bootstrap.json".text).installBlocked == [ ]
+          # Without a controller a template still has no credentials or runner targets.
+          && builtins.attrNames unmanaged.services.github-runners == [ ]
+          && (builtins.fromJSON unmanaged.environment.etc."fleet/bootstrap.json".text).installBlocked != [ ];
       in pkgs.runCommand "fleet-deployment-overrides" { } (
         if valid then "mkdir -p $out"
         else "echo 'deployment overrides were not applied' >&2; exit 1");

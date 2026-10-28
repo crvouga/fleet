@@ -55,6 +55,30 @@ class RunnerReadinessTests(unittest.TestCase):
             raise AssertionError(args)
         return node_readiness.github_issues(self.paths, self.identity, run, self.github, {})[0]
 
+    def test_a_node_without_a_github_app_leaves_online_checks_to_the_controller(self):
+        self.github = {'scope': 'repository', 'repositories': [], 'appId': '', 'installationId': ''}
+        calls = []
+
+        def run(args, timeout):
+            calls.append(args[0])
+            return 0, 'active\nactive'
+        self.assertEqual(node_readiness.github_issues(self.paths, self.identity, run, self.github, {}), [])
+        self.assertEqual(calls, ['systemctl'])
+
+    def test_a_controller_owned_node_still_explains_a_slot_that_cannot_register(self):
+        self.github = {'scope': 'repository', 'repositories': [], 'appId': '', 'installationId': ''}
+        (self.paths.run / 'register').mkdir()
+        refused = {'code': 'FLEET_GITHUB_SCOPE', 'message': 'GitHub refused with HTTP 403', 'exit': 78}
+        (self.paths.run / 'register' / 'slot-2.json').write_text(json.dumps(refused))
+
+        def run(args, timeout):
+            if args[1] == 'is-active':
+                return 3, 'active\nactivating'
+            return 0, ('Id=github-runner-slot-1.service\nActiveState=active\nNRestarts=0\n\n'
+                       'Id=github-runner-slot-2.service\nActiveState=activating\nNRestarts=0\n')
+        issues = node_readiness.github_issues(self.paths, self.identity, run, self.github, {})
+        self.assertTrue(issues[0].startswith('FLEET_GITHUB_SCOPE: runner slot-2 cannot register'))
+
     def test_an_inactive_slot_is_explained_by_its_last_registration_or_said_to_be_unknown(self):
         self.assertEqual(self.inactive(), 'FLEET_RUNNERS_STARTING: 1 of 2 runner services are active.')
         refused = {'code': 'FLEET_GITHUB_KEY', 'message': 'GitHub refused the App credential (HTTP 401)', 'exit': 78}

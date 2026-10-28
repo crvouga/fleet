@@ -6,6 +6,7 @@ import {
 } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { nodeIdOf, secretOf, sha256, heartbeatBody } from '../support/fixtures';
+import { adminConfirmed } from '../support/confirm';
 
 describeController('POST /v1/nodes/register', (ctx) => {
   test('a first hello creates a pending node and answers 201', async () => {
@@ -150,7 +151,7 @@ describeController('POST /v1/nodes/register', (ctx) => {
   test('a rejected node stays rejected and is told so', async () => {
     const { h } = ctx();
     await h.register(1);
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/reject`);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/reject`, 1);
     const again = await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     expect(again.status).toBe(200);
     expect(again.body.status).toBe('rejected');
@@ -159,9 +160,9 @@ describeController('POST /v1/nodes/register', (ctx) => {
   test('a retired node becomes pending, or approved with the token', async () => {
     const { h } = ctx();
     await h.register(1);
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/retire`);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/retire`, 1);
     expect((await h.register(1)).body.status).toBe('pending');
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/retire`);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/retire`, 1);
     expect(
       (await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN })).body
         .status

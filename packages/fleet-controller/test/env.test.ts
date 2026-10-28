@@ -36,6 +36,7 @@ describe('readControllerEnv', () => {
       port: 8080,
       adminToken: 'a'.repeat(32),
       enrollmentTokens: [],
+      github: { apiUrl: 'https://api.github.com' },
     });
   });
 

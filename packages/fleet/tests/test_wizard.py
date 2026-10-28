@@ -21,6 +21,8 @@ from pathlib import Path
 from unittest import mock
 
 # Enrollment asks GitHub for approval. Tests that are not about it opt out.
+# A fleet-bind.json in the developer's Downloads must not change any test.
+os.environ.setdefault("FLEET_BINDING_FILE", os.devnull)
 
 WIZARD = Path(__file__).resolve().parents[1] / "wizard"
 sys.path.insert(0, str(WIZARD))

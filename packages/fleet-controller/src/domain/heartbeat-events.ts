@@ -1,14 +1,19 @@
 import type { HeartbeatBody, NodeRow, Severity } from '../types';
 
+import { healthEvents } from './health-events';
+
 /** An event the controller concludes from comparing two consecutive reports. */
 export interface DerivedEvent {
   readonly kind: string;
   readonly severity: Severity;
   readonly message: string;
+  /** Structured identity (units, mount) that incident history pairs open and close edges by. */
+  readonly data?: Readonly<Record<string, unknown>>;
 }
 
 export const DEFAULT_DISK_ALERT_PERCENT = 90;
 const MAX_NAMED_UNITS = 5;
+const MAX_DATA_UNITS = 32;
 const SHORT_REVISION = 7;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -103,6 +108,7 @@ function unitEvents(prev: NodeRow, body: HeartbeatBody): DerivedEvent[] {
       kind: 'units_failed',
       severity: 'warn',
       message: `failed units: ${nameUnits(appeared)}`,
+      data: { units: appeared.slice(0, MAX_DATA_UNITS) },
     });
   }
   if (cleared.length > 0) {
@@ -110,6 +116,7 @@ function unitEvents(prev: NodeRow, body: HeartbeatBody): DerivedEvent[] {
       kind: 'units_recovered',
       severity: 'info',
       message: `units recovered: ${nameUnits(cleared)}`,
+      data: { units: cleared.slice(0, MAX_DATA_UNITS) },
     });
   }
   return out;
@@ -129,6 +136,7 @@ function diskEvent(
         kind: 'disk_high',
         severity: 'warn',
         message: `${mount} is ${now}% full (alert at ${alertPercent}%)`,
+        data: { mount },
       },
     ];
   }
@@ -138,6 +146,7 @@ function diskEvent(
         kind: 'disk_ok',
         severity: 'info',
         message: `${mount} is down to ${now}% full`,
+        data: { mount },
       },
     ];
   }
@@ -230,5 +239,6 @@ export function deriveReportEvents(
     ...diskEvents(prev, body, alertPercent),
     ...convergedRoleEvents(prev, body),
     ...blockedEvents(prev, body),
+    ...healthEvents(prev, body),
   ];
 }

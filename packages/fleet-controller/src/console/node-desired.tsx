@@ -17,6 +17,10 @@ import type { Convergence, NodeView } from '../types';
 import type { FleetEntry } from '../ui/lib/fleet-data';
 import { useAction } from './action';
 import { AssignRole } from './role-select';
+import { DesiredHistory } from './desired-history';
+import { NodeCredential } from './node-credential';
+import type { AnnotatedDesiredRow } from '../domain/desired-history';
+import type { CredentialStatus } from '../domain/credential-rotation';
 
 const CONVERGENCE: Record<Convergence, [string, string]> = {
   converged: ['Converged', 'teal'],
@@ -105,9 +109,17 @@ function AgeIdentity({
 export function NodeDesiredState({
   entry,
   reload,
+  history = [],
+  credential,
+  readOnly = false,
 }: {
   entry: FleetEntry;
   reload: () => void;
+  /** Desired-document history, newest first (from the console state). */
+  history?: readonly AnnotatedDesiredRow[];
+  credential?: CredentialStatus | null | undefined;
+  /** A viewer sees the controls disabled. */
+  readOnly?: boolean;
 }) {
   const { view } = entry;
   const action = useAction(reload);
@@ -140,6 +152,13 @@ export function NodeDesiredState({
           <Fact label="Applied revision" value={view.appliedRevision} />
         </SimpleGrid>
         <AgeIdentity view={view} action={action} />
+        <NodeCredential
+          view={view}
+          credential={credential}
+          action={action}
+          readOnly={readOnly}
+        />
+        <DesiredHistory rows={history} />
         {view.reconcileIssues.length > 0 && (
           <Alert color="orange" title="What blocks convergence">
             <List size="sm">

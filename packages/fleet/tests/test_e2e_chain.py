@@ -311,13 +311,25 @@ class FullChainTest(unittest.TestCase):
             "runners": {"extraLabels": ["lab-a"], "repositories": ["crvouga/private-app"]},
             "capacity": {"slotMax": 2},
         }
-        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
+        def put_fleet(body):
+            # Writes to an existing scope carry the revision they read (optimistic
+            # concurrency), and pausing every node's updates is acknowledged on purpose.
+            _status, current, _ = http("GET", self.controller + "/v1/settings/fleet", self.admin)
+            revision = (json.loads(current).get("revision") if _status == 200 else None) or 0
+            headers = {"X-Fleet-Acknowledge": "fleet_sync_paused"}
+            if revision:
+                headers["If-Match"] = str(revision)
+            return http("PUT", self.controller + "/v1/settings/fleet", self.admin, body, headers=headers)
+
+        status, data, _ = put_fleet(desired)
         self.assertEqual(status, 200, data)
-        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, {"heartbeat": {"intervalSeconds": 1}})
+        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
+        self.assertEqual(status, 428, "an existing scope needs the revision the caller read")
+        status, data, _ = put_fleet({"heartbeat": {"intervalSeconds": 1}})
         self.assertEqual(status, 400, "an out-of-range value must be refused, not stored")
-        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, {"runner": {}})
+        status, data, _ = put_fleet({"runner": {}})
         self.assertEqual(status, 400, "a typo must not silently do nothing")
-        http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
+        put_fleet(desired)
 
         run = node.agent(self.controller, "once")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -359,7 +371,10 @@ class FullChainTest(unittest.TestCase):
         (node.state / "enrollment-token").write_text(self.role_token + "\n")
         self.assertEqual(node.agent(self.controller, "once").returncode, 0)
 
-        status, _data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin)
+        status, data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin, {})
+        self.assertEqual(status, 400, "deleting needs the typed confirmation")
+        self.assertEqual(json.loads(data)["error"], "confirmation_required")
+        status, _data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin, {"confirm": f"ci-{identity[:4]}"})
         self.assertEqual(status, 200)
         self.assertIsNone(self.node_view(identity))
         healed = node.agent(self.controller, "once")
@@ -425,7 +440,7 @@ class FullChainTest(unittest.TestCase):
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
             tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
             self.assertTrue({"nodes", "heartbeats", "events", "allowed_emails"}.issubset(tables))
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
             hashes = [row[0] for row in db.execute("select secret_hash from nodes")]
             self.assertTrue(hashes)
             for stored in hashes:

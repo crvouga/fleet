@@ -2,7 +2,8 @@ import type { FleetConfig, Scope } from '../config/schema';
 import type { SettingsHistoryRow, SettingsRow } from '../types';
 
 import type { Db } from './client';
-import { toSettingsHistoryRow, toSettingsRow } from './rows';
+import { SettingsConflictError } from '../domain/settings-conflict';
+import { numberOf, toSettingsHistoryRow, toSettingsRow } from './rows';
 
 export async function selectSettings(
   db: Db,
@@ -29,18 +30,34 @@ export async function selectAllSettings(db: Db): Promise<SettingsRow[]> {
   return rows.map(toSettingsRow);
 }
 
+export interface SettingsWrite {
+  readonly actor: string;
+  /** Write only if the stored revision is still this (0 for a scope never written). */
+  readonly expectedRevision?: number | undefined;
+}
+
 export async function upsertSettings(
   db: Db,
   scope: Scope,
   value: FleetConfig,
-  actor: string
+  write: SettingsWrite
 ): Promise<SettingsRow> {
+  const { actor, expectedRevision } = write;
   const json = JSON.stringify(value);
+  if (expectedRevision !== undefined) {
+    // The caller runs inside a write transaction, so this read cannot go stale.
+    const found =
+      await db`select revision from settings where scope = ${scope}`;
+    const current = found[0] === undefined ? 0 : numberOf(found[0], 'revision');
+    if (current !== expectedRevision)
+      throw new SettingsConflictError(current, expectedRevision);
+  }
   const rows = await db`
-    insert into settings (scope, value, updated_at, updated_by)
-    values (${scope}, ${json}, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ${actor})
+    insert into settings (scope, value, updated_at, updated_by, revision)
+    values (${scope}, ${json}, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ${actor}, 1)
     on conflict (scope) do update
-      set value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by
+      set value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+          revision = settings.revision + 1
     returning *`;
   await db`
     insert into settings_history (scope, value, changed_at, changed_by)

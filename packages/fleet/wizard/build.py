@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FILES = ("main.py", "bootstrap.py", "fleet_tls.py", "helper.py", "imaging.py", "leases.py", "elevate.py", "preparation.py", "fleet_wifi.py", "wifi_capture.py", "server.py", "diagnostics.py", "index.html", "admin.css", "theme.js")
+FILES = ("main.py", "bootstrap.py", "fleet_tls.py", "helper.py", "imaging.py", "leases.py", "elevate.py", "preparation.py", "fleet_binding.py", "fleet_wifi.py", "wifi_capture.py", "server.py", "diagnostics.py", "index.html", "admin.css", "theme.js")
 
 
 def target_name():

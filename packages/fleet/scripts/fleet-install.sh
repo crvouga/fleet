@@ -18,7 +18,9 @@ note() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$log" 2>/dev
 # An automatic install shows the person one screen per step: what is happening,
 # whether anything is erased and what to do (scripts/live_console.py). A screen
 # never stops the install, and manual or test runs without the tool only log.
+current_step=checks
 live_step() {
+  current_step=$1
   note "step $1"
   if [ "${FLEET_AUTO:-}" = 1 ] && command -v "${FLEET_LIVE:-fleet-live}" >/dev/null 2>&1; then
     "${FLEET_LIVE:-fleet-live}" step "$1" >/dev/null 2>&1 || true
@@ -39,7 +41,7 @@ on_error() {
   note "FAIL exit $1 at line $2: $3"
   printf 'FLEET-FAIL fleet-install stopped at line %s (exit %s): %s\nLog: %s\n' "$2" "$1" "$3" "$log" >&2
   if [ -n "${toplevel:-}" ] && [ -n "${token_file:-}" ] && command -v fleet-bootstrap-report >/dev/null 2>&1; then
-    fleet-bootstrap-report "$toplevel" "$token_file" "FLEET_INSTALL_FAILED: installer exited $1 at line $2. Review this node's installation event and copy its diagnostic report." || true
+    fleet-bootstrap-report "$toplevel" "$token_file" "FLEET_INSTALL_FAILED: phase=$current_step installer exited $1 at line $2. Review this node's installation event and copy its diagnostic report." || true
   fi
 }
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR

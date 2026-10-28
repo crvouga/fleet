@@ -20,7 +20,17 @@ export function bucketize(
   end: Date,
   buckets: number = CHART_BUCKETS
 ): Bucket[] {
-  const span = WINDOW_HOURS * 3600 * 1000;
+  return bucketizeWindow(points, pick, { end, buckets });
+}
+
+/** Like bucketize over the last `windowHours` (24 by default), for the 7 and 30 day charts. */
+export function bucketizeWindow(
+  points: readonly HeartbeatPoint[],
+  pick: Pick,
+  window: { end: Date; buckets?: number; windowHours?: number }
+): Bucket[] {
+  const { end, buckets = CHART_BUCKETS, windowHours = WINDOW_HOURS } = window;
+  const span = windowHours * 3600 * 1000;
   const width = span / buckets;
   const start = end.getTime() - span;
   const sums = new Array<number>(buckets).fill(0);

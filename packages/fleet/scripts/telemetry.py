@@ -14,6 +14,7 @@ from pathlib import Path
 
 import fleetconf
 import runner_job
+import telemetry_hw
 
 MAX_BYTES = 9_007_199_254_740_991
 MAX_STATE = 65536
@@ -73,6 +74,16 @@ class Collector:
         self.previous = {}
         self.current = {}
         self.issues = []
+        self.elapsed = None
+        # Set by the agent after each heartbeat; None means not measured yet.
+        self.round_trip_ms = None
+        self.consecutive_failures = None
+        self.restarts, self.tracked_since = 0, None
+        self.health = (None, None)  # (monotonic time, family): SMART data changes slowly
+
+    def note_heartbeat(self, round_trip_ms, failures):
+        """Called by the agent: the last heartbeat's round trip and the consecutive failure count."""
+        self.round_trip_ms, self.consecutive_failures = round_trip_ms, failures
 
     def issue(self, message):
         if message not in self.issues and len(self.issues) < 16:
@@ -104,13 +115,26 @@ class Collector:
             pass
         boot = read(self.paths.proc / "sys/kernel/random/boot_id", 128).strip()
         now = self.clock.monotonic()
-        self.current = {"boot": boot, "at": now, "power": {}, "network": {}}
+        self.current = {"boot": boot, "at": now, "power": {}, "network": {}, "diskio": {}}
+        self.track_restarts(boot)
         before = self.previous.get("at")
         same_boot = boot and self.previous.get("boot") == boot
         self.elapsed = now - before if same_boot and type(before) in (int, float) and math.isfinite(before) else None
         if self.elapsed is None or not 0 < self.elapsed <= 7200:
             self.previous = {}
             self.elapsed = None
+
+    def track_restarts(self, boot):
+        """Count boots this agent has seen. The count survives the counter reset that a new boot causes."""
+        old = self.previous.get("lifecycle") if isinstance(self.previous.get("lifecycle"), dict) else {}
+        count, since = old.get("restarts"), valid_time(old.get("since"), self.clock.time())
+        count = count if type(count) is int and 0 <= count < 10**9 else 0
+        if since is None:
+            count, since = 0, iso(self.clock.time())
+        elif boot and self.previous.get("boot") not in (None, boot):
+            count += 1
+        self.restarts, self.tracked_since = count, since
+        self.current["lifecycle"] = {"restarts": count, "since": since}
 
     def cpu(self):
         first = read(self.paths.proc / "stat").splitlines()
@@ -225,6 +249,20 @@ class Collector:
                 result.append({"name": self.label(f"{directory.name}/{label}"), "watts": round(watts, 3), "source": "powercap"})
         return result
 
+    def network_deltas(self, name, now, old):
+        """Per-second byte rates and error/drop count deltas; any counter that went backwards is unknown."""
+        before = old.get(name)
+        rates = {"receiveBytesPerSecond": None, "transmitBytesPerSecond": None}
+        errors = {"receiveErrors": None, "transmitErrors": None, "receiveDropped": None, "transmitDropped": None}
+        if not self.elapsed or not isinstance(before, list) or len(before) not in (2, 6) or not all(type(v) is int for v in before):
+            return rates, errors
+        if now[0] >= before[0] and now[1] >= before[1]:
+            rates = {"receiveBytesPerSecond": round((now[0] - before[0]) / self.elapsed, 3),
+                     "transmitBytesPerSecond": round((now[1] - before[1]) / self.elapsed, 3)}
+        if len(before) == 6 and len(now) == 6 and all(a >= b for a, b in zip(now[2:], before[2:])):
+            errors = dict(zip(errors, (a - b for a, b in zip(now[2:], before[2:]))))
+        return rates, errors
+
     def network(self):
         result = []
         names = set()
@@ -247,15 +285,11 @@ class Collector:
                     continue
             except ValueError:
                 continue
-            before = old.get(name)
-            rx = tx = None
-            if self.elapsed and isinstance(before, list) and len(before) == 2 and all(type(v) is int for v in before):
-                if received >= before[0] and transmitted >= before[1]:
-                    rx = round((received - before[0]) / self.elapsed, 3)
-                    tx = round((transmitted - before[1]) / self.elapsed, 3)
-            self.current["network"][name] = [received, transmitted]
-            result.append({"name": name, "receivedBytes": received, "transmittedBytes": transmitted,
-                           "receiveBytesPerSecond": rx, "transmitBytesPerSecond": tx})
+            extra = [int(fields[index]) for index in (2, 10, 3, 11)] if len(fields) >= 12 and all(fields[index].isdigit() for index in (2, 10, 3, 11)) else []
+            counters = [received, transmitted] + (extra if all(0 <= v <= MAX_BYTES for v in extra) else [])
+            rates, errors = self.network_deltas(name, counters if len(counters) == 6 else counters[:2], old)
+            self.current["network"][name] = counters if len(counters) == 6 else counters[:2]
+            result.append(dict({"name": name, "receivedBytes": received, "transmittedBytes": transmitted}, **rates, **errors))
             if len(result) == 32:
                 break
         if not result:
@@ -324,6 +358,39 @@ class Collector:
                              "message": f"Runner {slot} stopped before its completion hook." if interrupted else f"Runner {slot} completed its job hook; consult GitHub for the result."})
         return result, sorted(logs, key=lambda value: value["at"])[-40:]
 
+    def guarded(self, name, build, fallback):
+        """One failing family must not cost the heartbeat or the other families: it degrades to unsupported."""
+        try:
+            return build()
+        except Exception:
+            self.issue(f"The {name} collector failed unexpectedly; its measurements are unknown.")
+            return telemetry_hw.unsupported(f"The {name} collector failed unexpectedly.", **fallback)
+
+    def disk_health(self):
+        """SMART data is refreshed at most every five minutes and never wakes a sleeping disk."""
+        at, cached = self.health
+        now = self.clock.monotonic()
+        if cached is None or at is None or not 0 <= now - at < 300:
+            cached = telemetry_hw.disk_health(self)
+            self.health = (now, cached)
+        return cached
+
+    def hardware_families(self, cpu):
+        frequency = self.guarded("CPU frequency", lambda: telemetry_hw.cpu_frequency(self),
+                                 {"currentMHz": None, "minMHz": None, "maxMHz": None})
+        return {
+            "gpus": self.guarded("GPU", lambda: telemetry_hw.gpus(self), {"devices": []}),
+            "diskIo": self.guarded("disk I/O", lambda: telemetry_hw.disk_io(self), {"devices": []}),
+            "diskHealth": self.guarded("disk health", self.disk_health, {"devices": []}),
+            "cpuFrequency": frequency,
+            "throttling": self.guarded("throttling", lambda: telemetry_hw.throttling(self, cpu, frequency),
+                                       {"throttled": None, "events": None, "basis": None}),
+            "pressure": self.guarded("pressure", lambda: telemetry_hw.pressure(self), {"cpu": None, "memory": None, "io": None}),
+            "connectivity": self.guarded("connectivity", lambda: telemetry_hw.connectivity(self),
+                                         {"controllerLatencyMs": None, "consecutiveFailures": None}),
+            "lifecycle": telemetry_hw.lifecycle(self),
+        }
+
     def collect(self, identity, failed_units=(), services_unknown=False):
         self.issues = []
         self.baseline()
@@ -334,8 +401,10 @@ class Collector:
             logs.append({"at": now, "source": "systemd", "level": "error", "message": f"Service {unit} is failed."})
         if services_unknown:
             self.issue("Failed-service status is unknown: systemd diagnostics could not be queried.")
-        value = {"sampledAt": now, "cpuUsagePercent": self.cpu(), "filesystems": self.filesystems(), "temperatures": temperatures,
+        cpu = self.cpu()
+        value = {"sampledAt": now, "cpuUsagePercent": cpu, "filesystems": self.filesystems(), "temperatures": temperatures,
                  "power": power, "swap": self.swap(), "network": self.network(), "runnerSlots": slots, "logs": logs[-40:], "issues": self.issues}
+        value.update(self.hardware_families(cpu))
         try:
             fleetconf.write_atomic(str(self.paths.state / "telemetry-state.json"), json.dumps(self.current, separators=(",", ":")), 0o600)
         except OSError:

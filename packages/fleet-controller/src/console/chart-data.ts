@@ -1,6 +1,13 @@
 import type { HeartbeatPoint } from '../types';
-import { bucketize } from '../ui/lib/series';
-import { peakTemperature, peakPower } from '../ui/lib/telemetry';
+import { bucketizeWindow } from '../ui/lib/series';
+import {
+  memoryPressure,
+  peakDiskBusy,
+  peakGpuTemperature,
+  peakGpuUtilization,
+  peakPower,
+  peakTemperature,
+} from '../ui/lib/telemetry';
 
 export interface ChartPoint {
   time: string;
@@ -11,44 +18,53 @@ export interface ChartPoint {
   cpu: number | null;
   temperature: number | null;
   power: number | null;
+  gpuUtilization: number | null;
+  gpuTemperature: number | null;
+  diskBusy: number | null;
+  memoryPressure: number | null;
 }
+type Picker = (point: HeartbeatPoint) => number | null;
+
+/** Each charted series and how to read it from a history point. */
+const SERIES: Record<Exclude<keyof ChartPoint, 'time'>, Picker> = {
+  load: (point) => point.load1,
+  memory: (point) => point.memUsedPercent,
+  disk: (point) => point.diskPercent,
+  busy: (point) => point.busySlots,
+  cpu: (point) => point.telemetry?.cpuUsagePercent ?? null,
+  temperature: (point) => peakTemperature(point.telemetry),
+  power: (point) => peakPower(point.telemetry),
+  gpuUtilization: (point) => peakGpuUtilization(point.telemetry),
+  gpuTemperature: (point) => peakGpuTemperature(point.telemetry),
+  diskBusy: (point) => peakDiskBusy(point.telemetry),
+  memoryPressure: (point) => memoryPressure(point.telemetry),
+};
+
+/**
+ * Bucketed chart rows over the last `windowHours` (24 by default). An unknown
+ * value stays null, so a gap is a gap and never a zero.
+ */
 export function chartData(
   points: readonly HeartbeatPoint[],
-  now: Date
+  now: Date,
+  windowHours = 24
 ): ChartPoint[] {
-  const load = bucketize(points, (point) => point.load1, now);
-  const memory = bucketize(points, (point) => point.memUsedPercent, now);
-  const disk = bucketize(points, (point) => point.diskPercent, now);
-  const busy = bucketize(points, (point) => point.busySlots, now);
-  const cpu = bucketize(
-    points,
-    (point) => point.telemetry?.cpuUsagePercent ?? null,
-    now
-  );
-  const temperature = bucketize(
-    points,
-    (point) => peakTemperature(point.telemetry),
-    now
-  );
-  const power = bucketize(points, (point) => peakPower(point.telemetry), now);
-  return load.map((bucket, index) => ({
-    time: new Date(bucket.start).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    }),
-    load: bucket.value,
-    memory: bucketValue(memory, index),
-    disk: bucketValue(disk, index),
-    busy: bucketValue(busy, index),
-    cpu: bucketValue(cpu, index),
-    temperature: bucketValue(temperature, index),
-    power: bucketValue(power, index),
+  const keys = Object.keys(SERIES) as (keyof typeof SERIES)[];
+  const columns = Object.fromEntries(
+    keys.map((key) => [
+      key,
+      bucketizeWindow(points, SERIES[key], { end: now, windowHours }),
+    ])
+  ) as Record<keyof typeof SERIES, ReturnType<typeof bucketizeWindow>>;
+  return columns.load.map((bucket, index) => ({
+    time: new Date(bucket.start).toLocaleString(
+      [],
+      windowHours <= 24
+        ? { hour: '2-digit', minute: '2-digit' }
+        : { month: 'short', day: 'numeric', hour: '2-digit' }
+    ),
+    ...(Object.fromEntries(
+      keys.map((key) => [key, columns[key][index]?.value ?? null])
+    ) as Record<keyof typeof SERIES, number | null>),
   }));
-}
-
-function bucketValue(
-  buckets: readonly { value: number | null }[],
-  index: number
-): number | null {
-  return buckets[index]?.value ?? null;
 }

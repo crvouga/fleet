@@ -17,12 +17,13 @@ Copy [deployment.env.example](deployment.env.example) to `deployment.env` at the
 repository root. Fill in all four settings. Fleet never provisions the bucket,
 credentials, repository or identity provider.
 
-| Setting                 | Required value / correction                                                                                          |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `FLEET_ADMIN_TOKEN`     | A random bearer secret of at least 32 characters, without whitespace. Generate your own with `openssl rand -hex 32`. |
-| `FLEET_S3_BUCKET`       | An existing bucket name: 3–63 lowercase letters, digits, hyphens or dots. Supply the name, not a URL.                |
-| `AWS_ACCESS_KEY_ID`     | Access key for that bucket/prefix.                                                                                   |
-| `AWS_SECRET_ACCESS_KEY` | Corresponding secret key.                                                                                            |
+| Setting                  | Required value / correction                                                                                                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLEET_ADMIN_TOKEN`      | A random bearer secret of at least 32 characters, without whitespace. Generate your own with `openssl rand -hex 32`.                                                                                    |
+| `FLEET_ADMIN_TOKEN_NEXT` | Optional. Set only while rotating the admin token: the controller accepts it alongside `FLEET_ADMIN_TOKEN` (same rules, must differ). See `packages/fleet-controller/docs/access-and-config-safety.md`. |
+| `FLEET_S3_BUCKET`        | An existing bucket name: 3–63 lowercase letters, digits, hyphens or dots. Supply the name, not a URL.                                                                                                   |
+| `AWS_ACCESS_KEY_ID`      | Access key for that bucket/prefix.                                                                                                                                                                      |
+| `AWS_SECRET_ACCESS_KEY`  | Corresponding secret key.                                                                                                                                                                               |
 
 Give the S3 credentials List/Get/Put/Delete permissions for the selected bucket
 and prefix, including multipart-upload permissions required by the provider.
@@ -73,6 +74,44 @@ S3 failures.
 | `FLEET_LITESTREAM_BIN`          | `litestream` on PATH; must report version 0.5.17.                                                                                                                                                                                                                                                                                    |
 | `FLEET_STARTUP_TIMEOUT_SECONDS` | `60` per restore/initial-sync operation; integer 1–3600. Increase for large databases or slow object storage. A stalled startup is terminated with a nonzero exit, preserving local data for investigation. No deadline is applied to the running controller.                                                                        |
 | `FLEET_ENROLLMENT_TOKENS`       | `[]`. Nodes require manual approval unless they present an enrollment token whose SHA-256 is listed here: a JSON array (at most 16) of `{ "sha256": "<64 hex>", "role": "<active role>" \| null }`. A matching token approves the node and assigns the role when the node has none. `FLEET_ROLE_TOKEN_HASHES` is refused at startup. |
+
+### GitHub Actions runners (optional)
+
+The controller, not the nodes, holds the GitHub App credentials. Without these
+variables nothing talks to GitHub and the dashboard's **Runners** page says so; no data
+is ever simulated. Setup, scopes and failure modes:
+[`packages/fleet-controller/docs/github-runners.md`](packages/fleet-controller/docs/github-runners.md).
+
+| Variable                                                              | Meaning                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLEET_GITHUB_APP_PRIVATE_KEY` or `FLEET_GITHUB_APP_PRIVATE_KEY_FILE` | The GitHub App's RSA private key (PEM, PKCS#1 or PKCS#8), inline (`\n` escapes allowed) or as an absolute file path. Set at most one. It is parsed at startup, never stored in the database, rendered or logged; an unusable key fails startup naming the variable. |
+| `FLEET_GITHUB_WEBHOOK_SECRET`                                         | At least 16 characters. Enables `POST /v1/github/webhook` (`workflow_job`, `workflow_run`), authenticated only by the `X-Hub-Signature-256` HMAC. Polling stays the baseline, so the webhook is optional.                                                           |
+| `FLEET_GITHUB_API_URL`                                                | `https://api.github.com`. Set only for GitHub Enterprise Server (`https://ghe.example.com/api/v3`) or a loopback test server. HTTPS, no credentials (HTTP only on loopback).                                                                                        |
+
+The App ID, installation ID, scope, repositories, runner group and policy are not
+environment settings: an administrator saves them on the **Runners** page
+(`PUT /v1/github/integration`).
+
+### One-click issue reporting (optional)
+
+Every failure in the dashboard has a **Report issue** link to a preview page that
+builds a redacted Markdown issue for an AI coding agent (what was gathered, what is
+removed, duplicates and outage behaviour:
+[`packages/fleet-controller/docs/issue-reporting.md`](packages/fleet-controller/docs/issue-reporting.md)).
+Without these variables the page still works: it shows the report with a copy button,
+and a prefilled "new issue" link when the repository is known.
+
+| Variable                      | Meaning                                                                                                                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLEET_ISSUES_REPOSITORY`     | `owner/name` where reports are filed. Alone, it enables the prefilled "new issue" link.                                                                                                                                                     |
+| `FLEET_ISSUES_GITHUB_TOKEN`   | A fine-grained token with **Issues: write** on that repository only. Needs `FLEET_ISSUES_REPOSITORY`. Enables **Create GitHub issue**. Held in memory; never stored, rendered or logged. Rotate it by changing the variable and restarting. |
+| `FLEET_ISSUES_LABELS`         | Comma-separated labels (at most 10). Default `fleet-report`.                                                                                                                                                                                |
+| `FLEET_ISSUES_GITHUB_API_URL` | `https://api.github.com`. Only for GitHub Enterprise Server or a loopback test server; HTTPS, no credentials (HTTP only on loopback).                                                                                                       |
+
+The controller also reports its own version and Git commit. The image build does not
+stamp a commit; set `FLEET_CONTROLLER_COMMIT` (or let the platform provide
+`RAILWAY_GIT_COMMIT_SHA`, `SOURCE_COMMIT`, `GIT_COMMIT` or `GITHUB_SHA`) or reports say
+`unknown`.
 
 Each deployment uses one operator-owned user pool. Fleet connects directly to its
 standard OIDC provider; no shared auth relay, Google account, Vault, or original
@@ -235,6 +274,11 @@ Installer clients select this app with `FLEET_CONTROLLER_URL=https://fleet.examp
 or enter that origin in the wizard. `FLEET_INSTALLER_URL` remains an explicit
 image URL override. The image must be built with your intended `fleetApi.url`;
 entering a download origin never rewrites the image's trusted approval authority.
+
+Set optional `FLEET_HEARTBEAT_RETENTION_DAYS` (whole days, 1 to 365, default 30) to
+choose how long per-node heartbeat history is kept; an invalid value refuses
+startup and names the variable. Events, settings history and the audit log are
+not pruned. See `packages/fleet-controller/docs/observability.md`.
 
 Set optional `FLEET_TARGET_REVISION` to a full 40-character Git commit to display
 which nodes are behind. With it unset, the desired revision is unknown; Fleet

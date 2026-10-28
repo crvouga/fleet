@@ -230,6 +230,8 @@ export interface SettingsRow {
   readonly value: Readonly<Record<string, unknown>>;
   readonly updatedAt: Date;
   readonly updatedBy: string | null;
+  /** Optimistic-concurrency counter: 0 for a scope never written, +1 on every write. */
+  readonly revision: number;
 }
 
 export interface SettingsHistoryRow {

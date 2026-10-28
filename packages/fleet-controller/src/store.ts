@@ -1,4 +1,14 @@
 import type { FleetConfig, Scope } from './config/schema';
+import type { OperationsStore } from './domain/operations-store';
+import type { GrantStore } from './enrollment/store';
+import type {
+  CredentialResult,
+  CredentialStatus,
+} from './domain/credential-rotation';
+import type {
+  DesiredHistoryRow,
+  DesiredSnapshot,
+} from './domain/desired-history';
 import type {
   Approval,
   AuditInput,
@@ -41,6 +51,8 @@ export interface EventQuery {
   readonly severity?: 'warn' | 'error';
   /** Only events with an id below this, for paging. */
   readonly beforeId?: number;
+  /** Only events of these kinds (at most 64), e.g. for incident and restart history. */
+  readonly kinds?: readonly string[];
   readonly limit: number;
 }
 
@@ -55,6 +67,11 @@ export interface AuditQuery {
 
 /** Storage contract shared by the SQLite controller and explicit in-memory fixtures. */
 export interface Store {
+  /** Operations (drain, restart, replace, decommission) and per-node lifecycle intent. */
+  readonly operations: OperationsStore;
+  /** Single-use enrollment grants and the installer-binding secret (src/enrollment). */
+  readonly grants: GrantStore;
+
   /** Rejects when the database cannot be reached. */
   health(): Promise<void>;
 
@@ -73,6 +90,32 @@ export interface Store {
    */
   verifyNodeSecret?(id: string, secretHash: string): Promise<NodeRow | null>;
   listNodes(): Promise<readonly NodeRow[]>;
+
+  /** Credential lifecycle. Never exposes a hash. See docs/access-and-config-safety.md. */
+  credentialStatus(id: string): Promise<CredentialStatus | null>;
+  /** Idempotent: an admin asks the node to rotate its secret on its next heartbeat. */
+  requestCredentialRotation(id: string): Promise<CredentialResult<'revoked'>>;
+  /** The node, authenticated, offers the sha256 of its next secret. */
+  submitNextCredential(
+    id: string,
+    nextHash: string
+  ): Promise<CredentialResult<'revoked' | 'not_requested' | 'same_secret'>>;
+  /** Replaces the secret hash with an unusable value; the node gets 401 at once. */
+  revokeCredential(id: string): Promise<CredentialResult>;
+
+  /**
+   * Appends the desired document to the node's history unless its revision is
+   * already the latest one. True when a row was written. Bounded per node.
+   */
+  recordDesired(
+    nodeId: string,
+    desired: DesiredSnapshot,
+    cause?: string
+  ): Promise<boolean>;
+  desiredHistory(
+    nodeId: string,
+    limit: number
+  ): Promise<readonly DesiredHistoryRow[]>;
   /** Stores the report, a history point, and the events the node sent. */
   recordHeartbeat(
     id: string,
@@ -108,11 +151,17 @@ export interface Store {
 
   getSettings(scope: Scope): Promise<SettingsRow | null>;
   listSettings(): Promise<readonly SettingsRow[]>;
-  /** Replaces the document, appends history, and records who did it. */
+  /**
+   * Replaces the document, appends history, and records who did it. With
+   * `expectedRevision` the write happens only if the stored revision still
+   * equals it (0 for a scope never written); otherwise it throws
+   * SettingsConflictError carrying the current revision.
+   */
   putSettings(
     scope: Scope,
     value: FleetConfig,
-    actor: string
+    actor: string,
+    expectedRevision?: number
   ): Promise<SettingsRow>;
   settingsHistory(
     scope: Scope,
@@ -125,5 +174,10 @@ export interface Store {
     offlineAfterSeconds: number
   ): Promise<readonly NodeRow[]>;
   setOfflineNotified(id: string, at: Date | null): Promise<void>;
+  /**
+   * Atomically marks the outage as announced. True only for the caller that
+   * changed the mark from unset, so overlapping sweeps announce an outage once.
+   */
+  claimOfflineNotice(id: string, at: Date): Promise<boolean>;
   pruneHeartbeats(before: Date): Promise<number>;
 }

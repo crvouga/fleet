@@ -27,6 +27,18 @@ const NAV: readonly NavItem[] = [
   { href: '/pending', label: 'Pending', match: (p) => p === '/pending' },
   { href: '/events', label: 'Events', match: (p) => p.startsWith('/events') },
   {
+    href: '/incidents',
+    label: 'Incidents',
+    match: (p) => p === '/incidents',
+  },
+  { href: '/runners', label: 'Runners', match: (p) => p === '/runners' },
+  {
+    href: '/operations',
+    label: 'Operations',
+    match: (p) => p.startsWith('/operations'),
+  },
+  { href: '/audit', label: 'Audit', match: (p) => p === '/audit' },
+  {
     href: '/settings',
     label: 'Settings',
     match: (p) => p.startsWith('/settings'),

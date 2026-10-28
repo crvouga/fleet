@@ -42,6 +42,7 @@ export function effectiveFor(
   documents: ScopeDocuments
 ): FleetConfig {
   return resolveConfig({
+    defaults: documents.get(`placement:${node.id}`) ?? {},
     fleet: documents.get('fleet') ?? {},
     role: node.role === null ? {} : (documents.get(`role:${node.role}`) ?? {}),
     node: documents.get(`node:${node.id}`) ?? {},

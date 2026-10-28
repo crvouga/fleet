@@ -109,6 +109,22 @@ def slot_problem(paths, run, slots, active):
     return worst or f'FLEET_RUNNERS_STARTING: {active} of {slots} runner services are active.'
 
 
+def controller_owned_issues(paths, run, slots):
+    """GitHub access belongs to the fleet controller: the node has no App ID or key, so it cannot ask
+    GitHub anything. It reports only what it can see; the controller checks that each runner is online
+    at GitHub (the controller's runners page). A refused registration is read from the slot's record."""
+    if not 1 <= slots <= 64:
+        return ['FLEET_GITHUB_SCOPE_INVALID: runner capacity is not valid.']
+    code, states = run([paths.systemctl, 'is-active', *[f'github-runner-slot-{n}.service' for n in range(1, slots + 1)]], 5)
+    active = states.splitlines().count('active')
+    problem = prerequisite_problem(paths, slots, require_success=code == 0 and active == slots)
+    if problem:
+        return [problem]
+    if code or active != slots:
+        return [slot_problem(paths, run, slots, active)]
+    return []
+
+
 def github_issues(paths, identity, run, github, settings):
     if settings.get('runners.enabled') is False or settings.get('runners.cordoned') is True:
         return ['FLEET_RUNNERS_DISABLED: runners are disabled or cordoned in Fleet settings.']
@@ -116,6 +132,8 @@ def github_issues(paths, identity, run, github, settings):
         slots = int((paths.run / 'slot-count').read_text().strip())
     except (OSError, ValueError):
         return ['FLEET_RUNNERS_STARTING: runner capacity has not been determined.']
+    if not str(github.get('appId') or '').isdigit():
+        return controller_owned_issues(paths, run, slots)
     scope = github.get('scope')
     repositories = github.get('repositories') or []
     if not 1 <= slots <= 64 or scope not in ('organization', 'repository') or (scope == 'repository' and not repositories):

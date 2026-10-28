@@ -1,4 +1,4 @@
-import type { Telemetry } from '../telemetry';
+import type { HealthTelemetry, Telemetry } from '../telemetry';
 import type { HeartbeatPoint } from '../types';
 
 /** About one sample/minute over a day, even when an agent reports every 5s. */
@@ -15,11 +15,52 @@ function largest<T>(
   );
 }
 
+function present(value: number | null): number {
+  return value ?? -1;
+}
+
+function compactGpus(sample: Telemetry): HealthTelemetry {
+  const { gpus } = sample;
+  if (!gpus || gpus.status === 'unsupported') return {};
+  const devices = [
+    largest(gpus.devices, (d) => present(d.utilizationPercent)),
+    largest(gpus.devices, (d) => present(d.temperatureCelsius)),
+  ].flatMap((device, index, all) =>
+    device && all.indexOf(device) === index ? [{ ...device }] : []
+  );
+  return devices.length ? { gpus: { ...gpus, devices } } : {};
+}
+
+function compactDisk(sample: Telemetry): HealthTelemetry {
+  const { diskIo } = sample;
+  if (!diskIo || diskIo.status === 'unsupported') return {};
+  const busiest = largest(diskIo.devices, (d) => present(d.busyPercent));
+  return busiest ? { diskIo: { ...diskIo, devices: [{ ...busiest }] } } : {};
+}
+
+/**
+ * The few extra series history keeps: the busiest and hottest GPU, the busiest
+ * disk and the pressure averages. Unsupported families are dropped (absent
+ * means unknown), and the result is itself valid telemetry, so compacting a
+ * stored summary again changes nothing.
+ */
+function compactHealth(sample: Telemetry): HealthTelemetry {
+  const { pressure } = sample;
+  return {
+    ...compactGpus(sample),
+    ...compactDisk(sample),
+    ...(pressure && pressure.status !== 'unsupported'
+      ? { pressure: { ...pressure } }
+      : {}),
+  };
+}
+
 /** History is a chart summary, never a repeated archive of logs/job metadata. */
 export function compactTelemetry(sample: Telemetry): Telemetry {
   const temperature = largest(sample.temperatures, (item) => item.celsius);
   const power = largest(sample.power, (item) => item.watts);
   return {
+    ...compactHealth(sample),
     sampledAt: sample.sampledAt,
     cpuUsagePercent: sample.cpuUsagePercent,
     temperatures: temperature ? [{ ...temperature }] : [],

@@ -4,12 +4,17 @@ import { readOidc } from './auth/oidc-config';
 import type { OidcConfig } from './auth/browser-contract';
 import { readEnrollmentTokens } from './auth/enrollment-config';
 import type { AppEnv } from './deps';
+import { readGithubEnv } from './github/env';
+import { readIssuesEnv } from './issues/env';
+import { readHeartbeatRetentionDays } from './jobs/retention';
 
 /** Everything the process reads from its environment, parsed once at boot. */
 export interface ControllerEnv extends AppEnv {
   readonly oidc?: OidcConfig;
   readonly storage: StorageConfig;
   readonly port: number;
+  /** Heartbeat history retention, whole days 1-365; absent means the default 30. */
+  readonly heartbeatRetentionDays?: number;
 }
 
 /** The environment is wrong. The message names variables, never values. */
@@ -55,6 +60,33 @@ function readSecret(
   return value;
 }
 
+/** FLEET_ADMIN_TOKEN_NEXT is optional: set only while rotating the admin token. */
+function readAdminTokenNext(
+  source: EnvSource,
+  problems: string[]
+): { adminTokenNext?: string } {
+  if (read(source, 'FLEET_ADMIN_TOKEN_NEXT') === null) return {};
+  const next = readSecret(source, 'FLEET_ADMIN_TOKEN_NEXT', problems);
+  if (next === read(source, 'FLEET_ADMIN_TOKEN'))
+    problems.push(
+      'FLEET_ADMIN_TOKEN_NEXT must differ from FLEET_ADMIN_TOKEN; generate a new secret with openssl rand -hex 32'
+    );
+  return { adminTokenNext: next };
+}
+
+/** Optional operator-supplied revision and installer directory. */
+function readDeploymentPaths(source: EnvSource): {
+  targetRevision?: string;
+  installerDir?: string;
+} {
+  const targetRevision = read(source, 'FLEET_TARGET_REVISION');
+  const installerDir = read(source, 'FLEET_INSTALLER_DIR');
+  return {
+    ...(targetRevision ? { targetRevision } : {}),
+    ...(installerDir ? { installerDir } : {}),
+  };
+}
+
 function parsePort(source: EnvSource, problems: string[]): number {
   const raw = read(source, 'PORT');
   if (raw === null) return DEFAULT_PORT;
@@ -74,19 +106,19 @@ export function readControllerEnv(
 ): ControllerEnv {
   const problems: string[] = [];
   const oidc = readOidc(source, problems);
+  const issues = readIssuesEnv(source, problems);
   const env: ControllerEnv = {
     ...(oidc ? { oidc } : {}),
     storage: readStorage(source, problems),
     port: parsePort(source, problems),
+    ...readHeartbeatRetentionDays(source, problems),
 
     adminToken: readSecret(source, 'FLEET_ADMIN_TOKEN', problems),
+    ...readAdminTokenNext(source, problems),
     enrollmentTokens: readEnrollmentTokens(source, problems),
-    ...(read(source, 'FLEET_TARGET_REVISION')
-      ? { targetRevision: read(source, 'FLEET_TARGET_REVISION')! }
-      : {}),
-    ...(read(source, 'FLEET_INSTALLER_DIR')
-      ? { installerDir: read(source, 'FLEET_INSTALLER_DIR')! }
-      : {}),
+    github: readGithubEnv(source, problems),
+    ...(issues === undefined ? {} : { issues }),
+    ...readDeploymentPaths(source),
   };
   if (env.targetRevision && !/^[a-f0-9]{40}$/i.test(env.targetRevision))
     problems.push(

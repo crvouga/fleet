@@ -4,7 +4,6 @@ import {
   Alert,
   Button,
   Group,
-  Modal,
   Paper,
   Stack,
   Text,
@@ -17,6 +16,7 @@ import type { FleetEntry } from '../ui/lib/fleet-data';
 import { useAction } from './action';
 import { ApproveWithRole } from './role-select';
 import { useUnsavedChanges, UnsavedDialog } from './unsaved';
+import { ConfirmDialog } from './typed-confirm';
 export function NodeEdit({
   entry,
   reload,
@@ -93,7 +93,7 @@ export function NodeManage({
   reload: () => void;
 }) {
   const action = useAction(reload);
-  const [confirm, setConfirm] = useState<'retire' | 'delete'>();
+  const [confirm, setConfirm] = useState<Destructive>();
   const { view } = entry;
   return (
     <Paper withBorder p="lg">
@@ -111,7 +111,7 @@ export function NodeManage({
             <Button
               variant="default"
               disabled={action.busy}
-              onClick={() => action.run(`/nodes/${view.id}/reject`, {})}
+              onClick={() => setConfirm('reject')}
             >
               Reject
             </Button>
@@ -150,66 +150,65 @@ export function NodeManage({
   );
 }
 
+type Destructive = 'retire' | 'delete' | 'reject';
+
+const DESTRUCTIVE: Readonly<
+  Record<
+    Destructive,
+    { title: string; button: string; text: (label: string) => string }
+  >
+> = {
+  retire: {
+    title: 'Retire this node?',
+    button: 'Retire node',
+    text: (label) =>
+      `Revoke access for ${label} and stop offline notices? To drain it first, use Decommission.`,
+  },
+  delete: {
+    title: 'Delete this node and history?',
+    button: 'Delete node and history',
+    text: (label) =>
+      `Permanently delete ${label} and its heartbeat history? This cannot be undone.`,
+  },
+  reject: {
+    title: 'Reject this machine?',
+    button: 'Reject machine',
+    text: (label) =>
+      `Refuse ${label}. It is told to back off until a person approves it again.`,
+  },
+};
+
 function ManageDialog({
   confirm,
   close,
   view,
   action,
 }: {
-  confirm: 'retire' | 'delete' | undefined;
+  confirm: Destructive | undefined;
   close: () => void;
   view: FleetEntry['view'];
   action: ReturnType<typeof useAction>;
 }) {
+  const meta = DESTRUCTIVE[confirm ?? 'retire'];
   return (
-    <Modal
+    <ConfirmDialog
       opened={!!confirm}
-      onClose={() => {
-        if (!action.busy) close();
+      title={meta.title}
+      expected={view.label}
+      confirmLabel={meta.button}
+      busy={action.busy}
+      error={action.error}
+      onClose={close}
+      onConfirm={async (typed) => {
+        if (
+          confirm &&
+          (await action.run(`/nodes/${view.id}/${confirm}`, { confirm: typed }))
+        )
+          close();
       }}
-      title={
-        confirm === 'delete'
-          ? 'Delete this node and history?'
-          : 'Retire this node?'
-      }
-      closeButtonProps={{ 'aria-label': 'Cancel action' }}
-      closeOnClickOutside={!action.busy}
-      closeOnEscape={!action.busy}
-      centered
     >
-      <Stack>
-        <Text size="sm">
-          {confirm === 'delete'
-            ? `Permanently delete ${view.label} and its heartbeat history? This cannot be undone.`
-            : `Revoke access for ${view.label} and stop offline notices?`}
-        </Text>
-        <ErrorNotice message={action.error} />
-        <Group justify="flex-end">
-          <Button
-            variant="default"
-            disabled={action.busy}
-            onClick={() => close()}
-          >
-            Cancel
-          </Button>
-          <Button
-            color="red"
-            loading={action.busy}
-            onClick={async () => {
-              if (
-                confirm &&
-                (await action.run(`/nodes/${view.id}/${confirm}`, {
-                  confirm: 'yes',
-                }))
-              )
-                close();
-            }}
-          >
-            {confirm === 'delete' ? 'Delete node and history' : 'Retire node'}
-          </Button>
-        </Group>
-      </Stack>
-    </Modal>
+      <Text size="sm">{meta.text(view.label)}</Text>
+    </ConfirmDialog>
   );
 }
 

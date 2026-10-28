@@ -17,7 +17,10 @@ export const createDefaultAuth: AuthFactory = (context) => {
   return {
     ...(browserAuth ? { browserAuth } : {}),
     auth: new FleetAdminAuth({
-      env: { adminToken: context.adminToken },
+      env: {
+        adminToken: context.adminToken,
+        adminTokenNext: context.adminTokenNext,
+      },
       ...(browserAuth && context.oidc
         ? { browser: browserAuth, publicOrigin: context.oidc.origin }
         : {}),

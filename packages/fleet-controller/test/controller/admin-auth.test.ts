@@ -7,14 +7,15 @@ import { ADMIN_TOKEN, CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { nodeIdOf } from '../support/fixtures';
 
+const CONFIRM = { confirm: `ci-${nodeIdOf(1).slice(0, 4)}` };
 const ADMIN_ROUTES: readonly (readonly [string, string, unknown?])[] = [
   ['GET', '/v1/nodes'],
   ['GET', `/v1/nodes/${nodeIdOf(1)}`],
   ['PATCH', `/v1/nodes/${nodeIdOf(1)}`, { note: 'x' }],
   ['POST', `/v1/nodes/${nodeIdOf(1)}/approve`],
-  ['POST', `/v1/nodes/${nodeIdOf(1)}/reject`],
-  ['POST', `/v1/nodes/${nodeIdOf(1)}/retire`],
-  ['DELETE', `/v1/nodes/${nodeIdOf(1)}`],
+  ['POST', `/v1/nodes/${nodeIdOf(1)}/reject`, CONFIRM],
+  ['POST', `/v1/nodes/${nodeIdOf(1)}/retire`, CONFIRM],
+  ['DELETE', `/v1/nodes/${nodeIdOf(1)}`, CONFIRM],
   ['GET', '/v1/summary'],
   ['GET', '/v1/events'],
   ['GET', '/v1/settings'],
@@ -163,8 +164,14 @@ describeController('admin authentication', (ctx) => {
         {}
       );
       expect((await write(same)).status).toBe(200);
+      // The scope now exists, so the next write names the revision it read.
       expect(
-        (await write({ Referer: 'http://localhost/settings' })).status
+        (
+          await write({
+            Referer: 'http://localhost/settings',
+            'If-Match': '1',
+          })
+        ).status
       ).toBe(200);
     });
 
@@ -194,7 +201,7 @@ describeController('admin authentication', (ctx) => {
       });
       await h.call('PUT', '/v1/settings/fleet', {
         headers: { Cookie: cookie, ...same },
-        json: { sync: { paused: true } },
+        json: { disk: { alertPercent: 80 } },
       });
       expect(
         (await h.admin('GET', `/v1/nodes/${nodeIdOf(1)}`)).body.node.approvedBy

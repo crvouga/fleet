@@ -8,6 +8,7 @@ staged node is ready. The installer never compares or chooses a role.
 """
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,37 @@ def latest_progress(path):
         return None
 
 
+PHASES = ('network', 'approval', 'checks', 'disk', 'erase', 'install')
+CODED = re.compile(r'^(FLEET_[A-Z_]+): ')
+STAMPED = re.compile(r'^\d{4}-\d\d-\d\dT[\d:]+Z ')
+
+
+def current_phase(path):
+    """The installer step last logged (`step <name>`, written by fleet-install.sh), else None."""
+    try:
+        with Path(path).open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 65536))
+            tail = stream.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+    found = re.findall(r'^\S+ step (' + '|'.join(PHASES) + r')\s*$', tail, re.M)
+    return found[-1] if found else None
+
+
+def tag(message, phase):
+    """`FLEET_X: text` becomes `FLEET_X: phase=checks text`. The controller shows the phase and an
+    actionable next step; only the installer ever writes `phase=`. Bounded to 500 characters."""
+    phase = phase if phase in PHASES else 'checks'
+    match = CODED.match(message)
+    if not match:
+        message = 'FLEET_INSTALLING: ' + message
+        match = CODED.match(message)
+    if message[match.end():].startswith('phase='):
+        return message[:500]  # the shell already named the step that failed
+    return (match.group(0) + 'phase=' + phase + ' ' + message[match.end():])[:500]
+
+
 def read_token(token_file):
     token_file = Path(token_file)
     return token_file.read_text()[:TOKEN_MAX + 2].strip() if token_file.is_file() else ''
@@ -64,6 +96,11 @@ class BootstrapReporter:
         self.worker = agent.Agent(self.paths, metadata['apiUrl'], http=http, log=lambda _: None)
         self.identity = identity
         self.started = False
+        self.phase = 'checks'  # fleet-install.sh runs the preflight at step "checks"
+
+    def redacted(self, message):
+        """Reports are best effort, bounded and never carry a credential."""
+        return agent.redact(str(message), [value for value in (self.worker.secret, self.token) if value])
 
     def bearer(self):
         return self.identity['id'] + '.' + self.worker.secret
@@ -111,11 +148,11 @@ class BootstrapReporter:
         self.started = True
         self.report('FLEET_INSTALLING: integration checks are running before any disk changes.')
 
-    def report(self, message, failed=False):
+    def report(self, message, failed=False, phase=None):
         if not self.started:
             return
         identity = self.identity
-        message = message[:500]
+        message = tag(self.redacted(message), phase or self.phase)
         body = {
             'v': 2, 'nodeId': identity['id'], 'role': 'base', 'closure': 'base', 'hostname': identity['hostname'],
             'capabilities': [], 'revision': None, 'bootId': None, 'uptimeSeconds': None,
@@ -159,8 +196,8 @@ def main(args):
         log = Path(os.environ.get('FLEET_INSTALL_LOG', '/run/fleet-install.log'))
         while True:
             os.kill(pid, 0)
-            detail = agent.redact(latest_progress(log) or message, [current, reporter.token])
-            reporter.report('FLEET_INSTALLING: ' + detail)
+            detail = agent.redact(STAMPED.sub('', latest_progress(log) or message), [current, reporter.token])
+            reporter.report('FLEET_INSTALLING: ' + detail, phase=current_phase(log))
             time.sleep(20)
     except Exception:
         return 1

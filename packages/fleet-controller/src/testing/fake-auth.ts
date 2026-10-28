@@ -1,6 +1,7 @@
 import type { Context } from 'hono';
 import { getCookie } from 'hono/cookie';
 
+import type { AccessRole } from '../auth/roles';
 import type { AdminAuth } from '../deps';
 
 const COOKIE = 'fleet_session';
@@ -10,14 +11,21 @@ export interface FakeAuthOptions {
   readonly alwaysSignedInAs?: string;
 }
 
-/** Cookie `fleet_session=ok:<name>` signs a person in. */
+/** Cookie `fleet_session=ok:<name>` signs in an admin; `viewer:<name>` signs in a read-only viewer. */
 export function createFakeAuth(options: FakeAuthOptions = {}): AdminAuth {
   return {
     async actor(c: Context): Promise<string | null> {
       if (options.alwaysSignedInAs !== undefined)
         return options.alwaysSignedInAs;
       const cookie = getCookie(c, COOKIE);
-      return cookie?.startsWith('ok:') === true ? cookie.slice(3) : null;
+      if (cookie?.startsWith('ok:') === true) return cookie.slice(3);
+      return cookie?.startsWith('viewer:') === true ? cookie.slice(7) : null;
+    },
+    async role(c: Context): Promise<AccessRole | null> {
+      if (options.alwaysSignedInAs !== undefined) return 'admin';
+      const cookie = getCookie(c, COOKIE);
+      if (cookie?.startsWith('ok:') === true) return 'admin';
+      return cookie?.startsWith('viewer:') === true ? 'viewer' : null;
     },
     logoutCookie(): string {
       return `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;

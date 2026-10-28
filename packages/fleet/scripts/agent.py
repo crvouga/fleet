@@ -44,6 +44,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import cattle  # noqa: E402  (sibling module; the Nix derivation puts all three scripts together)
+import credential_rotation  # noqa: E402
 import fleetconf  # noqa: E402
 import node_readiness  # noqa: E402
 import recovery  # noqa: E402
@@ -52,6 +53,7 @@ import telemetry  # noqa: E402
 VERSION = "2"
 PROTOCOL_VERSION = 2
 DEFAULT_INTERVAL = 60
+MAINTENANCE_REASON = "maintenance"
 BACKOFF_CAP = 900
 REJECTED_DELAY = 3600
 HTTP_TIMEOUT = 15
@@ -348,6 +350,7 @@ class Agent:
         self.settings = {}
         self.problems = []
         self.last_drain_attempt = None
+        self.maintenance_drain_at = None
         self.readiness = None
         self.readiness_at = None
         self.outbox_sent = []
@@ -847,8 +850,12 @@ class Agent:
 
     def send_heartbeat(self, identity):
         events, update = self.collect_events(identity)
+        self.telemetry.consecutive_failures = self.failures
         body = self.heartbeat_body(identity, events)
+        started = self.clock.monotonic()
         status, document = self.api("POST", "/v1/heartbeat", body, bearer=f"{identity['id']}.{self.secret}")
+        if status == 200:  # reported with the next heartbeat as controllerLatencyMs
+            self.telemetry.round_trip_ms = (self.clock.monotonic() - started) * 1000
         return status, document, update
 
     # desired state --------------------------------------------------------------
@@ -910,6 +917,7 @@ class Agent:
         """Make this node's runtime match the settings. Each step stands alone: one failing never blocks the rest."""
         self.step("write applied config", self.write_applied, flat)
         self.converge(flat)
+        self.step("maintenance restart", self.apply_restart, flat)
         try:
             node_conf = cattle.load_conf(str(self.paths.etc / "node.conf"))
             role = node_conf["role"]
@@ -934,6 +942,7 @@ class Agent:
         busy when the capacity went down is stopped once it is idle.
         """
         self.converge(self.settings)
+        self.step("maintenance restart", self.apply_restart, self.settings)
         node_conf = self.safe_node_conf()
         if node_conf.get("role") != "ci":
             return
@@ -1066,6 +1075,95 @@ class Agent:
             self.note_recovery("gate-reopened", "warn", f"gate:orphan:{int(self.clock.time()) // 3600}",
                                "Runner admission was closed with no remaining reason (for example a cordon lifted "
                                "while its drain was starting); it was reopened automatically.")
+
+    # maintenance restart ------------------------------------------------------
+
+    @property
+    def restart_marker(self):
+        """The maintenance.restartAfter value this node already acted on. Identity data: it survives the reboot."""
+        return self.paths.state / "restart-handled"
+
+    def boot_started(self):
+        """When this boot began, by the node's own clock; None when /proc/uptime cannot be read."""
+        uptime = (read_text(self.paths.proc / "uptime", 128) or "").split()
+        try:
+            return self.clock.time() - float(uptime[0])
+        except (IndexError, ValueError):
+            return None
+
+    def restart_offset(self, after, flat):
+        """A stable per-node delay after the request, so a fleet-wide request does not reboot every node at once.
+
+        Only a reboot.delayMaxSeconds that Fleet set applies: the image default staggers
+        updates, while a person pressing Restart on one node expects it to start now."""
+        window = flat.get("reboot.delayMaxSeconds")
+        if type(window) is not int or window <= 0:
+            return 0
+        machine = read_kv(self.paths.run / "node").get("machine_id", "")
+        return int(hashlib.sha256(f"{machine}:{after}".encode()).hexdigest()[:8], 16) % (window + 1)
+
+    def jobs_running(self):
+        return any(self.paths.run.glob("*/busy"))
+
+    def release_maintenance_drain(self):
+        """Nothing wants this node restarted (any more): do not keep its runner admission closed for it."""
+        reason = self.paths.run / "drain-reasons" / MAINTENANCE_REASON
+        if reason.exists():
+            reason.unlink(missing_ok=True)
+            self.maintenance_drain_at = None
+            self.log("the maintenance restart is no longer requested; releasing its drain")
+
+    def restart_due(self, flat):
+        """maintenance.restartAfter is a request to restart once: due while this boot began before it and it was not handled."""
+        after = flat.get("maintenance.restartAfter")
+        started = self.boot_started()
+        if type(after) is not int or after <= 0 or started is None or started >= after:
+            return None
+        handled = (read_text(self.restart_marker, 64) or "").strip()
+        return None if handled == str(after) else after
+
+    def apply_restart(self, flat):
+        """Drain, wait until idle, then reboot once (maintenance.restartAfter).
+
+        Level-triggered and idempotent: every cycle re-derives the same answer from the
+        requested time, this boot's start and the durable marker, so a missed report, a
+        crash or a clock that is wrong at boot cannot repeat the reboot. A job is never
+        interrupted: a CI node first closes runner admission and waits for its slots to
+        finish. reboot.enabled=false is honoured: nothing is drained or rebooted."""
+        after = self.restart_due(flat)
+        if after is None or flat.get("reboot.enabled") is False:
+            self.release_maintenance_drain()
+            return
+        if (self.paths.run / "update-draining").exists():
+            return  # an update holds admission and owns the next reboot
+        if self.safe_node_conf().get("role") == "ci" and not self.maintenance_idle():
+            return
+        if self.clock.time() < after + self.restart_offset(after, flat):
+            return
+        self.reboot_for_maintenance(after)
+
+    def maintenance_idle(self):
+        """True once runner admission is closed by this restart and no job is running."""
+        closed = (self.paths.run / "draining").exists()
+        held = (self.paths.run / "drain-reasons" / MAINTENANCE_REASON).exists()
+        if not (closed and held):
+            due = self.maintenance_drain_at is None or self.clock.monotonic() - self.maintenance_drain_at >= DRAIN_RETRY_SECONDS
+            if due:
+                self.maintenance_drain_at = self.clock.monotonic()
+                if self.launch("fleet-maintenance-drain", [self.paths.drain], {"FLEET_DRAIN_REASON": MAINTENANCE_REASON}):
+                    self.log("restart requested from Fleet; draining runners first")
+            return False
+        return not self.jobs_running()
+
+    def reboot_for_maintenance(self, after):
+        fleetconf.write_atomic(str(self.restart_marker), f"{after}\n", 0o600)
+        self.note_recovery("maintenance-restart", "info", f"restart:{after}",
+                           "The node restarts because a restart was requested from Fleet.")
+        self.log("maintenance restart: rebooting now")
+        code, _ = self.command([self.paths.systemctl, "reboot"], 30)
+        if code != 0:
+            self.restart_marker.unlink(missing_ok=True)
+            self.log("could not start the reboot; trying again at the next cycle")
 
     def apply_capacity(self, outcome):
         pending = (self.paths.run / "capacity-pending").exists()
@@ -1206,6 +1304,8 @@ class Agent:
         self.problems = []
         if "desired" in document:
             self.accept_desired(document["desired"])
+        # An administrator may have asked this node to rotate its secret.
+        credential_rotation.step(self, document, identity)
         delay = self.jitter(self.interval())
         self.record_status("ok", delay)
         return True, delay

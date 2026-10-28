@@ -215,6 +215,7 @@ export function toSettingsRow(row: Row): SettingsRow {
     value: jsonObject(row, 'value'),
     updatedAt: dateOf(row, 'updated_at'),
     updatedBy: textOrNull(row, 'updated_by'),
+    revision: numberOf(row, 'revision'),
   };
 }
 

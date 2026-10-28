@@ -5,6 +5,7 @@ import { summarize } from '../domain/summary';
 import type { AppDeps } from '../deps';
 import type { EventQuery } from '../store';
 
+import { mountAdminIncidents } from './admin-incidents';
 import { adminRoute } from './guards';
 import { controllerError } from './http';
 import { loadViews } from './node-views';
@@ -71,6 +72,7 @@ export function parseEventQuery(c: Context): Parsed {
 }
 
 export function mountAdminEvents(app: Hono, deps: AppDeps): void {
+  mountAdminIncidents(app, deps);
   app.get(
     '/v1/events',
     adminRoute(deps, async (c) => {

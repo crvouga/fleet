@@ -5,6 +5,7 @@ import type { NodeView } from '../../src/types';
 import { ADMIN_TOKEN, CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { heartbeatBody, nodeIdOf, T0 } from '../support/fixtures';
+import { adminConfirmed } from '../support/confirm';
 
 describeController('GET /v1/events', (ctx) => {
   const seed = async (count: number) => {
@@ -174,6 +175,7 @@ describeController('settings endpoints', (ctx) => {
         value: {},
         updatedAt: null,
         updatedBy: null,
+        revision: 0,
       });
     }
   });
@@ -468,6 +470,27 @@ describeController('GET /metrics', (ctx) => {
       'fleet_node_network_received_bytes',
       'fleet_node_network_transmitted_bytes',
       'fleet_node_swap_bytes',
+      'fleet_node_metric_provenance',
+      'fleet_node_gpu_utilization_percent',
+      'fleet_node_gpu_memory_bytes',
+      'fleet_node_gpu_temperature_celsius',
+      'fleet_node_gpu_power_watts',
+      'fleet_node_disk_io_bytes_per_second',
+      'fleet_node_disk_io_ops_per_second',
+      'fleet_node_disk_busy_percent',
+      'fleet_node_disk_health_state',
+      'fleet_node_disk_temperature_celsius',
+      'fleet_node_disk_wear_percent',
+      'fleet_node_cpu_frequency_mhz',
+      'fleet_node_cpu_throttled',
+      'fleet_node_cpu_throttle_events',
+      'fleet_node_pressure_percent',
+      'fleet_node_network_errors_since_last_sample',
+      'fleet_node_network_dropped_since_last_sample',
+      'fleet_node_controller_latency_ms',
+      'fleet_node_heartbeat_consecutive_failures',
+      'fleet_node_uptime_seconds',
+      'fleet_node_restarts_observed',
     ]);
   });
 
@@ -477,8 +500,8 @@ describeController('GET /metrics', (ctx) => {
     await h.register(2, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.asNode(1, 'POST', '/v1/heartbeat', heartbeatBody(1));
     await h.asNode(2, 'POST', '/v1/heartbeat', heartbeatBody(2));
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/retire`);
-    await h.admin('POST', `/v1/nodes/${nodeIdOf(2)}/reject`);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(1)}/retire`, 1);
+    await adminConfirmed(h, 'POST', `/v1/nodes/${nodeIdOf(2)}/reject`, 2);
     const text = (await h.admin('GET', '/metrics')).text;
     expect(text).not.toContain('fleet_node_up{');
     expect(text).not.toContain('fleet_node_last_seen_seconds{');
