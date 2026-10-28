@@ -161,8 +161,8 @@ graceful shutdown, restart persistence, fresh-container restore (configured with
 the generic `S3_*` names), an overlapping rolling hand-over, denied writes and
 refusal to start without configuration. Trusted main pushes call workspace's
 reusable publisher for `ghcr.io/crvouga/chrisvouga-fleet-api:<commit-sha>` and
-`:latest`. Deployment notification is disabled until the workspace inventory and
-Vault bindings are ready. Hosting, secrets and DNS remain OpenTofu-owned in the
+`:latest`. Successful publication dispatches that commit to workspace's managed
+`fleet-api` service. Hosting, secrets and DNS remain OpenTofu-owned in the
 operator's platform repository. Image publication does not establish live
 deployment, real R2 permissions, replica freshness or OIDC acceptance.
 

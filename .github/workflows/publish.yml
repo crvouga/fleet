@@ -49,5 +49,4 @@ jobs:
       image_owner: crvouga
       image_prefix: chrisvouga
       infra_github_repo: crvouga/workspace
-      # Enable dispatch after the hosting inventory and Vault bindings land.
-      notify_deploy: false
+      notify_deploy: true
