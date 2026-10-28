@@ -2,13 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { Hono } from 'hono';
 
 import { FleetAdminAuth, TOKEN_ACTOR } from '../../src/auth/admin-auth';
-import { ADMIN_TOKEN, silent } from '../support/controller';
+import { ADMIN_TOKEN } from '../support/controller';
 
 const auth = new FleetAdminAuth({
   env: { adminToken: ADMIN_TOKEN },
-  now: () => new Date(),
-  fetch,
-  log: silent,
 });
 
 /** A route that reports what the auth object decided about the request. */

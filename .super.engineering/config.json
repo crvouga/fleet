@@ -1,0 +1,34 @@
+{
+  "setup": [
+    "bun run local:setup"
+  ],
+  "run": [
+    {
+      "name": "Fleet local",
+      "commands": [
+        "bun run local"
+      ],
+      "stop_commands": [
+        "bun run local:stop"
+      ],
+      "default": true
+    },
+    {
+      "name": "Check",
+      "commands": [
+        "bun run check"
+      ],
+      "default": false
+    },
+    {
+      "name": "Local doctor",
+      "commands": [
+        "bun run local:doctor"
+      ],
+      "default": false
+    }
+  ],
+  "teardown": [
+    "bun run local:stop"
+  ]
+}

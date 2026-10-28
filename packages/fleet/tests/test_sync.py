@@ -158,6 +158,12 @@ class SyncTests(unittest.TestCase):
             "FLEETCONF": str(self.bin / "fleetconf"),
             "FLEET_CONFIG": str(self.root / "applied-config.json"),
             "FAIL_ID": "",
+            # The assigned target, the node's age recipient, the verdict and the
+            # running system's node.conf (absent by default: sync.env decides).
+            "TARGET": str(self.root / "target"),
+            "AGE_PUB": str(self.root / "age.pub"),
+            "RECONCILE": str(self.root / "reconcile.json"),
+            "NODE_CONF": str(self.root / "node.conf"),
         })
         write_executable(self.bin / "fleetconf", f"""\
             #!/bin/bash
@@ -446,7 +452,7 @@ class SyncTests(unittest.TestCase):
         self.assertIn("no previous generation", result.stderr)
         self.assertIn("github unreachable", (self.root / "health-failure").read_text())
 
-    def test_default_probe_rolls_back_when_github_is_down(self):
+    def test_default_probe_rolls_back_when_configured_cache_is_down(self):
         self.commit("good")
         good = self.run_sync()
         self.assertEqual(good.returncode, 0, good.stderr)
@@ -476,7 +482,8 @@ class SyncTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.profile.resolve(), kept)
         urls = (self.root / "curl-urls").read_text()
-        self.assertIn("https://github.com", urls)
+        self.assertNotIn("https://github.com", urls)
+        self.assertIn("nix-cache-info", urls)
         self.assertNotIn("reboot", self.actions())
 
     def test_default_probe_fails_when_the_sync_timer_is_failed(self):
@@ -691,6 +698,184 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.state / "quarantine.json").exists())
         self.assertTrue((self.state / "pending-boot").exists(), "boot-health clears it once the boot is blessed")
+
+    # ---- desired state: target, gates and the convergence verdict -------------
+
+    RECIPIENT = "age1" + "q" * 58
+
+    def verdict(self):
+        return json.loads((self.root / "reconcile.json").read_text())
+
+    def target(self, role, closure):
+        (self.root / "target").write_text(f"role={role}\nclosure={closure}\n")
+
+    def built_attr(self):
+        line = self.nix_log.read_text().splitlines()[-1]
+        return line.split("#nixosConfigurations.", 1)[1].split(".", 1)[0]
+
+    def test_the_target_overrides_the_image_role_and_converges(self):
+        self.commit_registry(lambda registry: None)
+        self.target("ci", "ci-gpu")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.built_attr(), "ci-gpu")
+        self.assertEqual(self.actions(), ["switch"])
+        verdict = self.verdict()
+        revision = self._git(["-C", str(self.origin), "rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual((verdict["phase"], verdict["issues"], verdict["role"], verdict["closure"], verdict["revision"]),
+                         ("converged", [], "ci", "ci-gpu", revision))
+        self.assertRegex(verdict["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        again = self.run_sync()
+        self.assertIn("already running revision", again.stdout)
+        self.assertEqual(self.verdict()["phase"], "converged")
+
+    def test_a_malformed_target_is_ignored_with_a_reason(self):
+        self.commit_registry(lambda registry: None)
+        for text in ("role=CI\nclosure=ci\n", "role=ci\nclosure=../etc\n", "role=ci\n", "role=ci\nclosure=ci\nextra=1\n",
+                     "role=$(reboot)\nclosure=ci\n"):
+            with self.subTest(text=text):
+                (self.root / "target").write_text(text)
+                result = self.run_sync()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("sync: ignoring", result.stderr)
+                self.assertEqual(self.built_attr(), "ci")
+                self.assertEqual(self.verdict()["closure"], "ci")
+        self.assertNotIn("reboot", self.actions())
+
+    def test_a_target_the_registry_does_not_define_is_refused(self):
+        self.commit_registry(lambda registry: None)
+        self.target("web", "web")
+        result = self.run_sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.nix_log.exists())
+        verdict = self.verdict()
+        self.assertEqual(verdict["phase"], "blocked")
+        self.assertTrue(verdict["issues"][0].startswith("FLEET_ROLE_RETIRED: roles.json retired role web"), verdict)
+
+    def secrets(self, body):
+        (self.flake / "secrets").mkdir(exist_ok=True)
+        (self.flake / "secrets" / "fleet.yaml").write_text(body)
+        self._git(["-C", str(self.origin), "add", "packages"])
+        self._git(["-C", str(self.origin), "commit", "-m", "secrets"])
+
+    def test_the_secrets_gate_blocks_until_this_node_is_a_recipient(self):
+        self.commit_registry(lambda registry: None)
+        self.secrets("sops:\n  age:\n    - recipient: age1someoneelse\n")
+        (self.root / "age.pub").write_text(self.RECIPIENT + "\n")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.nix_log.exists())
+        self.assertFalse(self.profile.exists())
+        self.assertFalse((self.state / "last-success").exists())
+        short = self._git(["-C", str(self.origin), "rev-parse", "--short=7", "HEAD"]).stdout.strip()
+        self.assertEqual(self.verdict()["phase"], "blocked")
+        self.assertEqual(self.verdict()["issues"], [
+            f"FLEET_SECRETS_RECIPIENT_MISSING: {self.RECIPIENT} is not a recipient of secrets/fleet.yaml at {short}. "
+            "Re-encrypt it for this node (GET /v1/recipients) and merge."])
+        # The operator re-encrypts and merges: the next poll converges by itself.
+        self.secrets(f"sops:\n  age:\n    - recipient: {self.RECIPIENT}\n")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.actions(), ["switch"])
+        self.assertEqual(self.verdict()["phase"], "converged")
+
+    def test_the_secrets_gate_does_not_apply_without_a_file_or_an_identity(self):
+        self.commit_registry(lambda registry: None)
+        (self.root / "age.pub").write_text(self.RECIPIENT + "\n")
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.secrets("sops: {}\n")
+        (self.root / "age.pub").unlink()
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.assertEqual(self.actions(), ["switch", "switch"])
+
+    def test_a_private_repository_without_its_credential_is_blocked_before_fetching(self):
+        self.commit_registry(lambda registry: None)
+        token = self.root / "git-read-token"
+        env = (self.root / "sync.env").read_text().replace("GIT_TOKEN=", f"GIT_TOKEN={token}")
+        (self.root / "sync.env").write_text(env + "REPO_AUTH=token\n")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.nix_log.exists())
+        self.assertEqual(self.verdict()["phase"], "blocked")
+        self.assertTrue(self.verdict()["issues"][0].startswith(
+            f"FLEET_GIT_CREDENTIAL_MISSING: this fleet follows a private repository (repo.auth = token) and {token} is missing."))
+        self.assertFalse((self.state / "last-success").exists())
+        token.write_text("not-used-by-a-file-repository\n")
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.assertEqual(self.verdict()["phase"], "converged")
+
+    def test_a_rotated_identity_is_promoted_only_once_the_role_secrets_list_it(self):
+        self.commit_registry(lambda registry: None)
+        upcoming = "age1" + "p" * 58
+        self.secrets(f"sops:\n  age:\n    - recipient: {self.RECIPIENT}\n")
+        (self.root / "age.pub").write_text(self.RECIPIENT + "\n")
+        (self.root / "age.key").write_text("AGE-SECRET-KEY-1CURRENT\n")
+        (self.root / "age.next.pub").write_text(upcoming + "\n")
+        (self.root / "age.next.key").write_text("AGE-SECRET-KEY-1NEXT\n")
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.assertEqual((self.root / "age.pub").read_text().strip(), self.RECIPIENT, "not listed yet: keep the current one")
+        self.assertTrue((self.root / "age.next.key").exists())
+        self.secrets(f"sops:\n  age:\n    - recipient: {self.RECIPIENT}\n    - recipient: {upcoming}\n")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "age.pub").read_text().strip(), upcoming)
+        self.assertEqual((self.root / "age.key").read_text(), "AGE-SECRET-KEY-1NEXT\n")
+        self.assertFalse((self.root / "age.next.key").exists())
+        self.assertTrue((self.root / "age.created").read_text().strip().isdigit())
+        self.assertEqual(self.actions()[-1], "switch")
+        self.assertEqual(self.verdict()["phase"], "converged")
+
+    def test_a_role_change_drains_boots_and_reboots_like_a_kernel_change(self):
+        self.commit_registry(lambda registry: None)
+        (self.root / "node.conf").write_text("role=ci\nflake_attr=ci\nslot_max=8\n")
+        self.target("devbox", "devbox")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.built_attr(), "devbox")
+        self.assertEqual(self.actions(), ["drain", "boot", "reboot"], "never switched live")
+        self.assertIn("differs from the running role ci", result.stderr)
+        self.assertEqual((self.verdict()["phase"], self.verdict()["role"]), ("progressing", "devbox"))
+        self.assertIn("boot_id=", (self.state / "pending-boot").read_text())
+
+    def test_a_role_change_with_reboots_disabled_is_installed_for_the_next_boot_only(self):
+        self.commit_registry(lambda registry: None)
+        self.configure({"reboot": {"enabled": False}})
+        self.target("base", "base")
+        result = self.run_sync()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.built_attr(), "base")
+        self.assertEqual(self.actions(), ["boot"], "no drain, no live switch, no reboot")
+        self.assertIn("reason=role-change", (self.root / "reboot-pending").read_text())
+        verdict = self.verdict()
+        self.assertEqual(verdict["phase"], "progressing")
+        self.assertTrue(verdict["issues"][0].startswith("FLEET_REBOOT_PENDING: role base (base)"), verdict)
+
+    def test_the_verdict_is_written_on_failure_pause_and_rollback(self):
+        self.commit("NOT_IN_CACHE", "")
+        self.assertNotEqual(self.run_sync().returncode, 0)
+        verdict = self.verdict()
+        self.assertEqual(verdict["phase"], "blocked")
+        self.assertTrue(verdict["issues"][0].startswith("FLEET_UPDATE_FAILED: the requested revision could not be built"), verdict)
+        (self.flake / "NOT_IN_CACHE").unlink()
+        self.commit("good")
+        self.assertEqual(self.run_sync().returncode, 0)
+        (self.root / "fail-health").write_text("1")
+        self.commit("bad")
+        self.assertNotEqual(self.run_sync().returncode, 0)
+        verdict = self.verdict()
+        self.assertEqual(verdict["phase"], "blocked")
+        self.assertTrue(verdict["issues"][0].startswith("FLEET_UPDATE_ROLLED_BACK:"), verdict)
+        self.assertIn("github unreachable", verdict["issues"][0])
+        self.configure({"sync": {"paused": True}})
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.assertEqual(self.verdict()["phase"], "blocked")
+        self.assertTrue(self.verdict()["issues"][0].startswith("FLEET_UPDATES_PAUSED:"))
+
+    def test_an_unconfigured_repository_is_reported_as_blocked(self):
+        self.write_env(cache="https://cache.invalid/fleet", delay="0", url="https://github.com/TODO/workspace.git")
+        self.assertEqual(self.run_sync().returncode, 0)
+        self.assertEqual(self.verdict()["phase"], "blocked")
+        self.assertTrue(self.verdict()["issues"][0].startswith("FLEET_REPOSITORY_UNCONFIGURED:"))
 
     def seed_booted(self):
         kernel = self.root / "old-kernel"

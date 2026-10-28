@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { CI_ROLE_TOKEN } from '../support/controller';
+import {
+  CI_ENROLLMENT_TOKEN,
+  PLAIN_ENROLLMENT_TOKEN,
+} from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { nodeIdOf, secretOf, sha256, heartbeatBody } from '../support/fixtures';
 
@@ -12,11 +15,12 @@ describeController('POST /v1/nodes/register', (ctx) => {
     expect(reply.body).toEqual({
       status: 'pending',
       heartbeatIntervalSeconds: 60,
+      role: null,
     });
     expect(await store.findNode(nodeIdOf(1))).toMatchObject({
       approval: 'pending',
       enrolledVia: 'hello',
-      role: 'ci',
+      role: null,
       hostname: `ci-${nodeIdOf(1).slice(0, 4)}`,
     });
     const stored = await db.sql`select secret_hash from nodes`;
@@ -25,44 +29,91 @@ describeController('POST /v1/nodes/register', (ctx) => {
 
   test('the secret itself is stored nowhere, not in nodes, events or the response', async () => {
     const { h, db } = ctx();
-    const reply = await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    const reply = await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     expect(reply.text).not.toContain(secretOf(1));
     const dump = JSON.stringify({
       nodes: await db.sql`select * from nodes`,
       events: await db.sql`select * from events`,
     });
     expect(dump).not.toContain(secretOf(1));
-    expect(dump).not.toContain(CI_ROLE_TOKEN);
+    expect(dump).not.toContain(CI_ENROLLMENT_TOKEN);
   });
 
-  test('the role token approves immediately', async () => {
+  test('an enrollment token approves immediately and assigns its role', async () => {
     const { h, store } = ctx();
-    const reply = await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    const reply = await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     expect(reply.status).toBe(201);
-    expect(reply.body.status).toBe('approved');
+    expect(reply.body).toMatchObject({ status: 'approved', role: 'ci' });
     expect(await store.findNode(nodeIdOf(1))).toMatchObject({
       approval: 'approved',
-      enrolledVia: 'role-token',
-      approvedBy: 'role-token',
+      role: 'ci',
+      enrolledVia: 'enrollment-token',
+      approvedBy: 'enrollment-token',
+    });
+    const assigned = (await store.listEvents({ limit: 10 })).find(
+      (event) => event.kind === 'role_assigned'
+    );
+    expect(assigned?.data).toMatchObject({
+      role: 'ci',
+      previous: null,
+      actor: 'enrollment-token',
     });
   });
 
-  test('a wrong role token is not an error: the node just waits for a person', async () => {
+  test('a token without a role approves and leaves the node unassigned', async () => {
     const { h, store } = ctx();
-    const reply = await h.register(1, { roleToken: 'not-the-token' });
+    const reply = await h.register(1, {
+      enrollmentToken: PLAIN_ENROLLMENT_TOKEN,
+    });
+    expect(reply.body).toMatchObject({ status: 'approved', role: null });
+    expect((await store.findNode(nodeIdOf(1)))?.role).toBeNull();
+  });
+
+  test('a token assigns its role only when the node has none', async () => {
+    const { h, store } = ctx();
+    await h.register(1);
+    await h.admin('PATCH', `/v1/nodes/${nodeIdOf(1)}`, { role: 'devbox' });
+    const reply = await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
+    expect(reply.body).toMatchObject({ status: 'approved', role: 'devbox' });
+    expect((await store.findNode(nodeIdOf(1)))?.role).toBe('devbox');
+    const unassigned = await h.register(2, {
+      enrollmentToken: PLAIN_ENROLLMENT_TOKEN,
+    });
+    expect(unassigned.body.role).toBeNull();
+    const filled = await h.register(2, {
+      enrollmentToken: CI_ENROLLMENT_TOKEN,
+    });
+    expect(filled.body.role).toBe('ci');
+  });
+
+  test('re-registering without a token never clears the assigned role', async () => {
+    const { h, store } = ctx();
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
+    const again = await h.register(1);
+    expect(again.body).toMatchObject({ status: 'pending', role: 'ci' });
+    expect((await store.findNode(nodeIdOf(1)))?.role).toBe('ci');
+  });
+
+  test('a wrong enrollment token is not an error: the node just waits for a person', async () => {
+    const { h, store } = ctx();
+    const reply = await h.register(1, { enrollmentToken: 'not-the-token' });
     expect(reply.status).toBe(201);
     expect(reply.body.status).toBe('pending');
     expect((await store.findNode(nodeIdOf(1)))?.enrolledVia).toBe('hello');
   });
 
-  test('the token of one role does not approve another role', async () => {
-    const { h } = ctx();
+  test('a claimed role and an old role token are ignored, never stored', async () => {
+    const { h, store, db } = ctx();
     const reply = await h.register(1, {
       role: 'devbox',
-      hostname: 'devbox-1234',
-      roleToken: CI_ROLE_TOKEN,
+      roleToken: 'legacy-role-token-value',
     });
-    expect(reply.body.status).toBe('pending');
+    expect(reply.status).toBe(201);
+    expect(reply.body).toMatchObject({ status: 'pending', role: null });
+    expect((await store.findNode(nodeIdOf(1)))?.role).toBeNull();
+    const dump = JSON.stringify(await db.sql`select * from nodes`);
+    expect(dump).not.toContain('legacy-role-token-value');
+    expect(dump).not.toContain('devbox');
   });
 
   test('registering again is a 200 that replaces the secret', async () => {
@@ -89,7 +140,7 @@ describeController('POST /v1/nodes/register', (ctx) => {
 
   test('an approved node registering without the token must be approved again', async () => {
     const { h, store } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const again = await h.register(1);
     expect(again.status).toBe(200);
     expect(again.body.status).toBe('pending');
@@ -100,7 +151,7 @@ describeController('POST /v1/nodes/register', (ctx) => {
     const { h } = ctx();
     await h.register(1);
     await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/reject`);
-    const again = await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    const again = await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     expect(again.status).toBe(200);
     expect(again.body.status).toBe('rejected');
   });
@@ -112,7 +163,8 @@ describeController('POST /v1/nodes/register', (ctx) => {
     expect((await h.register(1)).body.status).toBe('pending');
     await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/retire`);
     expect(
-      (await h.register(1, { roleToken: CI_ROLE_TOKEN })).body.status
+      (await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN })).body
+        .status
     ).toBe('approved');
   });
 
@@ -122,14 +174,17 @@ describeController('POST /v1/nodes/register', (ctx) => {
       heartbeat: { intervalSeconds: 30 },
     });
     expect((await h.register(1)).body.heartbeatIntervalSeconds).toBe(30);
-    await h.admin('PUT', '/v1/settings/role:devbox', {
+    await h.admin('PUT', '/v1/settings/role:ci', {
       heartbeat: { intervalSeconds: 120 },
     });
-    const devbox = await h.register(2, {
-      role: 'devbox',
-      hostname: 'devbox-1234',
+    // The claimed role does not choose settings; the assigned role does.
+    expect(
+      (await h.register(2, { role: 'ci' })).body.heartbeatIntervalSeconds
+    ).toBe(30);
+    const assigned = await h.register(3, {
+      enrollmentToken: CI_ENROLLMENT_TOKEN,
     });
-    expect(devbox.body.heartbeatIntervalSeconds).toBe(120);
+    expect(assigned.body.heartbeatIntervalSeconds).toBe(120);
   });
 
   describe('validation', () => {
@@ -147,12 +202,7 @@ describeController('POST /v1/nodes/register', (ctx) => {
       await reject({ nodeId: nodeIdOf(1).toUpperCase() }, 'nodeId');
       await reject({ nodeId: 12 }, 'nodeId');
     });
-    test('role', async () => {
-      await reject({ role: 'gpu' }, 'role');
-      await reject({ role: undefined }, 'role');
-      // Retired in packages/fleet/roles.json: rows stay, enrollment stops.
-      await reject({ role: 'web' }, 'role must be one of: ci, devbox');
-    });
+
     test('hostname', async () => {
       await reject({ hostname: 'has space' }, 'hostname');
       await reject({ hostname: '' }, 'hostname');
@@ -162,9 +212,11 @@ describeController('POST /v1/nodes/register', (ctx) => {
       await reject({ secret: secretOf(1).toUpperCase() }, 'secret');
       await reject({ secret: undefined }, 'secret');
     });
-    test('role token', async () => {
-      await reject({ roleToken: 5 }, 'roleToken');
-      await reject({ roleToken: 'x'.repeat(513) }, 'roleToken');
+    test('enrollment token', async () => {
+      await reject({ enrollmentToken: 5 }, 'enrollmentToken');
+      await reject({ enrollmentToken: 'x'.repeat(513) }, 'enrollmentToken');
+      await reject({ enrollmentToken: 'short' }, 'enrollmentToken');
+      await reject({ enrollmentToken: 'with spaces ok' }, 'enrollmentToken');
     });
 
     test('the body must be a JSON object', async () => {

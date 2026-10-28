@@ -1,28 +1,22 @@
 """Building blocks for the full-chain test: the real fleet controller started by
-packages/fleet-controller/test/e2e/stack.ts, a Vault that speaks the parts of the
-real API the fleet uses (OIDC login, wrapped reads, lookup, unwrap, userpass),
-and fixtures for a node's /proc, /run/fleet and /etc/fleet."""
+packages/fleet-controller/test/e2e/stack.ts and fixtures for a node's /proc,
+/run/fleet and /etc/fleet."""
 import hashlib
 import json
 import os
-import secrets
-import select
+import queue
 import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER_PACKAGE = ROOT.parent / "fleet-controller"
 STACK = CONTROLLER_PACKAGE / "test" / "e2e" / "stack.ts"
-
-AGE_KEY = "AGE-SECRET-KEY-1CHAINTESTNOTREALKEYMATERIAL000000000000000000000"
-
 
 def missing_tools():
     """Names of what the full-chain test needs and cannot find."""
@@ -39,107 +33,12 @@ def free_port():
         return probe.getsockname()[1]
 
 
-class ChainVault:
-    """The slice of Vault the fleet touches: GitHub OIDC login, a wrapped read
-    of secret/data/fleet/<role>, sys/wrapping lookup and unwrap, and userpass."""
-
-    def __init__(self, role_token):
-        self.password = secrets.token_urlsafe(24)
-        self.documents = {"ci": {"age_key": AGE_KEY, "api_token": role_token}}
-        self.wrapped = {}
-        self.spent = set()
-        self.calls = []
-        self.lock = threading.Lock()
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *_args):
-                return
-
-            def reply(self, code, payload=None):
-                body = b"" if payload is None else json.dumps(payload).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def body(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                return json.loads(self.rfile.read(length) or b"{}")
-
-            def do_GET(self):
-                parsed = urlparse(self.path)
-                outer.calls.append(("GET", parsed.path))
-                if parsed.path == "/oidc":
-                    if self.headers.get("Authorization") != "bearer request-token":
-                        return self.reply(401, {})
-                    return self.reply(200, {"value": "github-oidc-jwt"})
-                if parsed.path.startswith("/v1/secret/data/fleet/"):
-                    return self.read_secret(parsed.path.rsplit("/", 1)[1])
-                self.reply(404, {})
-
-            def read_secret(self, role):
-                if self.headers.get("X-Vault-Token") != "workflow-client-token":
-                    return self.reply(403, {})
-                if role not in outer.documents:
-                    return self.reply(404, {"errors": []})
-                if not self.headers.get("X-Vault-Wrap-TTL"):
-                    # The real policy refuses an unwrapped read. Fail loudly here too.
-                    return self.reply(403, {"errors": ["wrapping required"]})
-                with outer.lock:
-                    token = f"hvs.wrapped-{role}-{len(outer.wrapped) + 1:04d}"
-                    outer.wrapped[token] = (role, outer.documents[role])
-                self.reply(200, {"wrap_info": {"token": token, "ttl": 3600, "creation_path": f"secret/data/fleet/{role}"}})
-
-            def do_POST(self):
-                path = urlparse(self.path).path
-                outer.calls.append(("POST", path))
-                data = self.body()
-                if path == "/v1/auth/jwt/login":
-                    ok = data.get("role") == "fleet-enroll" and data.get("jwt") == "github-oidc-jwt"
-                    return self.reply(200, {"auth": {"client_token": "workflow-client-token"}}) if ok else self.reply(403, {})
-                if path == "/v1/sys/wrapping/lookup":
-                    entry = outer.wrapped.get(data.get("token"))
-                    if entry is None or data["token"] in outer.spent:
-                        return self.reply(400, {"errors": ["wrapping token is not valid or does not exist"]})
-                    return self.reply(200, {"data": {"creation_path": f"secret/data/fleet/{entry[0]}", "creation_ttl": 3600}})
-                if path == "/v1/sys/wrapping/unwrap":
-                    return self.unwrap(self.headers.get("X-Vault-Token") or data.get("token"))
-                if path.startswith("/v1/auth/userpass/login/"):
-                    ok = data.get("password") == outer.password
-                    policies = ["admin", "default"] if path.endswith("/crvouga") else ["default"]
-                    return self.reply(200, {"auth": {"client_token": "user-token", "policies": policies}}) if ok else self.reply(400, {})
-                if path == "/v1/auth/token/revoke-self":
-                    return self.reply(204)
-                self.reply(404, {})
-
-            def unwrap(self, token):
-                with outer.lock:
-                    entry = outer.wrapped.get(token)
-                    if entry is None or token in outer.spent:
-                        return self.reply(400, {"errors": ["wrapping token is not valid or does not exist"]})
-                    outer.spent.add(token)
-                self.reply(200, {"data": {"data": entry[1], "metadata": {"version": 1}}})
-
-        self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self.http.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
-
-    @property
-    def url(self):
-        return f"http://127.0.0.1:{self.http.server_address[1]}"
-
-    def close(self):
-        self.http.shutdown()
-        self.http.server_close()
-
-
 class Stack:
     """The real fleet controller in its own process, with its own throwaway SQLite database."""
 
-    def __init__(self, role_token, vault_addr):
+    def __init__(self, enrollment_token):
         env = dict(os.environ)
-        env.update({"FLEET_E2E_ROLE_TOKEN": role_token, "VAULT_ADDR": vault_addr})
+        env.update({"FLEET_E2E_ENROLLMENT_TOKEN": enrollment_token})
         self.process = subprocess.Popen(
             ["bun", str(STACK)],
             cwd=CONTROLLER_PACKAGE,
@@ -153,25 +52,31 @@ class Stack:
         self.info = self._wait_for_ready()
 
     def _wait_for_ready(self):
+        # TextIOWrapper may read ahead several lines from one pipe write. A
+        # subsequent select() sees an empty OS pipe even though readline() has
+        # buffered readiness. One reader thread owns the stream throughout.
+        lines = queue.Queue()
+        threading.Thread(target=self._drain, args=(lines,), daemon=True).start()
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([self.process.stdout], [], [], 1)
-            if ready:
-                line = self.process.stdout.readline()
-                if not line:
-                    break
-                self.output.append(line)
-                if line.startswith('{"controllerUrl"'):
-                    threading.Thread(target=self._drain, daemon=True).start()
-                    return json.loads(line)
-            elif self.process.poll() is not None:
+            try:
+                line = lines.get(timeout=1)
+            except queue.Empty:
+                continue
+            if line is None:
                 break
+            if line.startswith('{"controllerUrl"'):
+                return json.loads(line)
         self.stop()
         raise RuntimeError("the fleet controller stack did not start:\n" + "".join(self.output)[-3000:])
 
-    def _drain(self):
-        for line in self.process.stdout:
-            self.output.append(line)
+    def _drain(self, lines):
+        try:
+            for line in self.process.stdout:
+                self.output.append(line)
+                lines.put(line)
+        finally:
+            lines.put(None)
 
     def stop(self):
         if self.process.poll() is None:

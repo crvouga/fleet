@@ -24,7 +24,12 @@ describeStore('SqliteStore nodes', (ctx) => {
       expect(created).toBe(true);
       expect(node).toMatchObject({
         id: nodeIdOf(1),
-        role: 'ci',
+        role: null,
+        observedRole: null,
+        observedClosure: null,
+        ageRecipient: null,
+        hardware: null,
+        reconcile: null,
         approval: 'pending',
         enrolledVia: 'hello',
         approvedAt: null,
@@ -40,13 +45,16 @@ describeStore('SqliteStore nodes', (ctx) => {
       expect(node.firstSeenAt).toBeInstanceOf(Date);
     });
 
-    test('a role token approves immediately and records who approved', async () => {
+    test('an enrollment token approves immediately and records who approved', async () => {
       const { node } = await ctx().store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       expect(node.approval).toBe('approved');
-      expect(node.enrolledVia).toBe('role-token');
-      expect(node.approvedBy).toBe('role-token');
+      expect(node.enrolledVia).toBe('enrollment-token');
+      expect(node.approvedBy).toBe('enrollment-token');
       expect(node.approvedAt).toBeInstanceOf(Date);
     });
 
@@ -68,27 +76,35 @@ describeStore('SqliteStore nodes', (ctx) => {
       expect(await store.listNodes()).toHaveLength(1);
     });
 
-    test('registering again updates role, hostname and address', async () => {
+    test('registering again updates hostname and address, never the role', async () => {
       const { store } = ctx();
       await store.registerNode(registerInput(1));
+      await store.assignRole(nodeIdOf(1), 'devbox', 'chris');
       const { node } = await store.registerNode(
         registerInput(1, {
-          role: 'web',
           hostname: 'web-9999',
           remoteAddr: null,
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+          tokenRole: 'ci',
         })
       );
       expect(node).toMatchObject({
-        role: 'web',
+        role: 'devbox',
         hostname: 'web-9999',
         remoteAddr: null,
       });
+      const again = await store.registerNode(registerInput(1));
+      expect(again.node.role).toBe('devbox');
     });
 
-    test('an approved node that registers without the role token waits for a person again', async () => {
+    test('an approved node that registers without an enrollment token waits for a person again', async () => {
       const { store } = ctx();
       await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       const { node } = await store.registerNode(registerInput(1));
       expect(node.approval).toBe('pending');
@@ -96,29 +112,38 @@ describeStore('SqliteStore nodes', (ctx) => {
       expect(node.approvedBy).toBeNull();
     });
 
-    test('an approved node that registers with the role token keeps its approval time', async () => {
+    test('an approved node that registers with an enrollment token keeps its approval time', async () => {
       const { store } = ctx();
       const first = await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       const again = await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       expect(again.node.approvedAt).toEqual(first.node.approvedAt);
     });
 
-    test('a rejected node stays rejected, even with a role token', async () => {
+    test('a rejected node stays rejected, even with an enrollment token', async () => {
       const { store } = ctx();
       await store.registerNode(registerInput(1));
       await store.setApproval(nodeIdOf(1), 'rejected', 'chris');
       const { node } = await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       expect(node.approval).toBe('rejected');
       expect(node.enrolledVia).toBe('hello');
     });
 
-    test('a retired node becomes pending, or approved with the role token', async () => {
+    test('a retired node becomes pending, or approved with an enrollment token', async () => {
       const { store } = ctx();
       await store.registerNode(registerInput(1));
       await store.setApproval(nodeIdOf(1), 'retired', 'node');
@@ -127,7 +152,10 @@ describeStore('SqliteStore nodes', (ctx) => {
       expect(pending.node.retiredAt).toBeNull();
       await store.setApproval(nodeIdOf(1), 'retired', 'node');
       const approved = await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       expect(approved.node.approval).toBe('approved');
       expect(approved.node.retiredAt).toBeNull();
@@ -137,7 +165,10 @@ describeStore('SqliteStore nodes', (ctx) => {
       const { store } = ctx();
       await store.registerNode(registerInput(1));
       await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       await store.registerNode(registerInput(1));
       const kinds = (await store.listEvents({ limit: 20 })).map((e) => [
@@ -408,7 +439,10 @@ describeStore('SqliteStore nodes', (ctx) => {
       const { store } = ctx();
       for (const n of [1, 2, 3]) {
         await store.registerNode(
-          registerInput(n, { approval: 'approved', enrolledVia: 'role-token' })
+          registerInput(n, {
+            approval: 'approved',
+            enrolledVia: 'enrollment-token',
+          })
         );
       }
       await store.recordHeartbeat(nodeIdOf(1), heartbeatBody(1), null, at(10));
@@ -423,7 +457,10 @@ describeStore('SqliteStore nodes', (ctx) => {
     test('is due strictly after the threshold, never at it', async () => {
       const { store } = ctx();
       await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       await store.recordHeartbeat(nodeIdOf(1), heartbeatBody(1), null, T0);
       expect(await store.nodesDueOfflineNotice(at(300), 300)).toHaveLength(0);
@@ -434,7 +471,10 @@ describeStore('SqliteStore nodes', (ctx) => {
       const { store } = ctx();
       for (const n of [1, 2, 3, 4]) {
         await store.registerNode(
-          registerInput(n, { approval: 'approved', enrolledVia: 'role-token' })
+          registerInput(n, {
+            approval: 'approved',
+            enrolledVia: 'enrollment-token',
+          })
         );
         await store.recordHeartbeat(nodeIdOf(n), heartbeatBody(n), null, T0);
       }
@@ -448,7 +488,10 @@ describeStore('SqliteStore nodes', (ctx) => {
     test('a node that never reported counts from its approval', async () => {
       const { store, db } = ctx();
       await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       const row = await db.sql`select approved_at from nodes`;
       const approvedAt = new Date(String(row[0]?.['approved_at']));
@@ -469,7 +512,10 @@ describeStore('SqliteStore nodes', (ctx) => {
     test('setOfflineNotified marks and clears, and a heartbeat clears it too', async () => {
       const { store } = ctx();
       await store.registerNode(
-        registerInput(1, { approval: 'approved', enrolledVia: 'role-token' })
+        registerInput(1, {
+          approval: 'approved',
+          enrolledVia: 'enrollment-token',
+        })
       );
       await store.setOfflineNotified(nodeIdOf(1), at(5));
       expect((await store.findNode(nodeIdOf(1)))?.offlineNotifiedAt).toEqual(

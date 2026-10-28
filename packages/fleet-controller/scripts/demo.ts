@@ -2,6 +2,7 @@
  * Boots the dashboard on a local port with an in-memory store full of
  * realistic nodes. No database, no login. `bun run demo`, then open the URL.
  */
+import { writeFileSync } from 'node:fs';
 import { Hono } from 'hono';
 
 import { mountUi } from '../src/routes/ui';
@@ -16,13 +17,11 @@ const store = new MemoryStore(() => clock);
 
 const deps: AppDeps = {
   store,
-  auth: createFakeAuth({ alwaysSignedInAs: 'chris' }),
+  auth: createFakeAuth({ alwaysSignedInAs: 'operator' }),
   revisions: { latest: async () => DEMO_LATEST },
   env: {
     adminToken: 'demo',
-
-    roleTokenHashes: {},
-    githubRepo: 'crvouga/fleet',
+    enrollmentTokens: [],
   },
   now: () => new Date(),
 };
@@ -47,7 +46,14 @@ app.use('*', async (c, next) => {
   );
 });
 mountUi(app, deps);
-Bun.serve({ hostname: '127.0.0.1', port, fetch: app.fetch });
+const server = Bun.serve({ hostname: '127.0.0.1', port, fetch: app.fetch });
+const url = `http://127.0.0.1:${server.port}`;
+if (process.env['FLEET_LOCAL_READY_FILE'])
+  writeFileSync(
+    process.env['FLEET_LOCAL_READY_FILE'],
+    JSON.stringify({ url }),
+    { mode: 0o600 }
+  );
 process.stdout.write(
-  `LOCAL DEMO: synthetic fleet data, in-memory storage, no live fleet or Vault access.\nFleet dashboard demo: http://localhost:${port}${empty ? ' (empty)' : ''}\n`
+  `LOCAL DEMO: synthetic fleet data, in-memory storage, no live fleet or Vault access.\nFleet dashboard demo: ${url}${empty ? ' (empty)' : ''}\n`
 );

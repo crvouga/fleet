@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 
 import type { RegisterInput, NodePatch } from '../store';
-import type { Approval } from '../types';
+import type { Approval, Role } from '../types';
 
 import type { Db } from './client';
 import { text, type Row } from './rows';
@@ -40,7 +40,8 @@ export async function selectNodeWithSecret(
 /**
  * Insert, or replace the secret of a node that is registering again.
  * A rejected node stays rejected; any other node takes the new approval, so
- * a re-registration without the role token waits for a person again.
+ * a re-registration without an enrollment token waits for a person again.
+ * The assigned role is kept; a token's role fills it only when it is empty.
  */
 export async function upsertNode(
   db: Db,
@@ -53,12 +54,12 @@ export async function upsertNode(
     insert into nodes as n
       (id, role, hostname, approval, secret_hash, enrolled_via, remote_addr, approved_at, approved_by)
     values (
-      ${input.id}, ${input.role}, ${input.hostname}, ${input.approval},
+      ${input.id}, ${input.tokenRole}, ${input.hostname}, ${input.approval},
       ${input.secretHash}, ${input.enrolledVia}, ${input.remoteAddr},
       case when ${approved} then strftime('%Y-%m-%dT%H:%M:%fZ','now') end, ${approvedBy}
     )
     on conflict (id) do update set
-      role = excluded.role,
+      role = coalesce(n.role, case when n.approval = 'rejected' then null else excluded.role end),
       hostname = excluded.hostname,
       secret_hash = excluded.secret_hash,
       remote_addr = excluded.remote_addr,
@@ -115,6 +116,16 @@ export async function updateApproval(
       offline_notified_at = null
     where id = ${id}
     returning *`;
+  return rows[0] ?? null;
+}
+
+export async function updateRole(
+  db: Db,
+  id: string,
+  role: Role | null
+): Promise<Row | null> {
+  const rows = await db`
+    update nodes set role = ${role} where id = ${id} returning *`;
   return rows[0] ?? null;
 }
 

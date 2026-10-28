@@ -15,6 +15,7 @@ import {
 } from '../lib/format';
 import {
   STATUS_FILTERS,
+  UNASSIGNED,
   defaultDirection,
   filterNodes,
   nodesHref,
@@ -164,6 +165,9 @@ function SearchForm(props: { query: NodesQuery }) {
               {role}
             </option>
           ))}
+          <option value={UNASSIGNED} selected={query.role === UNASSIGNED}>
+            unassigned
+          </option>
         </select>
       </div>
       {query.status === 'all' ? null : (

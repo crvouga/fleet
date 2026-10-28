@@ -13,6 +13,7 @@ describe('recovery operations are audited node settings', () => {
   for (const [path, section, key] of [
     ['retry-update', 'sync', 'retryBootAfter'],
     ['reopen-admission', 'runners', 'reopenAfter'],
+    ['rotate-age-key', 'secrets', 'rotateAgeKeyAfter'],
   ] as const) {
     test(`${path} sets ${section}.${key} to now on the node's own settings`, async () => {
       const { app, deps } = populated();

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { SqliteStore } from '../../src/db/sqlite-store';
+import { ageRecipientNextOf } from '../../src/domain/node-view';
 import { describeStore } from '../support/describe-store';
 import {
   T0,
@@ -11,9 +12,14 @@ import {
   type HeartbeatOverrides,
 } from '../support/fixtures';
 
+/** An approved node assigned the ci role, as an enrollment token would. */
 async function approved(store: SqliteStore, n = 1): Promise<void> {
   await store.registerNode(
-    registerInput(n, { approval: 'approved', enrolledVia: 'role-token' })
+    registerInput(n, {
+      approval: 'approved',
+      enrolledVia: 'enrollment-token',
+      tokenRole: 'ci',
+    })
   );
 }
 
@@ -41,14 +47,14 @@ describeStore('SqliteStore heartbeat', (ctx) => {
       const { store } = ctx();
       await approved(store);
       const node = await beat(store, 0, {
-        agent: { version: '7', configRevision: 'abc123' },
+        agent: { version: '7', desiredRevision: '0123456789abcdef' },
         hostname: 'ci-renamed',
       });
       expect(node).toMatchObject({
         hostname: 'ci-renamed',
         revision: '9f3c2a1e5b7d4c6a8e0f1a2b3c4d5e6f70819283',
         agentVersion: '7',
-        configRevision: 'abc123',
+        appliedRevision: '0123456789abcdef',
         remoteAddr: '198.51.100.9',
         approval: 'approved',
         heartbeatIntervalSeconds: 60,
@@ -63,6 +69,20 @@ describeStore('SqliteStore heartbeat', (ctx) => {
         runners: { slots: 4, busy: 1 },
       });
       expect(node?.facts['events']).toBeUndefined();
+    });
+
+    test('a pending next age recipient round-trips through the facts', async () => {
+      const { store } = ctx();
+      await approved(store);
+      const next = `age1${'q'.repeat(58)}`;
+      const node = await beat(store, 0, { ageRecipientNext: next });
+      expect(node?.facts['ageRecipientNext']).toBe(next);
+      const reread = await store.findNode(nodeIdOf(1));
+      expect(reread === null ? null : ageRecipientNextOf(reread)).toBe(next);
+      const promoted = await beat(store, 60, { ageRecipient: next });
+      expect(promoted === null ? 'missing' : ageRecipientNextOf(promoted)).toBe(
+        null
+      );
     });
 
     test('facts keep nested json, unicode and nulls exactly', async () => {
@@ -268,7 +288,7 @@ describeStore('SqliteStore heartbeat', (ctx) => {
       });
       const events = [...(await store.listEvents({ limit: 10 }))]
         .reverse()
-        .slice(2);
+        .slice(3);
       expect(events.map((e) => [e.kind, e.severity, e.message])).toEqual([
         ['boot', 'info', 'node started'],
         ['update', 'warn', 'second'],
@@ -300,7 +320,11 @@ describeStore('SqliteStore heartbeat', (ctx) => {
       const { store } = ctx();
       await approved(store);
       await beat(store, 0);
-      expect(await kinds(store)).toEqual(['registered', 'approved']);
+      expect(await kinds(store)).toEqual([
+        'registered',
+        'approved',
+        'role_assigned',
+      ]);
     });
 
     test('a changed boot id is one boot event; the agent own boot event wins', async () => {

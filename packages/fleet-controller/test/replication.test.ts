@@ -42,7 +42,6 @@ test.skipIf(!enabled)(
     const env = {
       PATH: process.env['PATH'] ?? '',
       FLEET_ADMIN_TOKEN: token,
-      FLEET_GITHUB_REPO: 'example/fleet',
       FLEET_LITESTREAM_BIN: binary as string,
       FLEET_DATABASE_PATH: join(directory, 'data/fleet.db'),
       FLEET_S3_BUCKET: bucket as string,
@@ -150,7 +149,6 @@ test.skipIf(!enabled || !process.env['FLEET_TEST_DENIED_BUCKET'])(
       env: {
         PATH: process.env['PATH'] ?? '',
         FLEET_ADMIN_TOKEN: randomBytes(32).toString('hex'),
-        FLEET_GITHUB_REPO: 'example/fleet',
         FLEET_LITESTREAM_BIN: binary as string,
         FLEET_DATABASE_PATH: join(directory, 'fleet.db'),
         FLEET_S3_BUCKET: process.env['FLEET_TEST_DENIED_BUCKET'] as string,

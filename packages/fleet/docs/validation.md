@@ -1,3 +1,5 @@
+> Historical validation record. Entries describe the code as it was then. The current installer takes no role, carries no age keys and uses no Vault/OpenBao or GitHub-issue enrollment: it installs `base`, waits for approval in the Fleet app, and the role is assigned there ([installer](installer.md)). Follow CONFIGURATION.md for current setup.
+
 # Validation record
 
 > Historical evidence below includes the former infrastructure and PostgreSQL deployment.

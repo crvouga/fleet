@@ -187,7 +187,9 @@ function seedOthers(add: Add): void {
   });
   add({
     short: 'f001',
-    role: 'netboot',
+    // A new machine runs the base system and has no role until a person assigns one.
+    role: null,
+    hostname: 'netboot-f001',
     approval: 'pending',
     lastSeenAt: seconds(600),
     enrolledVia: 'hello',

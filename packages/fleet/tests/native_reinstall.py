@@ -28,6 +28,7 @@ def verify(boot, control):
             "usb": False, "internal": True, "mounted": True, "whole": True,
             "size": 500_000_000_000, "model": "VM stand-in", "serial": "VM-ONLY",
         }]))
+        # An older installer's marker: its role is read without it.
         (state / "installed").write_text("role=ci\nstatus=installed\n")
         (root / "node.conf").write_text("role=ci\n")
         (root / "runner.conf").write_text("scope=repository\napp_id=123\ninstallation_id=456\ntarget=example/private\n")
@@ -37,18 +38,18 @@ def verify(boot, control):
                "FLEET_NODE_CONF": str(root / "node.conf"), "FLEET_RUNNER_CONF": str(root / "runner.conf"),
                "FLEET_CREDENTIAL": str(root / "credential"), "FLEET_BUSY_DIR": str(busy.parent),
                "FLEET_HOSTNAME": "ci-test", "FLEET_KEXEC": boot, "FLEET_RUNNER_CONTROL": control,
-               "FLEET_EFI_DIR": str(root), "FLEET_ISO_FS": "ext4", "FLEET_NO_ENROLL": "1",
+               "FLEET_EFI_DIR": str(root), "FLEET_ISO_FS": "ext4",
                "FLEET_ENROLL_TOKEN": "", "FLEET_ENROLL_TOKEN_FILE": "",
                "FLEET_INSTALLER_URL": iso.as_uri(), "FLEET_INSTALLER_SHA256_URL": iso.as_uri() + ".sha256",
                "FLEET_TEST_ACTIONS": str(actions)}
 
         def invoke(flags, expected):
-            result = subprocess.run(["fleet-node", "ci", *flags], env=env, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(["fleet-node", "install", *flags], env=env, capture_output=True, text=True, timeout=30)
             if result.returncode != expected:
                 raise RuntimeError(result.stdout + result.stderr)
             return result.stdout + result.stderr
 
-        if "already installed as ci" not in invoke(["--yes"], 0):
+        if "already an installed Fleet node" not in invoke(["--yes"], 0):
             raise RuntimeError("normal invocation did not preserve the existing node")
         invoke(["--reinstall", "--plan"], 0)
         if actions.exists():
@@ -60,13 +61,12 @@ def verify(boot, control):
         (busy / "busy").unlink()
         invoke(["--reinstall", "--yes"], 0)
         lines = actions.read_text().splitlines()
-        if not (len(lines) == 3 and lines[0].startswith("runner withdraw ")
-                and lines[1].startswith("boot --load ") and "fleet.role=ci" in lines[1]
-                and lines[2] == "boot -e"):
-            raise RuntimeError("withdraw, verified kernel load and boot did not occur in order")
+        if not (len(lines) == 2 and lines[0].startswith("boot --load ") and "fleet.role=" not in lines[0]
+                and lines[1] == "boot -e"):
+            raise RuntimeError("the verified kernel load and boot did not occur in order, or a runner was withdrawn")
         if (busy.parent / "draining").read_text() != "reinstall\n":
             raise RuntimeError("new job admission was not closed")
-        print("NATIVE REINSTALL OK: normal no-op, preview, busy refusal, explicit same-role handoff")
+        print("NATIVE REINSTALL OK: normal no-op, preview, busy refusal, explicit role-less handoff")
 
 
 if __name__ == "__main__":

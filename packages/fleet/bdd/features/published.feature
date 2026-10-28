@@ -9,7 +9,7 @@ Feature: Install from the actual published fleet release
     Given I have owner access to the deployed Fleet dashboard
     When I open the deployed Add node page
     And I follow its installer release link
-    Then the real GitHub release lists the Windows installer
+    Then the Fleet app lists the Windows installer
     When I download the published Windows installer
     Then the downloaded executable matches its published size and SHA-256
 

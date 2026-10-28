@@ -1,7 +1,7 @@
-/** Deterministic standards-shaped relay: independent signing keys, single-use codes. */
+/** Deterministic standards-shaped provider: independent signing keys, single-use codes. */
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { relayClient } from '../../src/auth/relay-client';
-import type { RelayConfig } from '../../src/auth/browser-contract';
+import { createOidcClient } from '../../src/auth/oidc-client';
+import type { OidcConfig } from '../../src/auth/browser-contract';
 
 interface Grant {
   nonce: string;
@@ -23,7 +23,7 @@ const json = (value: unknown) =>
   new Response(JSON.stringify(value), {
     headers: { 'Content-Type': 'application/json' },
   });
-function signedToken(config: RelayConfig, tx: Grant) {
+function signedToken(config: OidcConfig, tx: Grant) {
   const now = Math.floor(Date.now() / 1000);
   const data = `${encode({ alg: 'RS256', kid: key.kid })}.${encode({ iss: config.issuer, aud: config.clientId, sub: `subject-${tx.email}`, email: tx.email, email_verified: true, nonce: tx.nonce, iat: now, exp: now + 300 })}`;
   return json({
@@ -33,7 +33,7 @@ function signedToken(config: RelayConfig, tx: Grant) {
   });
 }
 function validRequest(
-  config: RelayConfig,
+  config: OidcConfig,
   params: URLSearchParams,
   tx: Grant | undefined
 ): tx is Grant {
@@ -47,9 +47,9 @@ function validRequest(
     params.get('redirect_uri') === `${config.origin}/auth/callback`
   );
 }
-export function mockBrowserRelay(config: RelayConfig) {
+export function mockIdentityProvider(config: OidcConfig) {
   const codes = new Map<string, Grant>();
-  const client = relayClient(config, async (input, init) => {
+  const client = createOidcClient(config, async (input, init) => {
     const url = String(input);
     if (url.endsWith('/.well-known/openid-configuration'))
       return json({
@@ -63,7 +63,7 @@ export function mockBrowserRelay(config: RelayConfig) {
         subject_types_supported: ['public'],
       });
     if (url.endsWith('/certs')) return json({ keys: [key] });
-    if (!url.endsWith('/token')) throw new Error('Unexpected relay request');
+    if (!url.endsWith('/token')) throw new Error('Unexpected provider request');
     const params = new URLSearchParams(await new Response(init?.body).text());
     const code = params.get('code') ?? '';
     const tx = codes.get(code);
@@ -75,9 +75,7 @@ export function mockBrowserRelay(config: RelayConfig) {
   return {
     client,
     authorize(url: URL, email: string) {
-      if (
-        url.searchParams.get('code_challenge_method') !== 'S256'
-      )
+      if (url.searchParams.get('code_challenge_method') !== 'S256')
         throw new Error('Wrong authorization flow');
       const code = crypto.randomUUID();
       codes.set(code, {

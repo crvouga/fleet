@@ -6,9 +6,11 @@ of a login prompt, redrawn every 15 seconds by fleet-node-console.service
 (modules/console.nix). Over SSH, `fleet-node-status` prints the same words.
 
 It reads only what the node already knows: the Fleet agent's last report and its
-readiness verdict (agent.py, status.json), each runner slot's last registration
-(runner_control.py, /run/fleet/register), unit states, the update and
-boot-health markers and the network. It never calls GitHub or Fleet itself, so a
+readiness verdict (agent.py, status.json), the role it runs against the role it
+is assigned (/etc/fleet/node.conf, /nix/fleet-state/target) and fleet-sync's
+convergence verdict (/run/fleet/reconcile.json), each runner slot's last
+registration (runner_control.py, /run/fleet/register), unit states, the update
+and boot-health markers and the network. It never calls GitHub or Fleet itself, so a
 slow or failing service cannot freeze the screen. What it cannot tell, it says
 it cannot tell. Reports pass through decide.redact; no secret is read.
 """
@@ -33,16 +35,21 @@ PATIENCE = 20 * 60
 STALE = 10 * 60
 # Codes that clear by themselves while the node starts or a service recovers.
 TEMPORARY = re.compile(r"FLEET_(RUNNERS_STARTING|GITHUB_UNAVAILABLE|GITHUB_CHECK_PENDING|GITHUB_RUNNERS_PENDING|"
-                       r"UPDATE_CHECK_PENDING|READINESS_FAILED|SERVICE_STATUS_UNKNOWN|BOOT_WAITING)")
+                       r"UPDATE_CHECK_PENDING|READINESS_FAILED|SERVICE_STATUS_UNKNOWN|BOOT_WAITING|REBOOT_PENDING)")
 # Settings a person chose in Fleet: shown, never a problem.
 CHOSEN = re.compile(r"FLEET_(RUNNERS_DISABLED|UPDATES_PAUSED)")
 # (code pattern, what the person at the machine does, what the repository owner does).
 OWNER = "The repository owner"
 ACTIONS = (
-    (r"FLEET_SECRET_MISSING|FLEET_ROLE_SECRETS",
-     f"{OWNER} re-encrypts this role's secrets for this node's age key (shown below), or reinstalls the node with a fresh approval."),
+    (r"FLEET_SECRET_MISSING|FLEET_ROLE_SECRETS|FLEET_SECRETS_RECIPIENT_MISSING",
+     f"{OWNER} adds this node's age recipient (shown below; also GET /v1/recipients) to the role's secrets file, "
+     "re-encrypts it and merges. The node converges at its next update check."),
+    (r"FLEET_ROLE_REMOVED|FLEET_ROLE_RETIRED|FLEET_CLOSURE_REMOVED|FLEET_TARGET_INVALID",
+     "Assign this node an active role, or no role, on its page in Fleet. The node converges by itself."),
+    (r"FLEET_REBOOT_PENDING",
+     "Allow reboots (reboot.enabled) on the node's page in Fleet; the node then drains and reboots by itself."),
     (r"FLEET_GITHUB_KEY",
-     f"{OWNER} checks the GitHub App ID in settings/github.json and the App private key in the vault OpenTofu root."),
+     f"{OWNER} checks the GitHub App ID in settings/github.json and the App private key in the operator-managed encrypted role secrets."),
     (r"FLEET_GITHUB_SCOPE",
      f"{OWNER} checks the GitHub App installation: its repository access and its runner permission."),
     (r"FLEET_GITHUB_UNCONFIGURED|FLEET_GITHUB_SCOPE_INVALID",
@@ -55,7 +62,7 @@ ACTIONS = (
      "Check that this computer reaches the internet. If it does, report it: updates are not being applied."),
     (r"no-network",
      "Plug in a network cable, or check the Wi-Fi router. The node reconnects by itself."),
-    (r"update-quarantined",
+    (r"update-quarantined|FLEET_UPDATE_QUARANTINED",
      "Nothing to do at this machine. Once the cause is understood, press Retry the update on the node's page in Fleet."),
     (r"gate-manual",
      "Press Reopen runner admission on the node's page in Fleet, or run fleet-resume over SSH."),
@@ -155,8 +162,16 @@ def gather():
     _, failed = run(["systemctl", "list-units", "--failed", "--plain", "--no-legend", "--no-pager"])
     _, agent_state = run(["systemctl", "is-active", "fleet-agent.service"])
     bootstrap = screen.read_json(where["etc"] / "bootstrap.json")
+    conf = read_kv(where["etc"] / "node.conf")
+    role = node.get("role") or conf.get("role") or read_kv(where["etc"] / "role").get("role") or "unknown"
+    target = read_kv(where["state"] / "target")
+    verdict = screen.read_json(where["run"] / "reconcile.json")
     return {
-        "role": node.get("role") or read_kv(where["etc"] / "role").get("role") or "unknown",
+        "role": role,
+        "closure": conf.get("flake_attr") or role,
+        # What fleet-sync converges to (the agent writes it from Fleet, or fleet-target locally).
+        "target": (target["role"], target["closure"]) if target.get("role") and target.get("closure") else None,
+        "reconcile": verdict if verdict.get("phase") in ("converged", "progressing", "blocked") else {},
         "hostname": node.get("hostname") or os.uname().nodename,
         "revision": read(where["etc"] / "revision", 128) or "unknown",
         "uptime": float(uptime[0]) if uptime and re.fullmatch(r"[0-9.]+", uptime[0]) else None,
@@ -201,6 +216,16 @@ def problems(facts):
     if facts["sync"]["failure"]:
         line = next((l for l in facts["sync"]["failure"].splitlines() if l.startswith("FLEET_")), facts["sync"]["failure"].splitlines()[-1])
         found.append((screen.code(line) or "FLEET_UPDATE_FAILED", line[:240], False))
+    verdict = facts.get("reconcile") or {}
+    if verdict.get("phase") in ("blocked", "progressing"):
+        for issue in verdict.get("issues") or []:
+            code = screen.code(issue) if isinstance(issue, str) else ""
+            if not code or CHOSEN.search(code) or any(code == existing[0] for existing in found):
+                continue
+            if code == "FLEET_UPDATE_QUARANTINED" and any(item[0] == "update-quarantined" for item in found):
+                continue
+            temporary = verdict["phase"] == "progressing" or bool(TEMPORARY.search(code))
+            found.append((code, issue[:300], temporary))
     for item in facts["slots"] or []:
         last = item["register"] or {}
         if last.get("exit") == 78:
@@ -291,6 +316,7 @@ def rows(facts):
         out.append(("wait", "Fleet", "not reported yet"))
     else:
         out.append(("unknown", "Fleet", "the Fleet agent is not running"))
+    out.append(role_row(facts))
     sync = facts["sync"]
     if sync["failure"]:
         out.append(("fail", "Updates", (screen.code(sync["failure"]) or "update check failed")))
@@ -322,6 +348,21 @@ def rows(facts):
     return out
 
 
+def role_row(facts):
+    """The role this node runs against the one it is assigned, and how far it got."""
+    running = f"{facts['role']} ({facts.get('closure') or facts['role']})"
+    target = facts.get("target")
+    verdict = facts.get("reconcile") or {}
+    if verdict.get("phase") == "blocked" and target:
+        # The row is cut at the screen width; the reason is the STATUS line.
+        return ("fail", "Role", f"{running}; {target[0]} ({target[1]}) is blocked")
+    if target and target != (facts["role"], facts.get("closure") or facts["role"]):
+        return ("wait", "Role", f"{running} now; changing to {target[0]} ({target[1]})")
+    if facts["role"] == "base":
+        return ("off", "Role", "base: no role yet; assign one in Fleet")
+    return ("ok", "Role", running)
+
+
 def recovery_row(kept):
     """One line on what the node recovered from (docs/resilience.md)."""
     if not kept:
@@ -341,7 +382,8 @@ def recovery_row(kept):
 def words(facts, state, headline, width=screen.WIDTH):
     label = {"ready": "READY", "starting": "STARTING", "problem": "PROBLEM", "unknown": "UNKNOWN"}[state]
     uptime = facts["uptime"]
-    title = f"FLEET NODE {facts['hostname']}: a {facts['role']} node, revision {facts['revision'][:8]}"
+    kind = "base node (no role yet)" if facts["role"] == "base" else f"{facts['role']} node"
+    title = f"FLEET NODE {facts['hostname']}: a {kind}, revision {facts['revision'][:8]}"
     lines = [screen.rule(width=width), " " + title, screen.rule(width=width)]
     lines += screen.labeled("STATUS", f"{label}. {headline}", width)
     lines.append(screen.rule("-", width))
@@ -364,7 +406,8 @@ def words(facts, state, headline, width=screen.WIDTH):
     if facts["ssh"]:
         lines += screen.labeled("SSH", facts["ssh"], width)
     if facts["agePublic"]:
-        lines += screen.labeled("AGE KEY", facts["agePublic"], width)
+        # Public. The repository owner adds it to the assigned role's secrets file.
+        lines += screen.labeled("AGE RECIPIENT", facts["agePublic"], width)
     return lines
 
 
@@ -393,6 +436,10 @@ def report_lines(facts, state, headline):
     lines.append(f"net route={net['device'] or 'none'} {'wifi' if net['wifi'] else 'wired'} "
                  f"interfaces={','.join(name for name, _ in net['addresses']) or '-'}")
     lines.append(f"sync last={facts['sync']['lastSuccess'][:8] or '-'} failure={facts['sync']['failure'][:200] or '-'}")
+    target = facts.get("target")
+    verdict = facts.get("reconcile") or {}
+    lines.append(f"role running={facts['role']}/{facts.get('closure') or '-'} "
+                 f"target={'/'.join(target) if target else '-'} phase={verdict.get('phase', '-')}")
     if facts["failed"]:
         lines.append("failed " + " ".join(facts["failed"]))
     lines.append(screen.machine_report())

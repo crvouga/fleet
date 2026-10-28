@@ -1,17 +1,18 @@
 import type { Context } from 'hono';
 import type { BrowserAuth } from './auth/browser-contract';
 
+import type { EnrollmentTokenEntry } from './auth/enrollment-token';
 import type { Store } from './store';
-import type { Role } from './types';
 
 /** Everything read from the environment, parsed once at boot. */
 export interface AppEnv {
   /** Bearer token for scripts and CI (`bun run health`). */
   readonly adminToken: string;
-  /** sha256 hex of each role's shared token; a node that presents the token is auto-approved. */
-  readonly roleTokenHashes: Readonly<Partial<Record<Role, string>>>;
-  /** owner/name whose main branch defines "latest". */
-  readonly githubRepo: string;
+  /** A node that presents one of these tokens is approved; the entry's role is assigned if it has none. */
+  readonly enrollmentTokens: readonly EnrollmentTokenEntry[];
+  /** Optional operator-supplied desired revision; no provider lookup. */
+  readonly targetRevision?: string;
+  readonly installerDir?: string;
 }
 
 /** Who is making an administrative request. Implemented in src/auth. */

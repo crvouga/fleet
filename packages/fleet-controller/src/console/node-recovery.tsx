@@ -58,7 +58,9 @@ export function NodeRecovery({
   reload: () => void;
 }) {
   const action = useAction(reload);
-  const view = recoveryView(entry.view.facts, events, now, entry.view.role);
+  // Runner admission belongs to what the node runs, not what it is assigned.
+  const runs = entry.view.observedRole ?? entry.view.role ?? 'base';
+  const view = recoveryView(entry.view.facts, events, now, runs);
   const [label, color] = BADGES[view.state];
   return (
     <Paper withBorder p="lg">

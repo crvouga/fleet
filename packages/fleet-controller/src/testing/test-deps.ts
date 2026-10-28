@@ -13,9 +13,7 @@ export interface TestDepsOptions {
 
 const ENV: AppEnv = {
   adminToken: 'test-admin-token',
-
-  roleTokenHashes: {},
-  githubRepo: 'crvouga/fleet',
+  enrollmentTokens: [],
 };
 
 export interface TestDeps extends AppDeps {

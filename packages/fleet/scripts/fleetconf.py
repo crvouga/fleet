@@ -26,6 +26,13 @@ REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,50}$")
 # Labels the image already sets. A person cannot shadow them.
 RESERVED_LABELS = ("self-hosted", "linux", "x64", "arm64", "nixos", "ci", "gpu", "high-mem")
+# One OpenSSH public key: a type, the base64 key and an optional comment. No
+# options prefix (command=, from=, ...) and no newline, so a value can only
+# ever grant the unprivileged dev login on a devbox, nothing more.
+SSH_KEY_PATTERN = re.compile(
+    r"^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|"
+    r"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-rsa) "
+    r"[A-Za-z0-9+/]{16,8192}={0,3}( [A-Za-z0-9 ._@:+-]{1,100})?$")
 
 
 def _int(low, high):
@@ -38,6 +45,7 @@ SPEC = {
     "heartbeat.intervalSeconds": _int(15, 3600),
     "sync.paused": ("bool",),
     "sync.retryBootAfter": _int(0, 4102444800),
+    "secrets.rotateAgeKeyAfter": _int(0, 4102444800),
     "reboot.enabled": ("bool",),
     "reboot.delayMaxSeconds": _int(0, 86400),
     "disk.alertPercent": _int(50, 99),
@@ -51,6 +59,7 @@ SPEC = {
     "runners.reopenAfter": _int(0, 4102444800),
     "runners.repositories": ("list", 64, REPO_PATTERN, ()),
     "runners.extraLabels": ("list", 16, LABEL_PATTERN, RESERVED_LABELS),
+    "devbox.authorizedKeys": ("keys", 16, SSH_KEY_PATTERN),
 }
 
 
@@ -70,6 +79,12 @@ def _valid(rule, value):
                 return False
             if item.lower() in rule[3]:
                 return False
+        return len(set(value)) == len(value)
+    if kind == "keys":
+        if not isinstance(value, list) or len(value) > rule[1]:
+            return False
+        if not all(isinstance(item, str) and "\n" not in item and rule[2].fullmatch(item) for item in value):
+            return False
         return len(set(value)) == len(value)
     return False
 

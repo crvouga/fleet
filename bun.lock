@@ -76,6 +76,8 @@
         "yaml": "catalog:",
       },
       "devDependencies": {
+        "@crvouga/mockingbird-service-oauth": "3.11.0",
+        "@crvouga/mockingbird-service-s3": "3.10.0",
         "@playwright/test": "1.63.0",
         "@tailwindcss/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -161,6 +163,12 @@
     "@babel/types": ["@babel/types@7.29.11", "", { "dependencies": { "@babel/helper-string-parser": "^7.29.11", "@babel/helper-validator-identifier": "^7.29.7" } }, "sha512-WCsemW40Cpc6gouC1SrY6PBaZ+oLRlEVY9XBvZBI7il/HyUrb2nJ505wE1MHEFyDZNnrWDEuy4jL50WVHfTTSQ=="],
 
     "@colors/colors": ["@colors/colors@1.5.0", "", {}, "sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ=="],
+
+    "@crvouga/mockingbird-service-oauth": ["@crvouga/mockingbird-service-oauth@3.11.0", "", { "dependencies": { "@crvouga/mockingbird-service-sqlite": "3.4.0" }, "bin": { "mockingbird-oauth": "dist/cli.js" } }, "sha512-WUPeM0PwrUI/KP2tKYA+7QDLeBMAPqghEzfBntVNMu66WyeZqEdLX4SVQHe9RlF6D4N6tkdwD/+/KD9+nrHU0Q=="],
+
+    "@crvouga/mockingbird-service-s3": ["@crvouga/mockingbird-service-s3@3.10.0", "", { "dependencies": { "@crvouga/mockingbird-service-sqlite": "3.4.0" }, "bin": { "mockingbird-s3": "dist/cli.js" } }, "sha512-kt14oibs6IiqfbPY0ibA9ktu0X/D2MYUr89L/ooSLI7P3nsCnFgsa+TDx6T0yQO43KLO+F575B4v8bNPn8lngw=="],
+
+    "@crvouga/mockingbird-service-sqlite": ["@crvouga/mockingbird-service-sqlite@3.4.0", "", { "bin": { "mockingbird-sqlite": "dist/socket/cli.js" } }, "sha512-NKq8K14BaHp3wtM5yq/8kVtpbb5SjKhIApQNo6zKfmHvP0jGHgaOgvX/glmaHE7hcEoUF4k1qbEwFa3NvG0NyQ=="],
 
     "@cucumber/ci-environment": ["@cucumber/ci-environment@13.0.0", "", {}, "sha512-cs+3NzfNkGbcmHPddjEv4TKFiBpZRQ6WJEEufB9mw+ExS22V/4R/zpDSEG+fsJ/iSNCd6A2sATdY8PFOyY3YnA=="],
 

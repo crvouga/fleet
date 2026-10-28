@@ -11,7 +11,10 @@ import { T0, nodeIdOf, secretOf, sha256 } from './fixtures';
 
 export const ADMIN_TOKEN = 'a-very-long-admin-token-for-tests-0123456789';
 export const SESSION_SECRET = 'a-very-long-session-secret-for-tests-0123456789';
-export const CI_ROLE_TOKEN = 'ci-role-token-shared-secret';
+/** Approves and assigns ci. */
+export const CI_ENROLLMENT_TOKEN = 'ci-enrollment-token-shared-secret';
+/** Approves without assigning a role. */
+export const PLAIN_ENROLLMENT_TOKEN = 'plain-enrollment-token-0123456789';
 
 export const silent: Logger = createLogger({ name: 'test', level: 'silent' });
 
@@ -68,15 +71,15 @@ export interface HarnessOptions {
   readonly clock?: Clock;
   readonly env?: Partial<AppEnv>;
   readonly controller?: ControllerAppOptions;
-  readonly fetch?: typeof fetch;
 }
 
 export function testEnv(overrides: Partial<AppEnv> = {}): AppEnv {
   return {
     adminToken: ADMIN_TOKEN,
-
-    roleTokenHashes: { ci: sha256(CI_ROLE_TOKEN) },
-    githubRepo: 'crvouga/fleet',
+    enrollmentTokens: [
+      { sha256: sha256(CI_ENROLLMENT_TOKEN), role: 'ci' },
+      { sha256: sha256(PLAIN_ENROLLMENT_TOKEN), role: null },
+    ],
     ...overrides,
   };
 }
@@ -92,9 +95,6 @@ export function createHarness(
     auth: new FleetAdminAuth({
       env,
       ...(options.browser ? { browser: options.browser } : {}),
-      now: clock.now,
-      fetch: options.fetch ?? fetch,
-      log: silent,
     }),
     revisions: { latest: async () => null },
     env,
@@ -143,7 +143,6 @@ export function createHarness(
       call('POST', '/v1/nodes/register', {
         json: {
           nodeId: nodeIdOf(n),
-          role: 'ci',
           hostname: `ci-${nodeIdOf(n).slice(0, 4)}`,
           secret: secretOf(n),
           ...extra,

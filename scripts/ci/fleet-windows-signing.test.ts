@@ -15,6 +15,8 @@ test('only a successful trusted main CI can acquire the publisher identity', () 
     workflow_run: { workflows: ['CI'], types: ['completed'] },
   });
   for (const guard of [
+    "vars.FLEET_PUBLISH_RELEASES == 'enabled'",
+    "vars.FLEET_WINDOWS_SIGNING_ENABLED == 'true'",
     "conclusion == 'success'",
     "head_branch == 'main'",
     'head_repository.full_name == github.repository',

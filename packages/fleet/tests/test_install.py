@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""fleet-install runs on the machine. It does not read a work-computer key."""
+"""fleet-install runs on the machine and installs the role-less base system.
+It takes no role, reads no work-computer key and never handles an age key."""
 
-import base64
+import json
 import os
 import pty
-import secrets
 import stat
 import subprocess
 import tempfile
@@ -13,6 +13,12 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "fleet-install.sh"
+DISK = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
+TOKEN = "enroll.token_value-1234"
+GIT_TOKEN = "github_pat_Fixture~Read+Token/Value=="
+GIT_KEY_BODY = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQy"
+GIT_KEY = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + GIT_KEY_BODY + "\nNTUxOQAAACBGaXh0dXJlS2V5Rm9yVGVzdHNPbmx5\n"
+           "-----END OPENSSH PRIVATE KEY-----\n")
 
 
 def write_executable(path: Path, body: str) -> None:
@@ -21,68 +27,6 @@ def write_executable(path: Path, body: str) -> None:
 
 
 class InstallTests(unittest.TestCase):
-    def test_integration_failure_never_selects_or_erases_a_disk_and_keeps_a_copyable_code(self):
-        for status in (2, 75):
-            write_executable(self.bin / 'fleet-bootstrap-ready', f'#!/bin/bash\necho "FLEET_TEST_NOT_READY: fixture integration failure" >&2\nexit {status}\n')
-            result = subprocess.run([str(SCRIPT), 'ci'], capture_output=True, text=True,
-                env={**self.env, 'FLEET_AUTO': '1'})
-            self.assertEqual(result.returncode, status, result.stderr)
-            self.assertIn('FLEET_TEST_NOT_READY', result.stderr)
-            self.assertFalse(self.log.exists())
-            self.assertIn('FLEET_TEST_NOT_READY', Path(self.env['FLEET_INSTALL_LOG'] + '.diagnostic').read_text())
-
-    def test_failed_wifi_readiness_stops_before_disk_or_secret_operations(self):
-        write_executable(self.bin / "fleet-wifi-ready", "#!/bin/bash\nexit 2\n")
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env={**self.env, "FLEET_AUTO": "1"})
-        self.assertEqual(result.returncode, 2)
-        self.assertFalse(self.log.exists())
-
-    def test_wifi_is_checked_before_wiping_and_persisted_after_partitioning(self):
-        write_executable(self.bin / "fleet-wifi-ready", f"#!/bin/bash\nprintf 'wifi-ready\\n' >> '{self.log}'\n")
-        write_executable(self.bin / "fleet-wifi-persist", f"#!/bin/bash\nprintf 'wifi-persist %s\\n' \"$1\" >> '{self.log}'\n")
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env={**self.env, "FLEET_AUTO": "1"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        actions = self.log.read_text()
-        self.assertLess(actions.index("wifi-ready"), actions.index("disko "))
-        self.assertGreater(actions.index("wifi-persist"), actions.index("disko "))
-        self.assertIn("wifi-persist " + str(self.mnt), actions)
-
-    def devbox_env(self, key=None):
-        self.manifest.write_text(f"devbox {self.system}\ndisko {self.disko}\n")
-        env = self.env.copy()
-        env["FLEET_AUTO"] = "1"
-        env["FLEET_CMDLINE"] = str(self.root / "empty-cmdline")
-        (self.root / "empty-cmdline").write_text("")
-        if key is not None:
-            path = self.root / "devbox.pub"
-            path.write_text(key)
-            env["FLEET_DEVBOX_SSH_KEY_FILE"] = str(path)
-        return env
-
-    def test_devbox_without_ssh_access_refuses_before_wiping(self):
-        env = self.devbox_env(key="not a public key")
-        result = subprocess.run([str(SCRIPT), "devbox"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("Nothing was wiped", result.stderr)
-        self.assertFalse(self.log.exists() and "disko " in self.log.read_text())
-
-    def test_devbox_key_is_validated_before_wipe_and_persisted(self):
-        key = "ssh-ed25519 " + base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"x" * 32).decode()
-        env = self.devbox_env(key=key + " workstation\n")
-        result = subprocess.run([str(SCRIPT), "devbox"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        actions = self.log.read_text()
-        self.assertLess(actions.index("ssh-keygen -lf"), actions.index("disko "))
-        self.assertEqual((self.mnt / "nix/fleet-state/devbox/authorized_keys").read_text(), key + "\n")
-
-    def test_devbox_accepts_the_public_key_carried_through_kexec(self):
-        key = "ssh-ed25519 " + base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"x" * 32).decode()
-        env = self.devbox_env()
-        Path(env["FLEET_CMDLINE"]).write_text("fleet.ssh=" + base64.urlsafe_b64encode(key.encode()).decode())
-        result = subprocess.run([str(SCRIPT), "devbox"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.mnt / "nix/fleet-state/devbox/authorized_keys").read_text(), key + "\n")
-
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -91,7 +35,7 @@ class InstallTests(unittest.TestCase):
         self.log = self.root / "actions"
         self.mnt = self.root / "mnt"
         self.recorded = self.root / "recorded"
-        self.system = self.root / "systems" / "ci"
+        self.system = self.root / "systems" / "base"
         self.system.mkdir(parents=True)
         self.disko = self.root / "disko"
         write_executable(self.disko, f"""\
@@ -103,15 +47,6 @@ class InstallTests(unittest.TestCase):
             #!/bin/bash
             printf 'select\\n' >> {self.log}
             cat {self.root}/disk
-            """)
-        write_executable(self.bin / "age-keygen", f"""\
-            #!/bin/bash
-            printf 'age %s\\n' "$*" >> {self.log}
-            if [ "$1" = "-y" ]; then
-              echo age1publicstub
-              exit 0
-            fi
-            printf 'AGE-SECRET-KEY-STUB\\n' > "$2"
             """)
         write_executable(self.bin / "ssh-keygen", f"""\
             #!/bin/bash
@@ -133,37 +68,42 @@ class InstallTests(unittest.TestCase):
             #!/bin/bash
             printf 'install %s\\n' "$*" >> {self.log}
             """)
-        (self.root / "disk").write_text("/dev/disk/by-path/pci-0000:01:00.0-nvme-1\n")
-        manifest = self.root / "manifest"
-        manifest.write_text(f"ci {self.system}\ndisko {self.disko}\n")
-        self.manifest = manifest
+        (self.root / "disk").write_text(DISK + "\n")
+        self.manifest = self.root / "manifest"
+        self.manifest.write_text(f"base {self.system}\ndisko {self.disko}\n")
+        self.cmdline = self.root / "cmdline"
+        self.cmdline.write_text("quiet\n")
+        self.enrolled = self.root / "enrolled"
         self.env = os.environ.copy()
+        for name in ("FLEET_KEY_DIR", "FLEET_ENROLL_TOKEN", "FLEET_AUTO", "FLEET_GIT_CREDENTIAL_FILE"):
+            self.env.pop(name, None)
         self.env.update({
             "PATH": f"{self.bin}:{os.environ.get('PATH', '')}",
             "FLEET_ALLOW_UNPRIVILEGED": "1",
-            "FLEET_MANIFEST": str(manifest),
+            "FLEET_MANIFEST": str(self.manifest),
             "FLEET_MNT": str(self.mnt),
             "FLEET_RECORDED": str(self.recorded),
             "FLEET_INSTALL_LOG": str(self.root / "install.log"),
             "FLEET_SELECT_DISK": str(self.bin / "select-disk"),
-            "FLEET_AGE_KEYGEN": str(self.bin / "age-keygen"),
             "FLEET_SSH_KEYGEN": str(self.bin / "ssh-keygen"),
             "FLEET_NIXOS_INSTALL": str(self.bin / "nixos-install"),
+            "FLEET_CMDLINE": str(self.cmdline),
+            "FLEET_ENROLLED_DIR": str(self.enrolled),
+            "FLEET_ENROLLMENT_HANDOFF": str(self.root / "handoff-token"),
+            "FLEET_GIT_CREDENTIAL_HANDOFF": str(self.root / "handoff-git"),
         })
-        self.env.pop("FLEET_KEY_DIR", None)
 
     def tearDown(self):
         self.tmp.cleanup()
 
+    def auto(self, *args, **extra):
+        return subprocess.run([str(SCRIPT), *args], capture_output=True, text=True,
+                              env={**self.env, "FLEET_AUTO": "1", **extra}, check=False)
+
     def run_tty(self, args, typed, env=None):
         master, slave = pty.openpty()
-        proc = subprocess.Popen(
-            [str(SCRIPT), *args],
-            stdin=slave,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env or self.env,
-        )
+        proc = subprocess.Popen([str(SCRIPT), *args], stdin=slave, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env or self.env)
         os.close(slave)
         os.write(master, typed.encode())
         try:
@@ -172,371 +112,279 @@ class InstallTests(unittest.TestCase):
             os.close(master)
         return proc.returncode, out.decode(), err.decode()
 
+    def agent_dir(self):
+        return self.mnt / "nix/fleet-state/agent"
+
+    def wiped(self):
+        return self.log.exists() and "disko " in self.log.read_text()
+
+    # ---- what is installed -----------------------------------------------------
+
+    def test_installs_base_without_a_role_or_an_age_key(self):
+        code, _out, err = self.run_tty([], DISK + "\n")
+        self.assertEqual(code, 0, err)
+        actions = self.log.read_text()
+        self.assertIn(f"disko {DISK}", actions)
+        self.assertIn(f"install --no-root-passwd --root {self.mnt} --system {self.system}", actions)
+        # The node creates its own age identity on first boot.
+        self.assertFalse((self.mnt / "nix/fleet-state/secrets").exists())
+        self.assertTrue((self.mnt / "nix/fleet-state/ssh/ssh_host_ed25519_key").is_file())
+        self.assertEqual((self.mnt / "nix/fleet-state/installed").read_text(), "status=installed\n")
+        self.assertNotIn("Role:", err)
+        self.assertIn("Assign its role in the Fleet app", err)
+
+    def test_a_role_argument_is_refused_before_anything(self):
+        for role in ("ci", "devbox", "ci-gpu"):
+            with self.subTest(role=role):
+                result = self.auto(role)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("role is assigned in the Fleet app", result.stderr)
+                self.assertFalse(self.log.exists())
+
+    def test_an_old_boot_entry_role_is_ignored_with_a_log_line(self):
+        self.cmdline.write_text("root=LABEL=nixos fleet.role=ci fleet.role=devbox\n")
+        result = self.auto()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"--system {self.system}", self.log.read_text())
+        self.assertIn("ignoring fleet.role=devbox", (self.root / "install.log").read_text())
+
+    def test_a_manifest_without_base_does_not_touch_a_disk(self):
+        self.manifest.write_text(f"ci {self.system}\ndisko {self.disko}\n")
+        result = self.auto()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("base system is not on this image", result.stderr)
+        self.assertFalse(self.wiped())
+
     def test_missing_manifest_does_not_touch_a_disk(self):
-        env = self.env.copy()
-        env["FLEET_MANIFEST"] = str(self.root / "missing")
-        result = subprocess.run(
-            [str(SCRIPT), "ci"],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
+        result = self.auto(FLEET_MANIFEST=str(self.root / "missing"))
         self.assertEqual(result.returncode, 1)
         self.assertIn("USB image", result.stderr)
         self.assertFalse(self.log.exists())
 
-    def test_gpu_role_is_not_on_the_image(self):
-        result = subprocess.run(
-            [str(SCRIPT), "ci-gpu"],
-            capture_output=True,
-            text=True,
-            env=self.env,
-            check=False,
-        )
+    # ---- the optional enrollment token -------------------------------------------
+
+    def assert_token_installed(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = self.agent_dir() / "enrollment-token"
+        self.assertEqual(installed.read_text(), TOKEN + "\n")
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.agent_dir().stat().st_mode & 0o777, 0o700)
+        for text in (result.stdout, result.stderr, (self.root / "install.log").read_text(), self.log.read_text()):
+            self.assertNotIn(TOKEN, text)
+        self.assertIn("enrollment token: installed", (self.root / "install.log").read_text())
+        self.assertNotIn(TOKEN, self.cmdline.read_text())
+
+    def test_a_token_from_the_private_handoff_is_installed_privately_and_never_printed(self):
+        (self.root / "handoff-token").write_text(TOKEN + "\n")
+        result = self.auto()
+        self.assert_token_installed(result)
+        self.assertIn("from the private handoff", (self.root / "install.log").read_text())
+
+    def test_a_token_from_a_fleet_key_volume_is_installed(self):
+        stick = self.root / "stick"
+        stick.mkdir()
+        (stick / "enrollment.token").write_text(TOKEN + "\n")
+        result = self.auto(FLEET_KEY_DIR=str(stick))
+        self.assert_token_installed(result)
+        self.assertIn("from the FLEET-KEY volume", (self.root / "install.log").read_text())
+
+    def test_a_token_from_the_environment_is_installed(self):
+        self.assert_token_installed(self.auto(FLEET_ENROLL_TOKEN=TOKEN))
+
+    def test_without_a_token_nothing_is_written_for_one(self):
+        result = self.auto()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.agent_dir() / "enrollment-token").exists())
+        self.assertFalse((self.enrolled / "enrollment-token").exists())
+        self.assertIn("enrollment token: none", (self.root / "install.log").read_text())
+
+    def test_a_malformed_token_is_refused_before_wiping_and_never_printed(self):
+        for bad in ("short", "has space in it", "semi;colon-token", "x" * 513):
+            with self.subTest(token=bad[:20]):
+                (self.root / "handoff-token").write_text(bad + "\n")
+                result = self.auto()
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("Nothing was wiped", result.stderr)
+                self.assertNotIn(bad, result.stdout + result.stderr)
+                self.assertFalse(self.wiped())
+
+    def test_readiness_receives_the_token_file_not_the_token(self):
+        seen = self.root / "ready-args"
+        write_executable(self.bin / "fleet-bootstrap-ready", f'#!/bin/bash\nprintf "%s\\n" "$@" > {seen}\ncat "$2" >> {seen}\n')
+        (self.root / "handoff-token").write_text(TOKEN + "\n")
+        result = self.auto()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(seen.read_text().splitlines(), [str(self.system), str(self.enrolled / "enrollment-token"), TOKEN])
+
+    def test_the_live_node_credential_follows_the_node(self):
+        (self.enrolled / "agent").mkdir(parents=True)
+        (self.enrolled / "agent/node.secret").write_text("a" * 64 + "\n")
+        result = self.auto()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = self.agent_dir() / "node.secret"
+        self.assertEqual(installed.read_text(), "a" * 64 + "\n")
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+
+    # ---- the optional Git read credential of a private repository -----------------
+
+    def repo_auth(self, auth):
+        (self.system / "etc/fleet").mkdir(parents=True, exist_ok=True)
+        (self.system / "etc/fleet/bootstrap.json").write_text(json.dumps({"version": 1, "repoAuth": auth}))
+
+    def secrets_dir(self):
+        return self.mnt / "nix/fleet-state/secrets"
+
+    def assert_git_installed(self, result, name, value):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = self.secrets_dir() / name
+        self.assertEqual(installed.read_text(), value)
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.secrets_dir().stat().st_mode & 0o777, 0o700)
+        self.assertEqual(sorted(path.name for path in self.secrets_dir().iterdir()), [name])
+        secret = value.strip().splitlines()[1] if value.startswith("-----") else value.strip()
+        for text in (result.stdout, result.stderr, (self.root / "install.log").read_text(), self.log.read_text(),
+                     self.cmdline.read_text()):
+            self.assertNotIn(secret, text)
+        self.assertIn(f"git read credential: installed as {name}", (self.root / "install.log").read_text())
+        self.assertFalse((self.enrolled / "git-credential").exists(), "the staged copy does not outlive the install")
+
+    def test_a_git_token_file_from_the_environment_is_installed_at_the_fixed_path(self):
+        self.repo_auth("token")
+        supplied = self.root / "git-token"
+        supplied.write_text(GIT_TOKEN + "\n")
+        self.assert_git_installed(self.auto(FLEET_GIT_CREDENTIAL_FILE=str(supplied)), "git-read-token", GIT_TOKEN + "\n")
+
+    def test_a_git_key_from_the_private_handoff_is_installed_at_the_fixed_path(self):
+        self.repo_auth("ssh")
+        (self.root / "handoff-git").write_text(GIT_KEY.replace("\n", "\r\n"))
+        result = self.auto()
+        self.assert_git_installed(result, "git-read-key", GIT_KEY)
+        self.assertIn("ssh from the private handoff", (self.root / "install.log").read_text())
+
+    def test_git_credentials_from_a_fleet_key_volume_are_installed(self):
+        for auth, name, value in (("ssh", "git-read-key", GIT_KEY), ("token", "git-read-token", GIT_TOKEN + "\n")):
+            with self.subTest(auth=auth):
+                self.tearDown()
+                self.setUp()
+                self.repo_auth(auth)
+                stick = self.root / "stick"
+                stick.mkdir()
+                (stick / name).write_text(value)
+                self.assert_git_installed(self.auto(FLEET_KEY_DIR=str(stick)), name, value)
+
+    def test_a_private_repository_without_a_credential_is_refused_before_any_disk_work(self):
+        for auth in ("ssh", "token"):
+            with self.subTest(auth=auth):
+                self.repo_auth(auth)
+                result = self.auto()
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"FLEET_GIT_CREDENTIAL_MISSING: this fleet follows a private repository (repo.auth = {auth}). "
+                              "Supply its read credential with --git-credential-file or a FLEET-KEY volume.", result.stderr)
+                self.assertFalse(self.log.exists(), "no disk was selected or erased")
+                self.assertIn("FLEET_GIT_CREDENTIAL_MISSING", Path(self.env["FLEET_INSTALL_LOG"] + ".diagnostic").read_text())
+
+    def test_a_git_credential_of_the_wrong_kind_is_refused_before_any_disk_work(self):
+        token_file, key_file = self.root / "git-token", self.root / "git-key"
+        token_file.write_text(GIT_TOKEN + "\n")
+        key_file.write_text(GIT_KEY)
+        stick = self.root / "stick"
+        stick.mkdir()
+        (stick / "git-read-key").write_text(GIT_TOKEN + "\n")  # a token in the key's file
+        for auth, extra in (("ssh", {"FLEET_GIT_CREDENTIAL_FILE": str(token_file)}),
+                            ("token", {"FLEET_GIT_CREDENTIAL_FILE": str(key_file)}),
+                            ("ssh", {"FLEET_KEY_DIR": str(stick)})):
+            with self.subTest(auth=auth, extra=sorted(extra)):
+                self.repo_auth(auth)
+                result = self.auto(**extra)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("FLEET_GIT_CREDENTIAL_WRONG_KIND", result.stderr)
+                self.assertNotIn(GIT_TOKEN, result.stdout + result.stderr)
+                self.assertNotIn(GIT_KEY_BODY, result.stdout + result.stderr)
+                self.assertFalse(self.log.exists())
+                self.assertFalse((self.enrolled / "git-credential").exists())
+
+    def test_a_malformed_git_credential_is_refused_and_never_printed(self):
+        self.repo_auth("token")
+        for bad in ("short", "has space in it", "x" * 1025, GIT_TOKEN + "\n" + GIT_TOKEN,
+                    GIT_KEY + "trailing text", GIT_KEY.replace("-----END", "-----FINISH"),
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A" * 17000 + "\n-----END OPENSSH PRIVATE KEY-----\n"):
+            with self.subTest(bad=bad[:20]):
+                (self.root / "handoff-git").write_text(bad)
+                result = self.auto()
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("FLEET_GIT_CREDENTIAL_INVALID", result.stderr)
+                self.assertNotIn("FLEET-FAIL", result.stderr, "a refusal, not a crash")
+                self.assertIn("Nothing was wiped", result.stderr)
+                for line in bad.splitlines():
+                    if len(line) >= 8 and "OPENSSH" not in line:
+                        self.assertNotIn(line, result.stdout + result.stderr + (self.root / "install.log").read_text())
+                self.assertFalse(self.log.exists())
+
+    def test_a_public_repository_ignores_a_supplied_credential_with_a_log_line(self):
+        for metadata in ("none", None):
+            with self.subTest(repo_auth=metadata):
+                self.tearDown()
+                self.setUp()
+                if metadata:
+                    self.repo_auth(metadata)
+                (self.root / "handoff-git").write_text(GIT_TOKEN + "\n")
+                result = self.auto()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.secrets_dir().exists())
+                self.assertIn("ignored; this fleet's repository is public", (self.root / "install.log").read_text())
+                self.assertNotIn(GIT_TOKEN, (self.root / "install.log").read_text())
+
+    def test_an_unknown_repo_auth_is_refused_before_any_disk_work(self):
+        self.repo_auth("password")
+        result = self.auto()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("FLEET_METADATA_INVALID", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    # ---- checks before the wipe --------------------------------------------------
+
+    def test_integration_failure_never_selects_or_erases_a_disk_and_keeps_a_copyable_code(self):
+        for status in (2, 75):
+            write_executable(self.bin / 'fleet-bootstrap-ready', f'#!/bin/bash\necho "FLEET_TEST_NOT_READY: fixture integration failure" >&2\nexit {status}\n')
+            result = self.auto()
+            self.assertEqual(result.returncode, status, result.stderr)
+            self.assertIn('FLEET_TEST_NOT_READY', result.stderr)
+            self.assertFalse(self.log.exists())
+            self.assertIn('FLEET_TEST_NOT_READY', Path(self.env['FLEET_INSTALL_LOG'] + '.diagnostic').read_text())
+
+    def test_failed_wifi_readiness_stops_before_disk_operations(self):
+        write_executable(self.bin / "fleet-wifi-ready", "#!/bin/bash\nexit 2\n")
+        result = self.auto()
         self.assertEqual(result.returncode, 2)
         self.assertFalse(self.log.exists())
 
-    def test_auto_wipes_without_typing_the_path(self):
-        env = self.env.copy()
-        env["FLEET_AUTO"] = "1"
-        result = subprocess.run(
-            [str(SCRIPT), "ci"],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
-        disk = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
+    def test_wifi_is_checked_before_wiping_and_persisted_after_partitioning(self):
+        write_executable(self.bin / "fleet-wifi-ready", f"#!/bin/bash\nprintf 'wifi-ready\\n' >> '{self.log}'\n")
+        write_executable(self.bin / "fleet-wifi-persist", f"#!/bin/bash\nprintf 'wifi-persist %s\\n' \"$1\" >> '{self.log}'\n")
+        result = self.auto()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"disko {disk}", self.log.read_text())
-        self.assertIn("Wiping that disk", result.stderr)
-        self.assertNotIn("AGE-SECRET-KEY-STUB", result.stderr)
+        actions = self.log.read_text()
+        self.assertLess(actions.index("wifi-ready"), actions.index("disko "))
+        self.assertGreater(actions.index("wifi-persist"), actions.index("disko "))
+        self.assertIn("wifi-persist " + str(self.mnt), actions)
 
-    def test_cmdline_role_uses_the_last_value(self):
-        cmdline = self.root / "cmdline"
-        cmdline.write_text("root=LABEL=nixos fleet.role=ci fleet.role=devbox\n")
-        devbox = self.root / "systems" / "devbox"
-        devbox.mkdir()
-        key = "ssh-ed25519 " + base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"x" * 32).decode()
-        env = self.devbox_env(key=key + "\n")
-        self.manifest.write_text(
-            f"ci {self.system}\ndevbox {devbox}\ndisko {self.disko}\n"
-        )
-        env["FLEET_CMDLINE"] = str(cmdline)
-        result = subprocess.run(
-            [str(SCRIPT)],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
+    def test_auto_wipes_without_typing_the_path(self):
+        result = self.auto()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"install --no-root-passwd --root {self.mnt} --system {devbox}", self.log.read_text())
-        self.assertIn("Role: devbox", result.stderr)
+        self.assertIn(f"disko {DISK}", self.log.read_text())
+        self.assertIn("Wiping that disk", result.stderr)
 
     def test_non_tty_refuses_before_disko(self):
-        result = subprocess.run(
-            [str(SCRIPT), "ci"],
-            input="/dev/disk/by-path/pci-0000:01:00.0-nvme-1\n",
-            capture_output=True,
-            text=True,
-            env=self.env,
-            check=False,
-        )
+        result = subprocess.run([str(SCRIPT)], input=DISK + "\n", capture_output=True, text=True, env=self.env, check=False)
         self.assertEqual(result.returncode, 2)
         self.assertIn("without a terminal", result.stderr)
-        self.assertFalse(self.log.exists() and "disko " in self.log.read_text())
+        self.assertFalse(self.wiped())
 
     def test_wrong_path_does_not_wipe(self):
-        code, _out, err = self.run_tty(["ci"], "nope\n")
+        code, _out, err = self.run_tty([], "nope\n")
         self.assertEqual(code, 1)
         self.assertIn("did not match", err)
         self.assertNotIn("disko ", self.log.read_text())
-
-    def test_install_generates_a_key_and_does_not_print_it(self):
-        disk = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
-        code, _out, err = self.run_tty(["ci"], disk + "\n")
-        self.assertEqual(code, 0, err)
-        actions = self.log.read_text()
-        self.assertIn(f"disko {disk}", actions)
-        self.assertIn(f"install --no-root-passwd --root {self.mnt} --system {self.system}", actions)
-        secret = (self.mnt / "nix/fleet-state/secrets/age.key").read_text()
-        self.assertEqual(secret, "AGE-SECRET-KEY-STUB\n")
-        self.assertEqual((self.mnt / "nix/fleet-state/secrets/age.pub").read_text(), "age1publicstub\n")
-        self.assertIn("age1publicstub", err)
-        self.assertNotIn("AGE-SECRET-KEY-STUB", err)
-        self.assertTrue((self.mnt / "nix/fleet-state/ssh/ssh_host_ed25519_key").is_file())
-        self.assertIn("Remove the USB", err)
-
-    def test_existing_stick_key_is_reused(self):
-        stick = self.root / "stick"
-        stick.mkdir()
-        (stick / "ci.age").write_text("FROM-STICK\n")
-        env = self.env.copy()
-        env["FLEET_KEY_DIR"] = str(stick)
-        disk = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
-        code, _out, err = self.run_tty(["ci"], disk + "\n", env)
-        self.assertEqual(code, 0, err)
-        self.assertEqual((self.mnt / "nix/fleet-state/secrets/age.key").read_text(), "FROM-STICK\n")
-        self.assertNotIn("age -o", self.log.read_text())
-
-    def test_new_key_is_copied_to_an_empty_stick(self):
-        stick = self.root / "stick"
-        stick.mkdir()
-        env = self.env.copy()
-        env["FLEET_KEY_DIR"] = str(stick)
-        disk = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
-        code, _out, err = self.run_tty(["ci"], disk + "\n", env)
-        self.assertEqual(code, 0, err)
-        self.assertEqual((stick / "ci.age").read_text(), "AGE-SECRET-KEY-STUB\n")
-        self.assertNotIn("AGE-SECRET-KEY-STUB", err)
-
-    def enroll_env(self, reply, fail=False):
-        write_executable(self.bin / "curl", f"""\
-            #!/bin/bash
-            printf 'curl %s\\n' "$*" >> {self.log}
-            hdr=""; out=""; prev=""
-            for arg in "$@"; do
-              if [ "$prev" = "-H" ]; then hdr=${{arg#@}}; fi
-              if [ "$prev" = "-o" ]; then out=$arg; fi
-              prev=$arg
-            done
-            cp "$hdr" {self.root}/seen-header
-            [ -f {self.root}/curl-fail ] && exit 22
-            printf '%s' '{reply}' > "$out"
-            """)
-        if fail:
-            (self.root / "curl-fail").write_text("1")
-        env = self.env.copy()
-        env.update({
-            "FLEET_AUTO": "1",
-            "FLEET_CURL": str(self.bin / "curl"),
-            "FLEET_ENROLLED_DIR": str(self.root / "enrolled"),
-            "FLEET_CMDLINE": str(self.root / "cmdline"),
-        })
-        (self.root / "cmdline").write_text("quiet fleet.role=ci fleet.enroll=hvs.wrapped-token-1 fleet.vault=https://vault.example\n")
-        return env
-
-    def test_enrollment_token_supplies_the_role_key_before_the_wipe(self):
-        env = self.enroll_env('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED"}}}')
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        actions = self.log.read_text()
-        self.assertLess(actions.index("curl "), actions.index("disko "))
-        self.assertIn("https://vault.example/v1/sys/wrapping/unwrap", actions)
-        self.assertNotIn("hvs.wrapped-token-1", actions)
-        self.assertIn("hvs.wrapped-token-1", (self.root / "seen-header").read_text())
-        self.assertEqual((self.mnt / "nix/fleet-state/secrets/age.key").read_text(), "AGE-SECRET-KEY-ENROLLED\n")
-        self.assertNotIn("age -o", actions)
-        for text in (result.stdout, result.stderr):
-            self.assertNotIn("AGE-SECRET-KEY-ENROLLED", text)
-            self.assertNotIn("hvs.wrapped-token-1", text)
-
-    def test_a_refused_token_leaves_the_disk_alone(self):
-        env = self.enroll_env("{}", fail=True)
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("disko", self.log.read_text())
-        self.assertIn("Nothing was wiped", result.stderr)
-        self.assertNotIn("hvs.wrapped-token-1", result.stderr)
-
-    def test_a_token_without_an_age_key_leaves_the_disk_alone(self):
-        env = self.enroll_env('{"data":{"data":{"other":"x"}}}')
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("disko", self.log.read_text())
-
-    def test_the_install_log_follows_the_node_and_holds_no_secret(self):
-        disk = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
-        code, _out, err = self.run_tty(["ci"], disk + "\n")
-        self.assertEqual(code, 0, err)
-        kept = self.mnt / "nix/fleet-state/logs/install.log"
-        body = kept.read_text()
-        self.assertEqual(oct(kept.stat().st_mode & 0o777), "0o600")
-        self.assertRegex(body, r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ role=ci ")
-        # Each step the live screens show is also in the log, in order.
-        steps = [line.split(" step ", 1)[1] for line in body.splitlines() if " step " in line]
-        self.assertEqual(steps, ["network", "approval", "checks", "disk", "erase", "install"])
-        for step in ("partitioning with disko", "disko done", "nixos-install done", "installed role=ci"):
-            self.assertIn(step, body)
-        self.assertIn("age key: generated on this machine", body)
-        self.assertNotIn("AGE-SECRET-KEY", body)
-
-    def test_a_failed_step_is_loud_and_says_where(self):
-        write_executable(self.bin / "nixos-install", f"""\
-            #!/bin/bash
-            echo 'no space left' >&2
-            exit 7
-            """)
-        disk = "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
-        code, _out, err = self.run_tty(["ci"], disk + "\n")
-        self.assertNotEqual(code, 0)
-        self.assertIn("FLEET-FAIL fleet-install stopped at line", err)
-        self.assertIn("(exit 7)", err)
-        self.assertIn(f"Log: {self.root / 'install.log'}", err)
-        body = (self.root / "install.log").read_text()
-        self.assertIn("FAIL exit 7", body)
-        self.assertNotIn("installed role=ci", body)
-
-    def test_the_log_says_where_the_key_came_from_and_never_the_token(self):
-        env = self.enroll_env('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED"}}}')
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        body = (self.root / "install.log").read_text()
-        self.assertIn("age key: from the enrollment token", body)
-        self.assertNotIn("hvs.wrapped-token-1", body)
-        self.assertNotIn("AGE-SECRET-KEY-ENROLLED", body)
-
-    def test_a_refused_token_is_in_the_log(self):
-        env = self.enroll_env("{}", fail=True)
-        subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertIn("nothing wiped", (self.root / "install.log").read_text())
-
-    def test_a_retry_in_the_same_boot_reuses_the_unwrapped_key(self):
-        env = self.enroll_env('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED"}}}')
-        subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        (self.root / "curl-fail").write_text("1")
-        again = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertEqual((self.mnt / "nix/fleet-state/secrets/age.key").read_text(), "AGE-SECRET-KEY-ENROLLED\n")
-
-    def run_enrolled(self, reply, fail_after=False):
-        env = self.enroll_env(reply)
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        return env, result
-
-    def agent_dir(self):
-        return self.mnt / "nix/fleet-state/agent"
-
-    def test_the_fleet_api_role_token_is_installed_privately_and_never_printed(self):
-        token = secrets.token_hex(24)
-        env, result = self.run_enrolled('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED","api_token":"' + token + '"}}}')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        installed = self.agent_dir() / "role-token"
-        self.assertEqual(installed.read_text(), token + "\n")
-        self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.agent_dir().stat().st_mode & 0o777, 0o700)
-        self.assertEqual([path.name for path in self.agent_dir().iterdir()], ["role-token"])
-        for text in (result.stdout, result.stderr, (self.root / "install.log").read_text(), self.log.read_text()):
-            self.assertNotIn(token, text)
-        self.assertIn("fleet controller role token: installed", (self.root / "install.log").read_text())
-
-    def test_a_token_document_without_api_token_installs_without_one(self):
-        env, result = self.run_enrolled('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED"}}}')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.agent_dir().exists())
-        self.assertEqual((self.mnt / "nix/fleet-state/secrets/age.key").read_text(), "AGE-SECRET-KEY-ENROLLED\n")
-
-    def test_the_api_token_may_sit_in_an_unversioned_document(self):
-        token = "flat.token_value-123"
-        env, result = self.run_enrolled('{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED","api_token":"' + token + '"}}')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.agent_dir() / "role-token").read_text(), token + "\n")
-
-    def test_an_unusable_api_token_is_dropped_and_the_install_still_succeeds(self):
-        for index, bad in enumerate(("has space in it", "short", "x" * 513, "semi;colon-token", "new\\nline-token", "")):
-            with self.subTest(token=bad):
-                reply = '{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED","api_token":"' + bad + '"}}}'
-                (self.root / "enrolled").mkdir(exist_ok=True)
-                for leftover in (self.root / "enrolled").iterdir():
-                    leftover.unlink()
-                env, result = self.run_enrolled(reply)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertFalse((self.agent_dir() / "role-token").exists())
-
-    def test_a_non_string_api_token_is_dropped(self):
-        env, result = self.run_enrolled('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED","api_token":12345678}}}')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.agent_dir() / "role-token").exists())
-
-    def test_a_retry_in_the_same_boot_keeps_the_api_token(self):
-        token = "ci-role-token-retry-1234"
-        env, first = self.run_enrolled('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED","api_token":"' + token + '"}}}')
-        self.assertEqual(first.returncode, 0, first.stderr)
-        (self.agent_dir() / "role-token").unlink()
-        (self.root / "curl-fail").write_text("1")
-        again = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertEqual((self.agent_dir() / "role-token").read_text(), token + "\n")
-
-    def test_a_refused_enrollment_never_leaves_a_token_on_the_new_disk(self):
-        env = self.enroll_env("{}", fail=True)
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(self.agent_dir().exists())
-
-    def test_the_stick_key_wins_over_a_token(self):
-        stick = self.root / "stick"
-        stick.mkdir()
-        (stick / "ci.age").write_text("FROM-STICK\n")
-        env = self.enroll_env('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED"}}}')
-        env["FLEET_KEY_DIR"] = str(stick)
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("curl ", self.log.read_text())
-        self.assertEqual((self.mnt / "nix/fleet-state/secrets/age.key").read_text(), "FROM-STICK\n")
-
-    def test_identical_role_keys_are_refused(self):
-        stick = self.root / "stick"
-        stick.mkdir()
-        (stick / "ci.age").write_text("SAME\n")
-        (stick / "devbox.age").write_text("SAME\n")
-        env = self.env.copy()
-        env["FLEET_KEY_DIR"] = str(stick)
-        result = subprocess.run(
-            [str(SCRIPT), "devbox"],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("must differ", result.stderr)
-        self.assertFalse(self.log.exists())
-
-    def test_comment_changes_cannot_hide_a_shared_role_identity(self):
-        stick = self.root / "stick"
-        stick.mkdir()
-        (stick / "ci.age").write_text("# ci\nSAME-IDENTITY\n")
-        (stick / "devbox.age").write_text("# devbox\nSAME-IDENTITY\n")
-        env = dict(self.env, FLEET_KEY_DIR=str(stick), FLEET_AUTO="1")
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("same recipient", result.stderr)
-        self.assertNotIn("disko", self.log.read_text())
-
-    def reject_bad_age_keys(self):
-        write_executable(self.bin / "age-keygen", """\
-            #!/bin/bash
-            if [ "$1" = -y ]; then
-              grep -q CORRUPT "$2" && exit 1
-              echo age1validstub
-              exit 0
-            fi
-            exit 1
-            """)
-
-    def test_invalid_stick_identity_is_refused_before_partitioning(self):
-        self.reject_bad_age_keys()
-        stick = self.root / "stick"
-        stick.mkdir()
-        (stick / "ci.age").write_text("AGE-SECRET-KEY-CORRUPT\n")
-        env = dict(self.env, FLEET_KEY_DIR=str(stick), FLEET_AUTO="1")
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("Nothing was wiped", result.stderr)
-        self.assertFalse(self.log.exists())
-        self.assertNotIn("AGE-SECRET-KEY-CORRUPT", result.stdout + result.stderr)
-
-    def test_invalid_enrolled_identity_can_be_replaced_without_wiping(self):
-        self.reject_bad_age_keys()
-        env = self.enroll_env('{"data":{"data":{"age_key":"AGE-SECRET-KEY-CORRUPT"}}}')
-        result = subprocess.run([str(SCRIPT), "ci"], capture_output=True, text=True, env=env, check=False)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertNotIn("disko", self.log.read_text())
-        self.assertFalse((Path(env["FLEET_ENROLLED_DIR"]) / "ci.age").exists())
-        self.assertNotIn("AGE-SECRET-KEY-CORRUPT", result.stdout + result.stderr)
 
     def test_changed_disk_selection_aborts(self):
         write_executable(self.bin / "select-disk", f"""\
@@ -551,13 +399,44 @@ class InstallTests(unittest.TestCase):
               echo /dev/disk/by-path/pci-0000:02:00.0-nvme-1
             fi
             """)
-        result = subprocess.run(
-            [str(SCRIPT), "ci"],
-            capture_output=True,
-            text=True,
-            env=self.env,
-            check=False,
-        )
+        result = subprocess.run([str(SCRIPT)], capture_output=True, text=True, env=self.env, check=False)
         self.assertEqual(result.returncode, 1)
         self.assertIn("Disk selection changed", result.stderr)
         self.assertFalse(self.log.exists())
+
+    # ---- the record ---------------------------------------------------------------
+
+    def test_the_install_log_follows_the_node_and_holds_no_secret(self):
+        (self.root / "handoff-token").write_text(TOKEN + "\n")
+        code, _out, err = self.run_tty([], DISK + "\n")
+        self.assertEqual(code, 0, err)
+        kept = self.mnt / "nix/fleet-state/logs/install.log"
+        body = kept.read_text()
+        self.assertEqual(oct(kept.stat().st_mode & 0o777), "0o600")
+        self.assertRegex(body, r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ disk=")
+        # Each step the live screens show is also in the log, in order.
+        steps = [line.split(" step ", 1)[1] for line in body.splitlines() if " step " in line]
+        self.assertEqual(steps, ["network", "approval", "checks", "disk", "erase", "install"])
+        for step in ("partitioning with disko", "disko done", "nixos-install done", "installed the Fleet base system"):
+            self.assertIn(step, body)
+        self.assertNotIn(TOKEN, body)
+
+    def test_a_failed_step_is_loud_and_says_where(self):
+        write_executable(self.bin / "nixos-install", """\
+            #!/bin/bash
+            echo 'no space left' >&2
+            exit 7
+            """)
+        code, _out, err = self.run_tty([], DISK + "\n")
+        self.assertNotEqual(code, 0)
+        self.assertIn("FLEET-FAIL fleet-install stopped at line", err)
+        self.assertIn("(exit 7)", err)
+        self.assertIn(f"Log: {self.root / 'install.log'}", err)
+        body = (self.root / "install.log").read_text()
+        self.assertIn("FAIL exit 7", body)
+        self.assertNotIn("installed the Fleet base system", body)
+        self.assertFalse((self.mnt / "nix/fleet-state/installed").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

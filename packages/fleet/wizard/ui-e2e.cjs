@@ -188,8 +188,8 @@ async function main() {
       child.kill();
     }
 
-    // ---- devbox: select a public key through the GUI and review --------------
-    scenario('devbox review and Report a problem');
+    // ---- this computer: review installs base, no role choice -----------------
+    scenario('in-place review and Report a problem');
     {
       const internal = {
         ...usb,
@@ -208,16 +208,6 @@ async function main() {
         path.join(dir, 'disks.json'),
         JSON.stringify([internal, usb])
       );
-      const key =
-        'ssh-ed25519 ' +
-        Buffer.concat([
-          Buffer.from([0, 0, 0, 11]),
-          Buffer.from('ssh-ed25519'),
-          Buffer.from([0, 0, 0, 32]),
-          Buffer.alloc(32, 7),
-        ]).toString('base64');
-      const keyFile = path.join(dir, 'devbox.pub');
-      fs.writeFileSync(keyFile, key + ' workstation\n');
       const { child, url } = await startWizard({
         ...env,
         FLEET_OS: 'Linux',
@@ -228,22 +218,18 @@ async function main() {
       const page = await browser.newPage();
       await page.goto(url);
       await page.getByRole('button', { name: /Turn THIS computer/ }).click();
-      await page.locator('input[name="role"][value="devbox"]').check();
-      await page.locator('#key-file').setInputFiles(keyFile);
-      await page.waitForFunction(() =>
-        document.getElementById('ssh-key').value.startsWith('ssh-ed25519 ')
+      assert.equal(
+        await page.locator('input[name="role"]').count(),
+        0,
+        'the installer offers no role choice'
       );
       await page.getByRole('button', { name: 'Review' }).click();
       await page.getByRole('button', { name: 'Erase and install' }).waitFor();
       await page.getByText(/Automatic checks \(/).click();
       const review = await page.locator('body').innerText();
       assert.ok(
-        review.includes('Remote devbox'),
-        'review names the intended role'
-      );
-      assert.ok(
-        review.includes('ssh-access'),
-        'SSH access is validated before confirmation'
+        review.includes('installs a Fleet node'),
+        'review says it installs a Fleet node'
       );
       assert.ok(
         review.includes('Test internal SSD'),

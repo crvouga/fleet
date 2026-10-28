@@ -3,7 +3,10 @@ import type { Logger } from '@pkgs/logger';
 const WEBHOOK_TIMEOUT_MS = 5000;
 
 export interface WebhookDeps {
-  readonly fetch: typeof fetch;
+  readonly fetch: (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ) => Promise<Response>;
   readonly log: Logger;
   readonly timeoutMs?: number;
 }

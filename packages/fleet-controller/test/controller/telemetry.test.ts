@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { CI_ROLE_TOKEN } from '../support/controller';
+import { CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { heartbeatBody, nodeIdOf } from '../support/fixtures';
 import { telemetry } from '../support/telemetry';
@@ -7,7 +7,7 @@ import { compactTelemetry } from '../../src/domain/heartbeat-history';
 describeController('telemetry ingestion and authorized visibility', (ctx) => {
   test('authenticated reports reach node details and history without becoming public', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const sample = telemetry();
     expect(
       (
@@ -31,7 +31,7 @@ describeController('telemetry ingestion and authorized visibility', (ctx) => {
   });
   test('invalid telemetry is refused atomically and cannot replace a valid report', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const sample = telemetry();
     await h.asNode(
       1,

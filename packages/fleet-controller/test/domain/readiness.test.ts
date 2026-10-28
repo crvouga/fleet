@@ -32,7 +32,7 @@ describe('readiness follows packages/fleet/roles.json', () => {
 
   test('a node of a retired role is never ready and says how to recover', () => {
     expect(integrationIssues(node('web'), healthy)).toEqual([
-      'Role web is retired in roles.json. Reinstall this machine as one of: ci, devbox.',
+      'Role web is retired in roles.json. Assign one of: ci, devbox.',
     ]);
     expect(integrationReady(node('netboot'), healthy)).toBe(false);
   });

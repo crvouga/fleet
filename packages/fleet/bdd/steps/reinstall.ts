@@ -22,26 +22,12 @@ Given('I open a NixOS CI node with an active job', async ({ page, world }) => {
   await page.goto(world.wizard.url);
 });
 
-When(
-  'I review a hard reinstall of its current role',
-  async ({ page, world }) => {
-    await page.getByRole('button', { name: /Turn THIS computer/ }).click();
-    await page
-      .locator(`input[name="role"][value="${required(world.role)}"]`)
-      .check();
-    if (world.role === 'devbox') {
-      const key = Buffer.concat([
-        Buffer.from([0, 0, 0, 11]),
-        Buffer.from('ssh-ed25519'),
-        Buffer.from([0, 0, 0, 32]),
-        Buffer.alloc(32, 7),
-      ]).toString('base64');
-      await page.locator('#ssh-key').fill('ssh-ed25519 ' + key);
-    }
-    await page.getByRole('checkbox', { name: /Hard reinstall/ }).check();
-    await page.getByRole('button', { name: 'Review', exact: true }).click();
-  }
-);
+When('I review a hard reinstall', async ({ page }) => {
+  await page.getByRole('button', { name: /Turn THIS computer/ }).click();
+  await expect(page.locator('input[name="role"]')).toHaveCount(0);
+  await page.getByRole('checkbox', { name: /Hard reinstall/ }).check();
+  await page.getByRole('button', { name: 'Review', exact: true }).click();
+});
 
 Then(
   'the review explicitly warns that the existing installation will be replaced',
@@ -54,7 +40,7 @@ Then(
 );
 
 Then(
-  'the verified installer is handed off for the same role',
+  'the verified installer is handed off without a role',
   async ({ page, world }) => {
     await expect(
       page.getByRole('heading', {
@@ -65,9 +51,7 @@ Then(
     const calls = await operations(required(world.wizard).directory);
     const boot = calls.filter((call) => call.kind === 'kexec');
     expect(boot.at(-2)?.args[0]).toBe('--load');
-    expect(boot.at(-2)?.args.join(' ')).toContain(
-      `fleet.role=${required(world.role)}`
-    );
+    expect(boot.at(-2)?.args.join(' ')).not.toContain('fleet.role=');
     expect(boot.at(-1)?.args).toEqual(['-e']);
     expect(await readFile(boot.at(-2)!.args[1]!, 'utf8')).toBe(
       'kernel-bytes\n'
@@ -75,45 +59,47 @@ Then(
   }
 );
 
-Then('active CI admission was closed before handing off', async ({ world }) => {
-  const wizard = required(world.wizard);
-  const calls = await operations(wizard.directory);
-  if (world.role !== 'ci') {
+Then(
+  'job admission was closed before handing off when the node runs jobs',
+  async ({ world }) => {
+    const wizard = required(world.wizard);
+    const calls = await operations(wizard.directory);
     expect(calls.filter((call) => call.kind === 'runner-control')).toHaveLength(
       0
     );
-    return;
+    const draining = calls.find((call) => call.kind === 'kexec')?.draining;
+    expect(draining).toBe(world.role === 'ci');
+    if (world.role === 'ci')
+      expect(
+        await readFile(join(wizard.directory, 'busy/draining'), 'utf8')
+      ).toBe('reinstall\n');
   }
-  expect(calls[0]?.kind).toBe('runner-control');
-  expect(calls[0]?.args[0]).toBe('withdraw');
-  expect(calls.find((call) => call.kind === 'kexec')?.draining).toBe(true);
-  expect(await readFile(join(wizard.directory, 'busy/draining'), 'utf8')).toBe(
-    'reinstall\n'
-  );
-});
+);
 
-When('I run the normal same-role install command', async ({ world }) => {
-  world.command = await runNode(required(world.wizard).env, ['ci', '--yes']);
+When('I run the normal install command', async ({ world }) => {
+  world.command = await runNode(required(world.wizard).env, [
+    'install',
+    '--yes',
+  ]);
 });
 Then(
   'it reports the existing installation without a boot handoff',
   async ({ world }) => {
     expect(required(world.command).code).toBe(0);
-    expect(required(world.command).text).toContain('already installed as ci');
+    expect(required(world.command).text).toContain(
+      'already an installed Fleet node'
+    );
     expect(await operations(required(world.wizard).directory)).toEqual([]);
   }
 );
 
-When(
-  'I explicitly confirm a same-role CLI hard reinstall',
-  async ({ world }) => {
-    world.command = await runNode(required(world.wizard).env, [
-      'ci',
-      '--reinstall',
-      '--yes',
-    ]);
-  }
-);
+When('I explicitly confirm a CLI hard reinstall', async ({ world }) => {
+  world.command = await runNode(required(world.wizard).env, [
+    'install',
+    '--reinstall',
+    '--yes',
+  ]);
+});
 Then('the CLI hands off to the verified installer', async ({ world }) => {
   expect(required(world.command).code).toBe(0);
   expect(required(world.command).text).toContain('Hard reinstall requested');
@@ -121,9 +107,9 @@ Then('the CLI hands off to the verified installer', async ({ world }) => {
   expect(calls.at(-1)?.args).toEqual(['-e']);
 });
 
-When('I preview a same-role CLI hard reinstall', async ({ world }) => {
+When('I preview a CLI hard reinstall', async ({ world }) => {
   world.command = await runNode(required(world.wizard).env, [
-    'ci',
+    'install',
     '--reinstall',
     '--plan',
   ]);
@@ -139,7 +125,7 @@ Then(
 );
 
 Then('the review refuses to interrupt the running job', async ({ page }) => {
-  await expect(page.getByText('this CI node is running a job')).toBeVisible();
+  await expect(page.getByText('this node is running a job')).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Erase and install' })
   ).toHaveCount(0);
@@ -172,7 +158,7 @@ When('I arrange for the boot handoff to fail', async ({ world }) => {
   );
 });
 Then(
-  'the failed handoff restores the CI node and exposes copyable diagnostics',
+  'the failed handoff reopens job admission and exposes copyable diagnostics',
   async ({ page, world }) => {
     await expect(
       page.getByRole('heading', { name: 'It did not finish' })
@@ -211,13 +197,10 @@ When(
     await page.getByRole('button', { name: 'Erase and install' }).click();
   }
 );
-Then(
-  'the CI runner was withdrawn once per actual attempt',
-  async ({ world }) => {
-    expect(
-      (await operations(required(world.wizard).directory)).filter(
-        (call) => call.kind === 'runner-control'
-      )
-    ).toHaveLength(2);
-  }
-);
+Then('no runner was withdrawn', async ({ world }) => {
+  expect(
+    (await operations(required(world.wizard).directory)).filter(
+      (call) => call.kind === 'runner-control'
+    )
+  ).toHaveLength(0);
+});

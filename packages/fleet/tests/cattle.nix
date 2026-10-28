@@ -1,6 +1,7 @@
 { pkgs, lib, sopsModule, diskoModule }: let
   settings = import ../fleet.nix;
   testSettings = settings // {
+    repo = settings.repo // { url = "https://github.com/example/machines.git"; };
     # The VM has no route to the fleet controller. Leave the agent out so the test stays offline.
     fleetApi = { url = ""; };
     secretsFile = null;

@@ -1,4 +1,4 @@
-import type { RelayConfig } from './browser-contract';
+import type { OidcConfig } from './browser-contract';
 import type { EnvSource } from '../env';
 
 function validIssuer(url: URL): boolean {
@@ -17,10 +17,10 @@ function validOrigin(url: URL): boolean {
       ['localhost', '127.0.0.1'].includes(url.hostname))
   );
 }
-export function readRelay(
+export function readOidc(
   source: EnvSource,
   problems: string[]
-): RelayConfig | undefined {
+): OidcConfig | undefined {
   const keys = [
     'FLEET_OIDC_ISSUER',
     'FLEET_OIDC_CLIENT_ID',

@@ -1,5 +1,6 @@
 # Live installer settings. The ISO and the PXE image share this file.
-# Role age keys are generated on the machine by fleet-install. They are not baked in.
+# The installer installs the role-less base system; nodes create their own age
+# identity on first boot, so no key is baked in.
 {
   sshKeys = (import ./shared.nix).sshKeys;
 }

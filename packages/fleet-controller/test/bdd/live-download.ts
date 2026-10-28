@@ -25,21 +25,15 @@ Then(
     const path = world.path;
     if (!path) throw new Error('No executable was downloaded');
     const bytes = await readFile(path);
-    const response = await request.get(
-      'https://api.github.com/repos/crvouga/fleet/releases/tags/fleet-installer'
+    const origin = process.env['FLEET_BDD_URL'];
+    const filename = 'fleet-installer-windows-x64.exe';
+    const checksum = await request.get(
+      `${origin}/installers/assets/${filename}.sha256`
     );
-    expect(response.status()).toBe(200);
-    const release = (await response.json()) as {
-      assets: { name: string; digest: string; size: number }[];
-    };
-    const asset = release.assets.find(
-      (item) => item.name === 'fleet-installer-windows-x64.exe'
-    );
-    expect(asset).toBeDefined();
+    expect(checksum.status()).toBe(200);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     expect(bytes.subarray(0, 2).toString()).toBe('MZ');
-    expect(bytes.length).toBe(asset!.size);
-    expect('sha256:' + sha256).toBe(asset!.digest);
+    expect((await checksum.text()).trim().split(/\s+/)[0]).toBe(sha256);
     await world.info.attach('verified-recommended-download', {
       contentType: 'application/json',
       body: JSON.stringify({ bytes: bytes.length, sha256 }),

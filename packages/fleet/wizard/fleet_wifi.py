@@ -151,8 +151,37 @@ def read_private(path):
         return decode(handle.read(4097))
 
 
-def initrd(profile):
-    """A gzip newc archive: Linux accepts concatenated initramfs members."""
+TOKEN = re.compile(r"[A-Za-z0-9._-]{8,512}")
+# The optional read credential of a private Git repository the fleet follows
+# (bootstrap.json repoAuth): one token line, or one OpenSSH private key.
+GIT_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{8,1024}")
+GIT_KEY_BEGIN = "-----BEGIN OPENSSH PRIVATE KEY-----"
+GIT_KEY_END = "-----END OPENSSH PRIVATE KEY-----"
+GIT_KEY_LINE = re.compile(r"[A-Za-z0-9+/=]+")
+GIT_CREDENTIAL_MAX = 16 * 1024
+
+
+def git_credential(text):
+    """("token" | "ssh", normalized text) for a valid Git read credential, else
+    None. Nothing else may ride along with it, and it is never echoed."""
+    if not isinstance(text, str) or len(text.encode("utf-8", "replace")) > GIT_CREDENTIAL_MAX:
+        return None
+    stripped = text.strip()
+    if GIT_TOKEN.fullmatch(stripped):
+        return "token", stripped + "\n"
+    lines = stripped.replace("\r\n", "\n").split("\n")
+    if (len(lines) >= 3 and lines[0] == GIT_KEY_BEGIN and lines[-1] == GIT_KEY_END
+            and all(GIT_KEY_LINE.fullmatch(line) for line in lines[1:-1])):
+        return "ssh", "\n".join(lines) + "\n"
+    return None
+
+
+def initrd(profile, token=None, git_credential_text=None):
+    """A gzip newc archive: Linux accepts concatenated initramfs members.
+
+    It carries the Wi-Fi profile, the optional enrollment token and the optional
+    Git read credential to the live installer (modules/installer.nix moves each
+    into /run, root-only)."""
     def member(name, body, mode, ino):
         name = name.encode() + b"\0"
         fields = [ino, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0]
@@ -160,8 +189,18 @@ def initrd(profile):
         entry = header + name
         entry += b"\0" * (-len(entry) % 4)
         return entry + body + b"\0" * (-len(body) % 4)
-    archive = member("fleet-wifi.json", encode(profile), stat.S_IFREG | 0o600, 1)
-    archive += member("TRAILER!!!", b"", 0, 2)
+    require(token is None or (isinstance(token, str) and TOKEN.fullmatch(token)), "The enrollment token is malformed.")
+    credential = None if git_credential_text is None else git_credential(git_credential_text)
+    require(git_credential_text is None or credential is not None, "The Git read credential is malformed.")
+    members = []
+    if profile is not None:
+        members.append(("fleet-wifi.json", encode(profile)))
+    if token is not None:
+        members.append(("fleet-enrollment.token", token.encode("ascii") + b"\n"))
+    if credential is not None:
+        members.append(("fleet-git-credential", credential[1].encode("ascii")))
+    archive = b"".join(member(name, body, stat.S_IFREG | 0o600, index + 1) for index, (name, body) in enumerate(members))
+    archive += member("TRAILER!!!", b"", 0, len(members) + 1)
     return gzip.compress(archive, mtime=0)
 
 

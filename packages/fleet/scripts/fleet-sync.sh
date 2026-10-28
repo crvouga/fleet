@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Pull this role's nixosConfiguration from origin/main and switch to it.
-# The system must already be in the binary cache. This script never builds.
-# A kernel, initrd, or module change drains first, then waits, then reboots.
-# A cache miss, a failed build lookup, or a failed drain leaves the running
-# generation in place. The timer retries.
-# After a switch, the node must still reach GitHub and the binary cache and
-# the sync unit must still load. A failed check restores the previous
-# generation and does not reboot.
+# Converge this node to its assigned closure (ARCHITECTURE.md).
+# The target is /nix/fleet-state/target (written by fleet-agent from the
+# controller's desired state, or by fleet-target in local mode); without it,
+# the running image's own ROLE/FLAKE_ATTR. Fetch origin/main, refuse a target
+# the fetched roles.json does not define or whose secrets this node cannot
+# decrypt, build it with bounded local jobs and switch to it.
+# A kernel, initrd, module or role change drains first, then waits, then
+# reboots. A failed build, a failed drain or a refused target leaves the
+# running generation in place. The timer retries.
+# After a switch, the node must still reach the binary cache and the sync unit
+# must still load. A failed check restores the previous generation and does
+# not reboot. Every run ends by writing /run/fleet/reconcile.json, which the
+# agent reports as the node's convergence phase.
 set -euo pipefail
 
 env_file=${SYNC_ENV:-/etc/fleet/sync.env}
@@ -20,13 +25,127 @@ source "$env_file"
 : "${FLAKE_DIR:?}"
 : "${DELAY_MAX:?}"
 
+role_pattern='^[a-z][a-z0-9]{0,15}$'
+attr_pattern='^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4}$'
+
+# ---- convergence verdict (/run/fleet/reconcile.json) -------------------------
+# Written on every exit. phase is converged, progressing or blocked; issues are
+# public sentences that tell a person what blocks convergence.
+reconcile_path=${RECONCILE:-/run/fleet/reconcile.json}
+reconcile_phase=""
+reconcile_issues=()
+record_success=1
+set_phase() {
+  reconcile_phase=$1
+  shift
+  reconcile_issues=("$@")
+}
+write_reconcile() {
+  local phase=$1
+  shift
+  "${PYTHON:-python3}" - "$reconcile_path" "$phase" "${ROLE:-}" "${FLAKE_ATTR:-}" "${revision:-}" "$@" <<'RECONCILE' \
+    || echo 'sync: could not write the convergence verdict' >&2
+import json, os, sys, tempfile, time
+path, phase, role, closure, revision, *issues = sys.argv[1:]
+issues = [" ".join(issue.split()) for issue in issues]
+issues = [issue if len(issue) <= 500 else issue[:497] + "..." for issue in issues if issue][:8]
+record = {"phase": phase, "issues": issues, "role": role or None, "closure": closure or None,
+          "revision": revision or None, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+folder = os.path.dirname(path) or "."
+os.makedirs(folder, mode=0o755, exist_ok=True)
+fd, temporary = tempfile.mkstemp(dir=folder, prefix=".reconcile-")
+with os.fdopen(fd, "w") as stream:
+    json.dump(record, stream)
+os.chmod(temporary, 0o644)
+os.replace(temporary, path)
+RECONCILE
+}
+# The verdict for an exit that did not name one: a failure blocks with its
+# reason; anything else is still on its way.
+finish_reconcile() {
+  local status=$1 phase=$reconcile_phase
+  local issues=(${reconcile_issues[@]+"${reconcile_issues[@]}"})
+  if [ -z "$phase" ]; then
+    if [ "$status" -ne 0 ]; then
+      phase=blocked
+      local reason=${failure_reason:-the update failed}
+      case "$reason" in
+        FLEET_*) issues=("$reason") ;;
+        *) issues=("FLEET_UPDATE_FAILED: $reason. The running system is unchanged; the next poll retries.") ;;
+      esac
+    else
+      phase=progressing
+    fi
+  fi
+  write_reconcile "$phase" ${issues[@]+"${issues[@]}"}
+}
+trap 'finish_reconcile $?' EXIT
+
+# ---- what this node runs and what it should run -------------------------------
+# The running system's own identity: node.conf of /etc, else its sync.env.
+running_role=$ROLE
+running_attr=$FLAKE_ATTR
+node_conf=${NODE_CONF:-/etc/fleet/node.conf}
+if [ -r "$node_conf" ]; then
+  while IFS='=' read -r name value; do
+    case "$name" in
+      role) [[ "$value" =~ $role_pattern ]] && running_role=$value ;;
+      flake_attr) [[ "$value" =~ $attr_pattern ]] && running_attr=$value ;;
+    esac
+  done < "$node_conf"
+fi
+# The assigned target. It is data: a role name and a flake attribute, checked
+# here by shape and below against the fetched roles.json. A malformed file is
+# ignored, never half used.
+target_file=${TARGET:-/nix/fleet-state/target}
+read_target() {
+  local line role="" closure="" count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    count=$((count + 1))
+    if [ "$count" -gt 4 ]; then
+      echo 'it has more than two settings'
+      return 1
+    fi
+    case "$line" in
+      role=*) role=${line#role=} ;;
+      closure=*) closure=${line#closure=} ;;
+      "") ;;
+      *) echo 'it holds a line that is neither role= nor closure='; return 1 ;;
+    esac
+  done < "$target_file"
+  if ! [[ "$role" =~ $role_pattern ]]; then
+    echo 'its role is not a lowercase role name or base'
+    return 1
+  fi
+  if ! [[ "$closure" =~ $attr_pattern ]]; then
+    echo 'its closure is not a flake attribute name'
+    return 1
+  fi
+  printf '%s %s\n' "$role" "$closure"
+}
+if [ -e "$target_file" ]; then
+  if parsed=$(read_target 2>/dev/null); then
+    ROLE=${parsed% *}
+    FLAKE_ATTR=${parsed#* }
+  else
+    echo "sync: ignoring $target_file because ${parsed:-it cannot be read}; using this image's role $ROLE ($FLAKE_ATTR)" >&2
+  fi
+fi
+role_change=0
+if [ "$ROLE" != "$running_role" ]; then
+  role_change=1
+  echo "sync: assigned role $ROLE ($FLAKE_ATTR) differs from the running role $running_role ($running_attr)" >&2
+fi
+
 if [[ "$REPO_URL" == *TODO* ]]; then
   echo 'sync: repository URL is not configured; the running system is unchanged' >&2
+  set_phase blocked 'FLEET_REPOSITORY_UNCONFIGURED: the Git source for automatic updates is not configured; the running system is unchanged.'
   exit 0
 fi
 
 if [ "$BRANCH" != "main" ]; then
   echo 'sync: BRANCH must be main' >&2
+  set_phase blocked 'FLEET_UPDATE_FAILED: the update branch must be main.'
   exit 1
 fi
 
@@ -44,6 +163,7 @@ conf() {
 
 if [ "$(conf sync.paused false)" = true ]; then
   echo 'sync: paused by the fleet configuration (sync.paused); the running system is unchanged' >&2
+  set_phase blocked 'FLEET_UPDATES_PAUSED: automatic updates are paused in Fleet settings (sync.paused); the node does not converge until they are resumed.'
   exit 0
 fi
 
@@ -136,15 +256,33 @@ cleanup() {
     cp "$report_path" "$state_dir/health-failure"
     echo "FLEET-FAIL sync: $failure_reason (exit $status); the running generation was kept" >&2
   fi
-  if [ "$status" -eq 0 ]; then
+  if [ "$status" -eq 0 ] && [ "$record_success" -eq 1 ]; then
     printf '%s\n' "${revision:-unknown}" > "$state_dir/last-success"
     rm -f "$state_dir/pending-generation"
   fi
+  finish_reconcile "$status"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# A private repository needs the read credential the installer placed at a
+# fixed path (modules/sync.nix). Without it no fetch can ever succeed, so say
+# exactly that instead of reporting a fetch failure on every poll.
+case "${REPO_AUTH:-none}" in
+  ssh|token)
+    credential_file=${GIT_KEY:-}
+    [ "$REPO_AUTH" = token ] && credential_file=${GIT_TOKEN:-}
+    if [ -z "$credential_file" ] || [ ! -s "$credential_file" ]; then
+      issue="FLEET_GIT_CREDENTIAL_MISSING: this fleet follows a private repository (repo.auth = $REPO_AUTH) and ${credential_file:-the read credential} is missing. Reinstall with --git-credential-file; nodes are stateless."
+      echo "sync: $issue" >&2
+      set_phase blocked "$issue"
+      record_success=0
+      exit 0
+    fi
+    ;;
+esac
 
 if [ -n "${GIT_KEY:-}" ] && [ -f "$GIT_KEY" ]; then
   known=${GIT_KNOWN_HOSTS:-/etc/fleet/git-known-hosts}
@@ -277,13 +415,52 @@ g -C "$repo" checkout --detach --force "refs/remotes/origin/${branch}"
 revision=$(g -C "$repo" rev-parse HEAD)
 # roles.json at this revision decides what this machine may be. A retired role
 # or a removed closure is never published again: report exactly that instead
-# of a cache miss on every run. A revision without the registry predates it.
+# of a cache miss on every run. base always exists. A revision without the
+# registry predates it.
 registry="$repo/$FLAKE_DIR/roles.json"
 if [ -f "$registry" ]; then
   if ! placement=$("$PYTHON" -I "${FLEET_ROLES_PY:?}" placement "$registry" "$ROLE" "$FLAKE_ATTR" 2>&1); then
     failure_reason=${placement:-roles.json at this revision could not be read}
     echo "sync: $failure_reason" >&2
     exit 1
+  fi
+  # Secrets gate: a role whose SOPS file this node cannot decrypt would fail
+  # activation. Do not build or switch; tell the operator which recipient to
+  # add. The first poll after the re-encrypted file is merged converges.
+  age_pub=${AGE_PUB:-/nix/fleet-state/secrets/age.pub}
+  if ! secrets_file=$("$PYTHON" -I "$FLEET_ROLES_PY" secrets "$registry" "$ROLE" 2>&1); then
+    failure_reason=${secrets_file:-roles.json at this revision could not be read}
+    echo "sync: $failure_reason" >&2
+    exit 1
+  fi
+  recipient=""
+  if [ -f "$age_pub" ]; then
+    recipient=$(head -n 1 "$age_pub" | tr -d '[:space:]')
+  fi
+  # Rotation (secrets.rotateAgeKeyAfter): fleet-agent created a next identity
+  # and reports it. Promote it once the target role's file lists it, or at once
+  # for a role without secrets. Until then the current identity keeps working.
+  age_dir=$(dirname "$age_pub")
+  next=""
+  if [ -s "$age_dir/age.next.key" ] && [ -s "$age_dir/age.next.pub" ]; then
+    next=$(head -n 1 "$age_dir/age.next.pub" | tr -d '[:space:]')
+  fi
+  if [[ "$next" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] && { [ -z "$secrets_file" ] || [ ! -f "$repo/$FLAKE_DIR/$secrets_file" ] \
+    || grep -qF -- "$next" "$repo/$FLAKE_DIR/$secrets_file"; }; then
+    mv "$age_dir/age.next.key" "$age_dir/age.key"
+    mv "$age_dir/age.next.pub" "$age_pub"
+    date +%s > "$age_dir/age.created"
+    echo "sync: promoted the rotated age identity $next (was ${recipient:-none})" >&2
+    recovery_event age-rotated info "age-rotated:${next:4:24}" "the node now uses its rotated age identity $next; remove ${recipient:-the old recipient} from the role's secrets"
+    recipient=$next
+  fi
+  if [ -n "$secrets_file" ] && [ -f "$repo/$FLAKE_DIR/$secrets_file" ] && [ -n "$recipient" ] \
+    && ! grep -qF -- "$recipient" "$repo/$FLAKE_DIR/$secrets_file"; then
+    issue="FLEET_SECRETS_RECIPIENT_MISSING: $recipient is not a recipient of $secrets_file at ${revision:0:7}. Re-encrypt it for this node (GET /v1/recipients) and merge."
+    echo "sync: $issue" >&2
+    set_phase blocked "$issue"
+    record_success=0
+    exit 0
   fi
 else
   echo "sync: revision $revision has no roles.json; the build decides whether $FLAKE_ATTR exists" >&2
@@ -306,6 +483,11 @@ if [ -e "$booted/kernel" ] && [ -e "$toplevel/kernel" ]; then
     || [ "$(readlink -f "$booted/kernel-modules")" != "$(readlink -f "$toplevel/kernel-modules")" ]; then
     need_reboot=1
   fi
+fi
+# Another role is never switched to live: its services, users and secrets
+# change together. It is a reboot-class change like a kernel update.
+if [ "$role_change" -eq 1 ]; then
+  need_reboot=1
 fi
 
 previous=""
@@ -390,7 +572,6 @@ PY
     fi
   fi
   # guard runs this in a conditional, where set -e does not apply.
-  "$curl_bin" -fsS --max-time 20 -o /dev/null https://github.com || return 1
   "$curl_bin" -fsS --max-time 20 -o /dev/null "${target_cache%/}/nix-cache-info" || return 1
 }
 
@@ -420,6 +601,7 @@ rollback() {
   local reason=$2
   echo 'sync: update failed; rolling back to the previous generation' >&2
   printf '%s\n' "$reason" >&2
+  set_phase blocked "FLEET_UPDATE_ROLLED_BACK: the new system failed its health check and the previous generation was restored: $reason"
   report_failure rollback-pending "$reason"
   if [ -n "$previous" ] && [ "$previous" != "$toplevel" ] && [ -x "$previous/bin/switch-to-configuration" ]; then
     if bounded "${FLEET_ACTIVATION_TIMEOUT:-300}" "$nix_env" -p "$profile" --set "$previous" \
@@ -453,6 +635,7 @@ if [ "$need_reboot" -eq 0 ] && [ "$previous" = "$toplevel" ] \
   health_check || exit 1
   clear_failure
   echo "sync: already running revision $revision"
+  set_phase converged
   exit 0
 fi
 
@@ -472,7 +655,14 @@ if [ "$need_reboot" -eq 1 ]; then
   fi
 fi
 
-if [ "$need_reboot" -eq 1 ] && [ -n "$quarantined" ]; then
+quarantine_issue="FLEET_UPDATE_QUARANTINED: an earlier boot into this kernel fell back to the previous one; the node will not reboot into it until a newer kernel is published or Retry the update is pressed in Fleet."
+if [ "$need_reboot" -eq 1 ] && [ -n "$quarantined" ] && [ "$role_change" -eq 1 ]; then
+  # A role is never switched to live, and its boot is quarantined: wait.
+  echo "sync: not changing to role $ROLE; its kernel is quarantined after an earlier failed boot" >&2
+  set_phase blocked "$quarantine_issue"
+  record_success=0
+  exit 0
+elif [ "$need_reboot" -eq 1 ] && [ -n "$quarantined" ]; then
   # The new userspace still applies; only the reboot into the quarantined
   # kernel is withheld. The node keeps serving jobs on the kernel that works.
   apply switch
@@ -480,6 +670,16 @@ if [ "$need_reboot" -eq 1 ] && [ -n "$quarantined" ]; then
   install -d -m 0755 "$(dirname "$pending_path")"
   printf 'toplevel=%s\nreason=quarantined\n' "$toplevel" > "$pending_path"
   echo 'sync: switched without rebooting; the new kernel is quarantined after an earlier failed boot' >&2
+  set_phase blocked "$quarantine_issue"
+elif [ "$need_reboot" -eq 1 ] && [ "$reboot_disabled" -eq 1 ] && [ "$role_change" -eq 1 ]; then
+  # reboot.enabled is false and the role changes. The new role is installed
+  # for the next boot only; nothing is drained, switched live or rebooted.
+  apply boot
+  guard boot
+  install -d -m 0755 "$(dirname "$pending_path")"
+  printf 'toplevel=%s\nreason=role-change\n' "$toplevel" > "$pending_path"
+  echo "sync: role $ROLE ($FLAKE_ATTR) is installed for the next boot; a reboot is pending because reboot.enabled is false" >&2
+  set_phase progressing "FLEET_REBOOT_PENDING: role $ROLE ($FLAKE_ATTR) is installed for the next boot; reboot.enabled is false, so the node waits for a reboot."
 elif [ "$need_reboot" -eq 1 ] && [ "$reboot_disabled" -eq 1 ]; then
   # reboot.enabled is false. The new system is switched to and nothing is
   # drained or rebooted. The kernel change waits, and the agent reports it.
@@ -488,6 +688,7 @@ elif [ "$need_reboot" -eq 1 ] && [ "$reboot_disabled" -eq 1 ]; then
   install -d -m 0755 "$(dirname "$pending_path")"
   printf 'toplevel=%s\n' "$toplevel" > "$pending_path"
   echo 'sync: switched; a reboot is pending because reboot.enabled is false' >&2
+  set_phase progressing "FLEET_REBOOT_PENDING: a new kernel is switched to and waits for a reboot; reboot.enabled is false."
 elif [ "$need_reboot" -eq 1 ]; then
   delay=0
   if [ "$DELAY_MAX" -gt 0 ]; then
@@ -523,6 +724,7 @@ elif [ "$need_reboot" -eq 1 ]; then
   apply boot
   guard boot
   reboot_requested=1
+  set_phase progressing
   if ! "$systemctl" reboot; then
     reboot_requested=0
     rollback boot 'reboot request failed; restoring the previous boot generation'
@@ -531,4 +733,5 @@ else
   apply switch
   guard switch
   rm -f "$pending_path"
+  set_phase converged
 fi

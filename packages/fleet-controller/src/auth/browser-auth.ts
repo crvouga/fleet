@@ -1,9 +1,13 @@
 import type { Context } from 'hono';
-import type { AccessStore, BrowserAuth, RelayConfig } from './browser-contract';
+import type {
+  AccessStore,
+  BrowserAuth,
+  OidcConfig,
+  IdentityProvider,
+} from './browser-contract';
 import { emailAddress } from './browser-contract';
 import { browserCookies } from './browser-cookies';
 import { sha256Hex } from './hash';
-import { relayClient, type RelayClient } from './relay-client';
 import { safeNext } from '../ui/routes/guard';
 
 const random = () =>
@@ -13,17 +17,16 @@ const noncePattern = /^[A-Za-z0-9_-]{43}$/;
 export class FleetBrowserAuth implements BrowserAuth {
   private readonly cookies;
   private readonly context: string;
-  private readonly provider: RelayClient;
   constructor(
     readonly access: AccessStore,
-    private readonly config: RelayConfig,
-    client?: RelayClient
+    private readonly config: OidcConfig,
+    private readonly provider: IdentityProvider,
+    private readonly now: () => Date
   ) {
     this.cookies = browserCookies(config.origin);
     this.context = sha256Hex(
       JSON.stringify([config.issuer, config.clientId, config.origin])
     );
-    this.provider = client ?? relayClient(config);
   }
   async identity(c: Context) {
     const value = this.cookies.read(c);
@@ -43,7 +46,7 @@ export class FleetBrowserAuth implements BrowserAuth {
         nonce,
         verifier,
         next: safeNext(c.req.query('next')),
-        expires: new Date(Date.now() + 600000),
+        expires: new Date(this.now().getTime() + 600000),
       });
       this.cookies.bind(c, state, binding);
       return c.redirect(destination, 303);
@@ -79,7 +82,7 @@ export class FleetBrowserAuth implements BrowserAuth {
       await this.access.createSession(
         sha256Hex(token),
         identity,
-        new Date(Date.now() + 43200000),
+        new Date(this.now().getTime() + 43200000),
         this.context
       );
       this.cookies.set(c, token);

@@ -6,7 +6,7 @@
     shared = {
       repo = {
         # Set this to the repository containing this deployment flake.
-        url = "https://github.com/TODO/DEPLOYMENT.git";
+        url = "TODO"; # Operator-owned Git source, on any suitable host.
         flakeDir = ".";
       };
       # Supply your public SSH keys before installing a development box.

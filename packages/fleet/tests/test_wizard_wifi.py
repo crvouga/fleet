@@ -45,7 +45,7 @@ class WifiTransferTests(unittest.TestCase):
                     wifi.main(["ready"])
                 connect.assert_not_called()
 
-    def test_slow_download_finishes_before_enrollment_and_disk_is_rechecked_afterward(self):
+    def test_disk_is_rechecked_after_a_slow_download_without_github_approval(self):
         events = []
         disks = [{"path": "/dev/fleet-test", "type": "disk", "tran": "nvme", "size": 10**12, "internal": True, "whole": True,
                   "model": "Fixture", "serial": "fixture", "rm": False, "hotplug": False}]
@@ -56,9 +56,6 @@ class WifiTransferTests(unittest.TestCase):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(b"verified image")
             return 0
-        def approve(role):
-            events.append("approval")
-            return "hvs.fixture-token", None
         def choose(*args):
             events.append("disk")
             return chosen
@@ -67,15 +64,12 @@ class WifiTransferTests(unittest.TestCase):
                 mock.patch.object(decide, "state_dir", return_value=Path(temporary)), \
                 mock.patch.object(decide, "choose_disk", side_effect=choose), \
                 mock.patch.object(decide, "preflight", return_value=[]), \
-                mock.patch.object(decide, "enroll_token", return_value=(["ci"], None, None)), \
-                mock.patch.object(decide, "enroll_enabled", return_value=True), \
-                mock.patch.object(decide, "installed_for", return_value=False), \
+                mock.patch.object(decide, "installed", return_value=False), \
                 mock.patch.object(decide, "fetch_installer", side_effect=fetch), \
-                mock.patch.object(decide, "self_enroll", side_effect=approve), \
-                mock.patch.object(decide, "perform_install", return_value=0), \
-                mock.patch.dict(decide.NET, {"lookup": lambda *args: {"status": "ok"}}):
-            self.assertEqual(decide.cmd_install(["ci", "--yes"], "install"), 0)
-        self.assertLess(events.index("download"), events.index("approval"))
+                mock.patch.object(decide, "perform_install", return_value=0):
+            self.assertEqual(decide.cmd_install(["--yes"], "install"), 0)
+        self.assertNotIn("approval", events)
+        self.assertLess(events.index("download"), len(events) - 1)
         self.assertEqual(events[-1], "disk")
 
     @unittest.skipIf(os.name == "nt", "The live initramfs runs Linux shell commands")
@@ -86,12 +80,26 @@ class WifiTransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
             source, destination = folder / "seed.json", folder / "run/wifi.json"
+            token, token_destination = folder / "seed.token", folder / "run-enrollment/token"
             source.write_bytes(wifi.encode(NETWORK))
+            token.write_text("fleet-enroll.Token_123\n")
             script = script.replace("/run/fleet-wifi", str(destination.parent)).replace("/fleet-wifi.json", str(source))
+            script = script.replace("/run/fleet-enrollment", str(token_destination.parent)).replace("/fleet-enrollment.token", str(token))
+            git, git_destination = folder / "seed.git", folder / "run-git/credential"
+            git.write_text("github_pat_Fixture~Read+Token/Value==\n")
+            script = script.replace("/run/fleet-git-credential", str(git_destination.parent)).replace("/fleet-git-credential", str(git))
             completed = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(source.exists())
             self.assertEqual(wifi.read_private(destination), NETWORK)
+            self.assertFalse(token.exists())
+            self.assertEqual(token_destination.read_text(), "fleet-enroll.Token_123\n")
+            self.assertEqual(stat.S_IMODE(token_destination.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(token_destination.parent.stat().st_mode), 0o700)
+            self.assertFalse(git.exists())
+            self.assertEqual(git_destination.read_text(), "github_pat_Fixture~Read+Token/Value==\n")
+            self.assertEqual(stat.S_IMODE(git_destination.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(git_destination.parent.stat().st_mode), 0o700)
 
     @unittest.skipIf(os.name == "nt", "Linux kexec requires POSIX file permissions")
     def test_linux_handoff_loads_private_initramfs_and_cleans_it_on_failure(self):
@@ -112,19 +120,19 @@ class WifiTransferTests(unittest.TestCase):
                 with mock.patch.object(decide.shutil, "which", return_value="kexec"), \
                         mock.patch.object(decide, "iso_filesystem", return_value="ext4"), \
                         mock.patch.object(decide, "run_logged", side_effect=run):
-                    self.assertEqual(decide.stage_reboot("Linux", "ci", str(image), wifi=NETWORK), code)
+                    self.assertEqual(decide.stage_reboot("Linux", str(image), wifi=NETWORK), code)
                 self.assertEqual(len(loaded), 1)
                 self.assertFalse(loaded[0].exists())
 
-    def test_bad_wifi_stops_before_runner_retirement_or_boot_preparation(self):
+    def test_bad_wifi_stops_before_job_admission_or_boot_preparation(self):
         with tempfile.TemporaryDirectory() as temporary:
             image = Path(temporary) / "installer.iso"
             image.write_bytes(b"verified-image")
-            with mock.patch.object(decide, "retire_runner_for_install") as retire, \
+            with mock.patch.object(decide, "close_job_admission") as retire, \
                     mock.patch.object(decide, "stage_reboot") as reboot, \
                     mock.patch.object(decide, "stage_windows") as windows:
                 with self.assertRaises(decide.Invariant):
-                    decide.perform_install("Windows", "ci", str(image), None, None, temporary,
+                    decide.perform_install("Windows", str(image), None, temporary,
                                            {"ok": True, "disk_id": "fixture"}, wifi={**NETWORK, "auth": "wpa-eap"})
                 retire.assert_not_called()
                 reboot.assert_not_called()
@@ -157,7 +165,43 @@ class WifiTransferTests(unittest.TestCase):
         start = (110 + name_size + 3) // 4 * 4
         self.assertEqual(wifi.decode(archive[start:start + size]), NETWORK)
         self.assertIn(b"TRAILER!!!", archive)
-        self.assertNotIn(NETWORK["password"], decide.grub_config("ci", "/kernel", "/initrd", "copytoram fleet.role=ci", wifi=True))
+        self.assertNotIn(NETWORK["password"], decide.grub_config("/kernel", "/initrd", "copytoram", handoff=True))
+
+    def test_the_handoff_initramfs_carries_a_token_with_or_without_wifi(self):
+        token = "fleet-enroll.Token_123"
+        for profile in (NETWORK, None):
+            archive = gzip.decompress(wifi.initrd(profile, token))
+            self.assertIn(b"fleet-enrollment.token\0", archive)
+            self.assertIn(token.encode() + b"\n", archive)
+            self.assertEqual(b"fleet-wifi.json\0" in archive, profile is not None)
+        for bad in ("short", "has space in it", "x" * 513, "semi;colon-token"):
+            with self.subTest(bad=bad[:10]), self.assertRaises(wifi.WifiError) as caught:
+                wifi.initrd(None, bad)
+            self.assertNotIn(bad, str(caught.exception))
+        self.assertEqual(decide.handoff_initrd(None, None), b"")
+
+    def test_git_read_credentials_are_validated_and_carried_root_only(self):
+        token = "github_pat_Fixture~Read+Token/Value=="
+        key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nAAAAC3NzaC1lZDI1NTE5==\n-----END OPENSSH PRIVATE KEY-----\n"
+        self.assertEqual(wifi.git_credential(" " + token + "\n"), ("token", token + "\n"))
+        self.assertEqual(wifi.git_credential(key.replace("\n", "\r\n")), ("ssh", key))
+        self.assertIsNone(wifi.git_credential(None))
+        for bad in ("short", "x" * 1025, "has space in it", token + "\n" + token, key + "more", "trailing\n" + key,
+                    key.replace("-----END OPENSSH", "-----END RSA"), key.replace("AAAAC3", "AA AC3"),
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A" * 16384 + "\n-----END OPENSSH PRIVATE KEY-----", 7):
+            with self.subTest(bad=str(bad)[:20]):
+                self.assertIsNone(wifi.git_credential(bad))
+                with self.assertRaises((wifi.WifiError, decide.Invariant)) as caught:
+                    decide.handoff_initrd(None, None, bad) if isinstance(bad, str) else wifi.initrd(None, None, bad)
+                self.assertNotIn(str(bad), str(caught.exception))
+        for value in (token + "\n", key):
+            archive = gzip.decompress(decide.handoff_initrd(None, None, value))
+            fields = [int(archive[6 + i * 8:14 + i * 8], 16) for i in range(13)]
+            self.assertEqual(fields[1], stat.S_IFREG | 0o600)
+            self.assertEqual(fields[2:4], [0, 0])
+            self.assertEqual(archive[110:110 + fields[11]], b"fleet-git-credential\0")
+            self.assertIn(value.encode(), archive)
+            self.assertNotIn(b"fleet-wifi.json", archive)
 
     def test_usb_write_checks_capacity_integrity_and_clears_an_old_handoff(self):
         with tempfile.TemporaryDirectory() as temporary:

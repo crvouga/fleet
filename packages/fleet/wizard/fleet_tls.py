@@ -1,5 +1,6 @@
 """Keep OS trust and add a bundled public CA store to frozen installers."""
 import ssl
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -22,9 +23,11 @@ def configure():
 
 
 def selftest():
-    """Exercise real TLS in the final binary, including the release CDN's CA."""
-    for url in ("https://github.com/robots.txt", "https://api.github.com/zen",
-                "https://release-assets.githubusercontent.com/"):
+    """Exercise real TLS in the final binary without a GitHub dependency."""
+    target = os.environ.get('FLEET_TLS_TEST_URL') or os.environ.get('FLEET_CONTROLLER_URL') or 'https://example.com'
+    if not target.startswith('https://'):
+        raise ValueError('The TLS test requires an HTTPS endpoint')
+    for url in (target,):
         request = urllib.request.Request(url, headers={"User-Agent": "Fleet-installer-TLS-check"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:

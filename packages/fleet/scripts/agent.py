@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""fleet-agent: report this node to the fleet controller and apply the settings it sends.
+"""fleet-agent: report this node's observed state to the fleet controller and
+converge on the desired state it assigns (ARCHITECTURE.md).
 
-The contract is packages/fleet-controller/PROTOCOL.md. Two rules shape everything here.
+The contract is packages/fleet-controller/PROTOCOL.md (protocol v2). Three rules
+shape everything here.
 
-* Data, never code. The controller sends typed settings. This program interprets the
-  keys it knows (scripts/fleetconf.py lists them) and ignores the rest. Nothing
-  a controller sends is ever executed, written into a unit, or used as a path.
+* Data, never code. The controller sends a desired document: a role, a closure
+  (a flake attribute of that role, or base) and typed settings. This program
+  interprets the keys it knows (scripts/fleetconf.py lists them) and ignores the
+  rest. Nothing a controller sends is ever executed, written into a unit, or
+  used as a path. The closure is only written to /nix/fleet-state/target;
+  fleet-sync builds it only if the roles.json of the fetched revision defines it.
+* Level-triggered. Every cycle re-applies the cached desired document, whether
+  or not the controller answered: a lost target file, a reboot or a missed
+  answer is repaired by the next cycle.
 * The fleet works without the controller. Reporting is best effort. A node that cannot
-  reach the controller keeps its last settings (cached on disk) and the values built
+  reach the controller keeps its last desired state (cached on disk) and the values built
   into its image. Nothing in this program can block fleet-sync or a runner.
 
 Commands:  run (loop, for the unit)   once (one report)   status   retire
@@ -41,7 +49,8 @@ import node_readiness  # noqa: E402
 import recovery  # noqa: E402
 import telemetry  # noqa: E402
 
-VERSION = "1"
+VERSION = "2"
+PROTOCOL_VERSION = 2
 DEFAULT_INTERVAL = 60
 BACKOFF_CAP = 900
 REJECTED_DELAY = 3600
@@ -53,8 +62,19 @@ MAX_MESSAGE = 500
 DRAIN_RETRY_SECONDS = 900
 # Active roles in roles.json; rewritten by scripts/fleet_roles.py sync.
 ROLES = ("ci", "devbox")
+# The role-less closure every machine installs; never a registry role.
+BASE = cattle.BASE_ROLE
 HEX64 = re.compile(r"[0-9a-f]{64}")
 REVISION = re.compile(r"[0-9a-f]{1,64}")
+DESIRED_REVISION = re.compile(r"[0-9a-f]{16}")
+CLOSURE_ATTR = re.compile(r"[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,16}){0,4}")
+AGE_RECIPIENT = re.compile(r"age1[02-9ac-hj-np-z]{58}")
+PHASES = ("converged", "progressing", "blocked")
+MAX_ISSUES = 8
+# Hardware capabilities the controller may pick a closure by (<role>-<cap>).
+HARDWARE_CAPABILITIES = ("gpu",)
+PCI_DISPLAY_CLASS = "0x03"
+PCI_VENDOR_NVIDIA = "0x10de"
 TOKEN_CHARS = re.compile(r"[A-Za-z0-9._-]{8,512}")
 UNIT_NAME = re.compile(r"[A-Za-z0-9:_.\\@-]+\.(?:service|socket|timer|mount|target|path|device|swap|scope|slice)")
 
@@ -138,6 +158,7 @@ class Paths:
 
     def __init__(self, env=None):
         env = os.environ if env is None else env
+        self._env = dict(env)
         self.state = Path(env.get("FLEET_AGENT_STATE") or "/nix/fleet-state/agent")
         self.run = Path(env.get("FLEET_RUN") or "/run/fleet")
         self.etc = Path(env.get("FLEET_ETC") or "/etc/fleet")
@@ -157,8 +178,33 @@ class Paths:
         return self.state / "node.secret"
 
     @property
+    def enrollment_token(self):
+        return self.state / "enrollment-token"
+
+    @property
     def role_token(self):
+        """Written by installers before the redesign. Read only when enrollment-token is absent."""
         return self.state / "role-token"
+
+    @property
+    def target(self):
+        return Path(self._env.get("FLEET_TARGET") or self.state.parent / "target")
+
+    @property
+    def age_pub(self):
+        return Path(self._env.get("FLEET_AGE_PUB") or self.state.parent / "secrets/age.pub")
+
+    @property
+    def age_keygen(self):
+        return self._env.get("FLEET_AGE_KEYGEN") or "age-keygen"
+
+    @property
+    def devbox_keys(self):
+        return Path(self._env.get("FLEET_DEVBOX_KEYS") or self.state.parent / "devbox/authorized_keys")
+
+    @property
+    def reconcile(self):
+        return self.run / "reconcile.json"
 
     @property
     def config(self):
@@ -213,6 +259,60 @@ def clip(text, limit):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def closure_of_role(role, closure):
+    """True when closure is role's own attribute or one of its <role>-<cap> variants."""
+    return isinstance(closure, str) and CLOSURE_ATTR.fullmatch(closure) is not None and (
+        closure == role or closure.startswith(role + "-"))
+
+
+def parse_desired(document):
+    """The desired document of a heartbeat answer, or None when any part is invalid.
+
+    {revision: 16 hex, role: an active role or null, closure: null | "base" |
+    an attribute of that role, values: {...}}. A document that fails any check
+    is refused whole: the node keeps the one it has."""
+    if not isinstance(document, dict):
+        return None
+    revision = document.get("revision")
+    role = document.get("role")
+    closure = document.get("closure")
+    values = document.get("values")
+    if not (isinstance(revision, str) and DESIRED_REVISION.fullmatch(revision)) or not isinstance(values, dict):
+        return None
+    if role is not None and role not in ROLES:
+        return None
+    if closure is not None:
+        if role is None and closure != BASE:
+            return None
+        if role is not None and not closure_of_role(role, closure):
+            return None
+    return {"revision": revision, "role": role, "closure": closure, "values": values}
+
+
+def target_text(desired):
+    """The /nix/fleet-state/target content for a desired document, or None (keep what runs)."""
+    if not desired or desired.get("closure") is None:
+        return None
+    closure = desired["closure"]
+    role = BASE if closure == BASE else desired["role"]
+    return f"role={role}\nclosure={closure}\n"
+
+
+def hardware_capabilities(sys_root):
+    """What the hardware has, whatever closure runs: gpu when an NVIDIA display controller is on the PCI bus."""
+    found = set()
+    try:
+        devices = sorted((Path(sys_root) / "bus/pci/devices").iterdir())
+    except OSError:
+        return []
+    for device in devices[:1024]:
+        klass = (read_text(device / "class", 64) or "").strip().lower()
+        vendor = (read_text(device / "vendor", 64) or "").strip().lower()
+        if klass.startswith(PCI_DISPLAY_CLASS) and vendor == PCI_VENDOR_NVIDIA:
+            found.add("gpu")
+    return [capability for capability in HARDWARE_CAPABILITIES if capability in found]
+
+
 def used_percent(path):
     """Like df: used / (used + available), rounded up. None when the mount cannot be read."""
     try:
@@ -244,7 +344,7 @@ class Agent:
         self.rejected = False
         self.last_error = None
         self.last_success = None
-        self.config_revision = None
+        self.desired = None
         self.settings = {}
         self.problems = []
         self.last_drain_attempt = None
@@ -265,10 +365,19 @@ class Agent:
     # state -------------------------------------------------------------------
 
     def _token(self):
-        """The optional role token from the installer. Invalid content is ignored, never used."""
-        text = read_text(self.paths.role_token, 1024)
-        value = (text or "").strip()
-        return value if TOKEN_CHARS.fullmatch(value) else None
+        """The optional enrollment token from the installer (else a legacy role token). Invalid content is ignored, never used."""
+        for path in (self.paths.enrollment_token, self.paths.role_token):
+            text = read_text(path, 1024)
+            if text is None:
+                continue
+            value = text.strip()
+            return value if TOKEN_CHARS.fullmatch(value) else None
+        return None
+
+    @property
+    def desired_revision(self):
+        revision = (self.desired or {}).get("revision")
+        return revision if isinstance(revision, str) and DESIRED_REVISION.fullmatch(revision) else None
 
     def ensure_secret(self):
         """Keep a 32 byte random node secret on disk (0600). A new one means the node must register again."""
@@ -289,16 +398,22 @@ class Agent:
         return True
 
     def load_cached(self):
-        """The last config the controller sent. Corrupt or missing means no cached config (image defaults)."""
+        """The last desired document the controller sent. Corrupt or missing means none (image defaults, no target)."""
         if self.loaded:
             return
         self.loaded = True
         document = read_json(self.paths.config)
-        revision = document.get("revision") if isinstance(document, dict) else None
-        values = document.get("values") if isinstance(document, dict) else None
-        if isinstance(revision, str) and REVISION.fullmatch(revision) and isinstance(values, dict):
-            self.config_revision = revision
-            self.settings = fleetconf.sanitize(values)
+        desired = parse_desired(document)
+        if desired is None and isinstance(document, dict) and "role" not in document and "closure" not in document:
+            # A protocol v1 agent cached settings only. Keep applying them; the
+            # controller sends a desired document at the next report.
+            revision = document.get("revision")
+            if isinstance(revision, str) and REVISION.fullmatch(revision) and isinstance(document.get("values"), dict):
+                desired = {"revision": revision if DESIRED_REVISION.fullmatch(revision) else None,
+                           "role": None, "closure": None, "values": document["values"]}
+        if desired is not None:
+            self.desired = desired
+            self.settings = fleetconf.sanitize(desired["values"])
         elif document is not None:
             self.log("cached config.json is not valid; ignoring it")
 
@@ -312,7 +427,7 @@ class Agent:
         node = read_kv(self.paths.run / "node")
         role = node.get("role")
         hostname = node.get("hostname")
-        if role not in ROLES or not hostname:
+        if (role not in ROLES and role != BASE) or not hostname:
             return None
         machine_id = node.get("machine_id", "")
         if not HEX64.fullmatch(machine_id):
@@ -433,6 +548,86 @@ class Agent:
         value = (read_text(self.paths.etc / "revision", 256) or "").strip()
         return value if value and value != "unknown" else None
 
+    # observed state (ARCHITECTURE.md) ---------------------------------------------
+
+    def observed(self, identity):
+        """(role, closure) of the running system, from its own /etc/fleet/node.conf."""
+        conf = self.safe_node_conf()
+        role = conf.get("role")
+        if role != BASE and role not in ROLES:
+            role = identity["role"]
+        closure = conf.get("flake_attr")
+        if not (isinstance(closure, str) and CLOSURE_ATTR.fullmatch(closure)):
+            closure = role
+        return role, closure
+
+    def age_recipient(self):
+        """This node's public age recipient (age.pub), never the private identity."""
+        value = (read_text(self.paths.age_pub, 256) or "").strip()
+        return value if AGE_RECIPIENT.fullmatch(value) else None
+
+    def age_recipient_next(self):
+        """The rotated identity's recipient while a rotation waits for its promotion (fleet-sync), else None."""
+        folder = self.paths.age_pub.parent
+        if not (folder / "age.next.key").is_file():
+            return None
+        value = (read_text(folder / "age.next.pub", 256) or "").strip()
+        return value if AGE_RECIPIENT.fullmatch(value) else None
+
+    def identity_created(self):
+        """When this node's age identity was made (fleet-age-identity writes age.created), or None."""
+        folder = self.paths.age_pub.parent
+        text = (read_text(folder / "age.created", 64) or "").strip()
+        if text.isdigit():
+            return int(text)
+        try:
+            return int((folder / "age.key").stat().st_mtime)
+        except OSError:
+            return None
+
+    def rotate_identity(self, flat):
+        """secrets.rotateAgeKeyAfter: an identity made before then gets a successor.
+
+        Only the successor's public recipient leaves the machine (ageRecipientNext).
+        fleet-sync promotes it once the assigned role's SOPS file lists it, so the
+        node never holds an identity its secrets cannot be decrypted with."""
+        after = flat.get("secrets.rotateAgeKeyAfter")
+        folder = self.paths.age_pub.parent
+        created = self.identity_created()
+        if type(after) is not int or created is None or created >= after or (folder / "age.next.key").exists():
+            return False
+        staged = folder / "age.next.key.new"
+        try:
+            staged.unlink()
+        except FileNotFoundError:
+            pass
+        code, _ = self.command([self.paths.age_keygen, "-o", str(staged)], 30)
+        if code != 0 or not staged.is_file():
+            self.log("could not create the rotated age identity; retrying next cycle")
+            return False
+        os.chmod(staged, 0o600)
+        code, out = self.command([self.paths.age_keygen, "-y", str(staged)], 15)
+        recipient = (out or "").strip()
+        if code != 0 or not AGE_RECIPIENT.fullmatch(recipient):
+            staged.unlink()
+            self.log("the rotated age identity has no valid recipient; retrying next cycle")
+            return False
+        fleetconf.write_atomic(str(folder / "age.next.pub"), recipient + "\n", 0o644)
+        os.replace(staged, folder / "age.next.key")
+        self.log(f"created the rotated age identity {recipient}; it is promoted once the role's secrets list it")
+        return True
+
+    def reconcile_report(self):
+        """fleet-sync's last verdict (/run/fleet/reconcile.json), validated and clipped, or None."""
+        document = read_json(self.paths.reconcile)
+        if not isinstance(document, dict) or document.get("phase") not in PHASES:
+            return None
+        issues = document.get("issues")
+        known = [self.secret or "", self._token() or ""]
+        clean = [clip(redact(item.strip(), known), MAX_MESSAGE)
+                 for item in (issues if isinstance(issues, list) else []) if isinstance(item, str) and item.strip()]
+        return {"phase": document["phase"], "issues": clean[:MAX_ISSUES]}
+
     @property
     def recovery_base(self):
         return self.paths.state.parent / "recovery"
@@ -534,12 +729,15 @@ class Agent:
         readiness = node_readiness.issues(self.paths, identity, self.command, self._token(), self.settings)
         if self.services_unknown:
             readiness = ["FLEET_SERVICE_STATUS_UNKNOWN: systemd service health could not be verified."] + readiness[:11]
+        role, closure = self.observed(identity)
         body = {
-            "v": 1,
+            "v": PROTOCOL_VERSION,
             "nodeId": identity["id"],
-            "role": identity["role"],
+            "role": role,
+            "closure": closure,
             "hostname": identity["hostname"],
             "capabilities": identity["capabilities"],
+            "hardware": {"capabilities": hardware_capabilities(self.paths.sys)},
             "revision": self.revision(),
             "bootId": (read_text(self.paths.proc / "sys/kernel/random/boot_id", 128) or "").strip() or None,
             "uptimeSeconds": uptime_seconds,
@@ -562,10 +760,19 @@ class Agent:
             "runners": self.runners(identity),
             "readiness": {"issues": [clip(redact(item, [self.secret or "", self._token() or ""]), 500)
                 for item in readiness]},
-            "agent": {"version": VERSION, "configRevision": self.config_revision},
+            "agent": {"version": VERSION, "desiredRevision": self.desired_revision},
             "events": events,
             "recovery": self.recovery_facts(),
         }
+        recipient = self.age_recipient()
+        if recipient:
+            body["ageRecipient"] = recipient
+        upcoming = self.age_recipient_next()
+        if upcoming and upcoming != recipient:
+            body["ageRecipientNext"] = upcoming
+        verdict = self.reconcile_report()
+        if verdict:
+            body["reconcile"] = verdict
         # Kept for the node's console screen (node_console.py): what Fleet is told.
         self.readiness = body["readiness"]["issues"]
         self.readiness_at = iso(self.clock.time())
@@ -616,15 +823,15 @@ class Agent:
         return f"HTTP {status}" + (f" ({clip(code, 40)})" if isinstance(code, str) else "")
 
     def register(self, identity):
+        # No role: the controller assigns it (ARCHITECTURE.md).
         body = {
             "nodeId": identity["id"],
-            "role": identity["role"],
             "hostname": identity["hostname"],
             "secret": self.secret,
         }
         token = self._token()
         if token:
-            body["roleToken"] = token
+            body["enrollmentToken"] = token
         status, document = self.api("POST", "/v1/nodes/register", body)
         if status in (200, 201) and document and document.get("status") in ("approved", "pending", "rejected"):
             self.needs_register = False
@@ -644,30 +851,73 @@ class Agent:
         status, document = self.api("POST", "/v1/heartbeat", body, bearer=f"{identity['id']}.{self.secret}")
         return status, document, update
 
-    # configuration ------------------------------------------------------------
+    # desired state --------------------------------------------------------------
 
-    def accept_config(self, config):
-        revision = config.get("revision") if isinstance(config, dict) else None
-        values = config.get("values") if isinstance(config, dict) else None
-        if not (isinstance(revision, str) and REVISION.fullmatch(revision) and isinstance(values, dict)):
-            self.log("ignoring a config block with an invalid shape")
+    def accept_desired(self, document):
+        """Persist a new desired document and converge on it. An invalid one is refused whole."""
+        desired = parse_desired(document)
+        if desired is None:
+            self.log("ignoring a desired document with an invalid shape; keeping the cached one")
             return
-        flat = fleetconf.sanitize(values)
-        write_private(self.paths.config, json.dumps({"revision": revision, "values": fleetconf.nest(flat)}, sort_keys=True) + "\n")
-        self.config_revision = revision
+        flat = fleetconf.sanitize(desired["values"])
+        desired["values"] = fleetconf.nest(flat)
+        write_private(self.paths.config, json.dumps(desired, sort_keys=True) + "\n")
+        self.desired = desired
         self.settings = flat
-        self.log(f"received config {revision}")
+        self.log(f"received desired state {desired['revision']}: role {desired['role'] or 'none'}, "
+                 f"closure {desired['closure'] or 'unchanged'}")
         self.apply(flat)
+
+    def converge(self, flat):
+        """The steps every role takes on every cycle: the target for fleet-sync and the devbox logins."""
+        self.step("target", self.write_target)
+        self.step("devbox keys", self.apply_devbox_keys, flat)
+        self.step("age identity rotation", self.rotate_identity, flat)
+
+    def write_target(self):
+        """Write /nix/fleet-state/target when the desired closure differs from it, then start fleet-sync.
+
+        A null closure (a node that is not approved) keeps whatever the node runs
+        and leaves the file alone. A missing or damaged file is rewritten."""
+        text = target_text(self.desired)
+        if text is None or read_text(self.paths.target, 1024) == text:
+            return False
+        fleetconf.write_atomic(str(self.paths.target), text, 0o644)
+        self.log("target is now " + text.strip().replace("\n", ", ") + "; starting fleet-sync")
+        code, _ = self.command([self.paths.systemctl, "start", "--no-block", "fleet-sync.service"], 15)
+        if code != 0:
+            self.log("could not start fleet-sync; its timer converges at the next poll")
+        return True
+
+    def apply_devbox_keys(self, flat):
+        """devbox.authorizedKeys, for the dev login of a running devbox only. Any other role empties the file."""
+        path = self.paths.devbox_keys
+        if self.safe_node_conf().get("role") == "devbox":
+            text = "".join(key + "\n" for key in flat.get("devbox.authorizedKeys") or [])
+        elif path.exists():
+            text = ""
+        else:
+            return
+        try:
+            if read_text(path, 1 << 20) == text and (path.stat().st_mode & 0o777) == 0o600:
+                return
+        except OSError:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fleetconf.write_atomic(str(path), text, 0o600)
 
     def apply(self, flat):
         """Make this node's runtime match the settings. Each step stands alone: one failing never blocks the rest."""
         self.step("write applied config", self.write_applied, flat)
+        self.converge(flat)
         try:
             node_conf = cattle.load_conf(str(self.paths.etc / "node.conf"))
             role = node_conf["role"]
         except (OSError, KeyError, ValueError):
             self.log("no node.conf; runner settings are not applied")
             return
+        if role == BASE:
+            return  # base runs no runner and has no labels
         if role != "ci":
             self.step("runner labels", self.apply_labels_only, node_conf, flat)
             return
@@ -678,11 +928,12 @@ class Agent:
         self.step("restart idle slots", self.refresh_slots, node_conf, outcome)
 
     def reconcile(self):
-        """Every cycle, with or without the controller: keep enforcing the cached settings.
+        """Every cycle, with or without the controller: keep enforcing the cached desired state.
 
         A drain that did not finish is retried (rate limited); a slot that was
         busy when the capacity went down is stopped once it is idle.
         """
+        self.converge(self.settings)
         node_conf = self.safe_node_conf()
         if node_conf.get("role") != "ci":
             return
@@ -866,7 +1117,9 @@ class Agent:
             "lastSuccessAt": iso(self.last_success) if self.last_success else None,
             "failures": self.failures,
             "lastError": self.last_error,
-            "configRevision": self.config_revision,
+            "desiredRevision": self.desired_revision,
+            "assignedRole": (self.desired or {}).get("role"),
+            "assignedClosure": (self.desired or {}).get("closure"),
             "intervalSeconds": self.interval(),
             "nextInSeconds": int(delay),
             "readiness": self.readiness,
@@ -904,6 +1157,8 @@ class Agent:
             self.applied_once = True
             if self.settings:
                 self.apply(self.settings)
+            else:
+                self.converge(self.settings)
         else:
             self.reconcile()
         identity = self.identity()
@@ -949,8 +1204,8 @@ class Agent:
             self.log("could not clear the recovery outbox")
         self.outbox_sent = []
         self.problems = []
-        if "config" in document:
-            self.accept_config(document["config"])
+        if "desired" in document:
+            self.accept_desired(document["desired"])
         delay = self.jitter(self.interval())
         self.record_status("ok", delay)
         return True, delay
@@ -995,18 +1250,27 @@ class Agent:
         document = document if isinstance(document, dict) else {}
         identity = self.identity()
         cached = read_json(self.paths.config)
-        revision = cached.get("revision") if isinstance(cached, dict) else None
+        cached = cached if isinstance(cached, dict) else {}
+        revision = cached.get("revision")
+        target = read_kv(self.paths.target) if self.paths.target.exists() else {}
+        verdict = read_json(self.paths.reconcile)
+        verdict = verdict if isinstance(verdict, dict) else {}
+        conf = self.safe_node_conf()
         return [
             f"api: {self.base}",
             f"node: {identity['hostname'] if identity else 'unknown'}"
             + (f" ({identity['id'][:12]})" if identity else ""),
             f"node secret: {'present' if HEX64.fullmatch((read_text(self.paths.secret, 256) or '').strip()) else 'missing'}",
-            f"role token: {'present' if self._token() else 'absent'}",
+            f"enrollment token: {'present' if self._token() else 'absent'}",
+            f"running: {conf.get('role') or 'unknown'} ({conf.get('flake_attr') or 'unknown'})",
+            f"assigned: {cached.get('role') or 'no role'} ({cached.get('closure') or 'keep running system'})",
+            f"target: {target.get('role') + ' (' + target.get('closure', '?') + ')' if target.get('role') else 'none (the image role)'}",
+            f"convergence: {verdict.get('phase') or 'unknown'}",
             f"registration: {document.get('approval') or 'unknown'}",
             f"last report: {document.get('lastAttemptAt') or 'never'} ({document.get('outcome') or 'none'})",
             f"last success: {document.get('lastSuccessAt') or 'never'}",
             f"last error: {document.get('lastError') or 'none'}",
-            f"config revision: {revision if isinstance(revision, str) else 'none'}",
+            f"desired revision: {revision if isinstance(revision, str) else 'none'}",
             f"report interval: {document.get('intervalSeconds') or DEFAULT_INTERVAL}s",
         ]
 

@@ -53,7 +53,11 @@ async function enroll(
   role: 'ci' | 'web' = 'ci'
 ): Promise<void> {
   await store.registerNode(
-    registerInput(n, { role, approval: 'approved', enrolledVia: 'role-token' })
+    registerInput(n, {
+      tokenRole: role,
+      approval: 'approved',
+      enrolledVia: 'enrollment-token',
+    })
   );
 }
 
@@ -70,7 +74,11 @@ describeStore('offline notifier', (ctx) => {
     return { clock, deps, posts: recorder.posts };
   }
 
-  async function report(store: SqliteStore, clock: Clock, n = 1): Promise<void> {
+  async function report(
+    store: SqliteStore,
+    clock: Clock,
+    n = 1
+  ): Promise<void> {
     const role = (await store.findNode(nodeIdOf(n)))?.role ?? 'ci';
     await store.recordHeartbeat(
       nodeIdOf(n),

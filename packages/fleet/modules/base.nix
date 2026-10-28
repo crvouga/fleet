@@ -144,23 +144,59 @@ in {
     wantedBy = [ "timers.target" ];
     timerConfig = { OnBootSec = "5min"; OnUnitActiveSec = "15min"; };
   };
-  systemd.services.fleet-age-rotate = lib.mkIf (settings.rotateAgeKey or false) {
-    description = "Install a rotated age key from sops";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "sops-install-secrets.service" ];
-    wants = [ "sops-install-secrets.service" ];
+  # Nodes are stateless (ARCHITECTURE.md): /nix holds the system, the node's
+  # identity and caches. Booting into another role than the one that wrote the
+  # caches wipes them before tmpfiles recreates the role's directories and
+  # before any service reads them. scripts/node_state.py lists the identity.
+  systemd.services.fleet-node-state = {
+    description = "Wipe the previous role's caches after a role change";
+    wantedBy = [ "sysinit.target" ];
+    after = [ "local-fs.target" ];
+    before = [ "sysinit.target" "systemd-tmpfiles-setup.service" "fleet-recovery.service"
+      "sshd.service" "fleet-agent.service" "fleet-sync.service" ];
+    unitConfig.DefaultDependencies = false;
+    unitConfig.RequiresMountsFor = "/nix/fleet-state";
+    path = [ pkgs.python3 pkgs.coreutils ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
+      exec python3 ${fleetTools.scripts}/node_state.py epoch /
+    '';
+  };
+  # Every node has its own age identity, generated here on first boot and
+  # never copied off the machine. The controller learns only age.pub (the
+  # heartbeat's ageRecipient); the operator makes it a recipient of the role
+  # file the controller assigned (ARCHITECTURE.md). A key an older installer
+  # placed is kept as is. sops-nix decrypts during activation of a role
+  # closure, so the identity must exist before the first switch away from base.
+  systemd.services.fleet-age-identity = {
+    description = "Create this node's own age identity";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "fleet-agent.service" "fleet-sync.service" ];
+    unitConfig.RequiresMountsFor = "/nix/fleet-state";
+    path = [ pkgs.age pkgs.coreutils ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; UMask = "0077"; };
+    script = ''
       set -eu
-      next=/run/secrets/age-key-next
-      dest=/nix/fleet-state/secrets/age.key
-      [ -s "$next" ]
-      if [ -f "$dest" ] && cmp -s "$next" "$dest"; then
-        exit 0
+      dir=/nix/fleet-state/secrets
+      install -d -m 0700 "$dir"
+      if [ ! -s "$dir/age.key" ]; then
+        age-keygen -o "$dir/age.key.new" 2>/dev/null
+        chmod 0600 "$dir/age.key.new"
+        mv "$dir/age.key.new" "$dir/age.key"
+        date +%s > "$dir/age.created"
       fi
-      install -d -m 0700 /nix/fleet-state/secrets
-      install -m 0600 "$next" "$dest.next"
-      mv "$dest.next" "$dest"
+      # Identities from before rotation existed: their file time is their age.
+      [ -s "$dir/age.created" ] || stat -c %Y "$dir/age.key" > "$dir/age.created"
+      recipient=$(age-keygen -y "$dir/age.key")
+      case "$recipient" in
+        age1*) ;;
+        *) echo 'fleet-age-identity: age.key does not hold one X25519 identity' >&2; exit 1 ;;
+      esac
+      if [ "$(cat "$dir/age.pub" 2>/dev/null || true)" != "$recipient" ]; then
+        printf '%s\n' "$recipient" > "$dir/age.pub.new"
+        chmod 0644 "$dir/age.pub.new"
+        mv "$dir/age.pub.new" "$dir/age.pub"
+      fi
     '';
   };
   # Age key path and sops file only. Role modules declare their own secrets.
@@ -169,9 +205,6 @@ in {
     defaultSopsFile = settings.secretsFile;
     age = { keyFile = "/nix/fleet-state/secrets/age.key"; generateKey = false; sshKeyPaths = [ ]; };
     gnupg.sshKeyPaths = [ ];
-    secrets = lib.mkIf (settings.rotateAgeKey or false) {
-      age-key-next = { mode = "0400"; restartUnits = [ "fleet-age-rotate.service" ]; };
-    };
   };
   assertions = [
     {
@@ -183,8 +216,9 @@ in {
       message = "disk.alertPercent is the /nix and /boot fullness threshold.";
     }
     {
-      assertion = (settings.rotateAgeKey or false) -> settings.secretsFile != null;
-      message = "rotateAgeKey needs this role's secretsFile, with secret age-key-next.";
+      # Identities are per node now and rotate through secrets.rotateAgeKeyAfter.
+      assertion = !(settings ? rotateAgeKey);
+      message = "rotateAgeKey (one rotated key shared through sops) is gone: each node has its own age identity. Use the controller setting secrets.rotateAgeKeyAfter.";
     }
   ];
 }

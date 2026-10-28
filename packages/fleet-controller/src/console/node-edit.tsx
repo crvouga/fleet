@@ -15,6 +15,7 @@ import {
 import { ErrorNotice } from '@pkgs/admin-ui/components';
 import type { FleetEntry } from '../ui/lib/fleet-data';
 import { useAction } from './action';
+import { ApproveWithRole } from './role-select';
 import { useUnsavedChanges, UnsavedDialog } from './unsaved';
 export function NodeEdit({
   entry,
@@ -104,12 +105,7 @@ export function NodeManage({
         {action.success && <Alert color="teal">{action.success}</Alert>}
         <Group>
           {['pending', 'rejected'].includes(view.approval) && (
-            <Button
-              loading={action.busy}
-              onClick={() => action.run(`/nodes/${view.id}/approve`, {})}
-            >
-              Approve
-            </Button>
+            <ApproveWithRole id={view.id} label="Approve" action={action} />
           )}
           {view.approval === 'pending' && (
             <Button

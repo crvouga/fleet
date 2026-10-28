@@ -4,6 +4,7 @@ import type { Child } from 'hono/jsx';
 import type { AppDeps } from '../../deps';
 import type { EventRow } from '../../types';
 import { AddNodeSteps } from '../components/add-node';
+import { ApproveForm } from '../components/approve-form';
 import { ActionForm } from '../components/forms';
 import { LiveRegion, LiveStatus } from '../components/live';
 import { Shell, PageHeader } from '../layout';
@@ -154,11 +155,7 @@ function nodeDetail(deps: AppDeps) {
     const pending = entry.view.status === 'pending';
     const actions = pending ? (
       <>
-        <ActionForm
-          action={`/nodes/${id}/approve`}
-          label="Approve"
-          tone="primary"
-        />
+        <ApproveForm nodeId={id} label="Approve" />
         <ActionForm action={`/nodes/${id}/reject`} label="Reject" />
       </>
     ) : (

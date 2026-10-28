@@ -41,8 +41,9 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
     };
     hosts = builtins.listToAttrs (map (closure:
       lib.nameValuePair closure.attr (mkHost (settingsFor closure) closure.host)) roles.closures);
-    # A role's own closure, without capability variants (ci, not ci-gpu).
-    primaryHosts = lib.getAttrs roles.active hosts;
+    # base and each role's own closure, without capability variants (ci, not ci-gpu).
+    primaryHosts = lib.getAttrs ([ roles.base.attr ] ++ roles.active) hosts;
+    baseHost = hosts.${roles.base.attr};
     installerIso = lib.nixosSystem {
       inherit system;
       specialArgs = { settings = installerSettings; };
@@ -51,19 +52,18 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
         ./modules/installer.nix
         ./modules/installer-iso.nix
         {
-          isoImage.storeContents = map toplevel roles.installer ++ [ installDisk ];
+          # One role-less system. The fleet controller assigns the role after
+          # installation (ARCHITECTURE.md); the image carries no role choice.
+          isoImage.storeContents = [ (toplevel roles.base.attr) installDisk ];
           isoImage.contents = [{
             source = pkgs.writeText "fleet-readiness.json" (builtins.toJSON {
-              version = 1;
-              roles = lib.genAttrs roles.installer (attr: {
-                blocked = (builtins.fromJSON hosts.${attr}.config.environment.etc."fleet/bootstrap.json".text).installBlocked;
-              });
+              version = 2;
+              blocked = (builtins.fromJSON baseHost.config.environment.etc."fleet/bootstrap.json".text).installBlocked;
             });
             target = "/fleet-readiness.json";
           } {
             source = pkgs.writeText "fleet-install-manifest"
-              (lib.concatMapStrings (attr: "${attr} ${toplevel attr}\n") roles.installer
-                + "disko ${installDisk}\n");
+              "${roles.base.attr} ${toplevel roles.base.attr}\ndisko ${installDisk}\n";
             target = "/fleet-install-manifest";
           }];
         }
@@ -81,7 +81,7 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
       again=$(python3 ${./scripts/cattle.py} select-disk)
       [ "$again" = "$device" ]
       ln -sfn "$device" /dev/fleet-install-disk
-      exec ${hosts.${roles.installerDefault}.config.system.build.diskoScript}
+      exec ${baseHost.config.system.build.diskoScript}
     '';
     bootstrapFor = pkgs': pkgs'.writeShellScript "bootstrap" ''
       export PATH=${lib.makeBinPath [ pkgs'.openssh ]}:$PATH
@@ -100,11 +100,11 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
       self = config.self or self;
       deployment = builtins.removeAttrs config [ "self" ];
     });
-    lib.roles = { inherit (roles) known active installer published installerDefault; };
+    lib.roles = { inherit (roles) known active published; base = roles.base.attr; };
     # One evaluation for the cache probes (check-fleet-cache.ts, wait-cache.py):
     # every published closure path and the key that must have signed it.
     lib.cacheProbe = let
-      bootstrap = builtins.fromJSON hosts.${roles.installerDefault}.config.environment.etc."fleet/bootstrap.json".text;
+      bootstrap = builtins.fromJSON baseHost.config.environment.etc."fleet/bootstrap.json".text;
     in {
       metadata = { inherit (bootstrap) cacheUrl cachePublicKey; };
       paths = map (attr: toString (toplevel attr)) roles.published;
@@ -113,13 +113,13 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
     # Every closure, including capability variants such as ci-gpu. Only
     # roles.published is built by default and by the Fleet cache workflow.
     packages.${system} = lib.mapAttrs (attr: _: toplevel attr) hosts // {
-      node = self.packages.${system}.${roles.installerDefault};
+      node = self.packages.${system}.${roles.base.attr};
       installer = installerIso.config.system.build.isoImage;
       fleet-installer = import ./modules/installer-package.nix { inherit pkgs lib revision; };
       fleet-node = self.packages.${system}.fleet-installer;
       # A revision-independent runtime closure shared by all CI check lanes.
       coding-tools = (import ./modules/coding-package.nix { inherit pkgs lib; }).session;
-      default = self.packages.${system}.${roles.installerDefault};
+      default = self.packages.${system}.${roles.base.attr};
       disko = installDisk;
       nixos-anywhere = pkgs.nixos-anywhere;
       bootstrap = bootstrapFor pkgs;
@@ -129,6 +129,7 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
         configured = self.lib.mkFleet {
           shared.fleetApi.url = "https://fleet.example.org";
           shared.repo.pollSeconds = 60;
+          shared.repo.url = "https://github.com/example/machines.git";
           roles.ci = {
             github = {
               scope = "repository";
@@ -156,7 +157,12 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
       vm = import ./tests/vm.nix (testArgs // { settings = import ./fleet.nix; });
       lifecycle = import ./tests/lifecycle.nix testArgs;
       follow-up = import ./tests/follow-up.nix testArgs;
-      update-units = import ./tests/update-units.nix { inherit pkgs lib; roles = hosts; };
+      update-units = import ./tests/update-units.nix {
+        inherit pkgs lib;
+        roles = lib.getAttrs roles.published (self.lib.mkFleet {
+          shared.repo.url = "https://github.com/example/machines.git";
+        }).nixosConfigurations;
+      };
       coding-units = import ./tests/coding-units.nix { inherit pkgs lib; roles = hosts; };
       coding-launcher = import ./tests/coding-launcher.nix { inherit pkgs lib; };
       # The complete registry rules and its files, from inside the build.

@@ -1,4 +1,4 @@
-import type { NodeStatus, Role } from '../../types';
+import type { Convergence, NodeStatus, Role } from '../../types';
 import type { AttentionLevel } from '../lib/attention';
 import { cx, tw } from '../lib/tw';
 
@@ -94,10 +94,44 @@ export function LevelPill(props: { level: AttentionLevel }) {
   );
 }
 
-export function RoleBadge(props: { role: Role }) {
-  return (
+/** The ASSIGNED role; an unassigned node says so instead of showing nothing. */
+export function RoleBadge(props: { role: Role | null }) {
+  return props.role === null ? (
+    <span class="inline-flex items-center rounded-md border border-dashed border-line px-1.5 py-0.5 text-xs font-medium text-fg-3">
+      unassigned
+    </span>
+  ) : (
     <span class="inline-flex items-center rounded-md border border-line bg-muted px-1.5 py-0.5 text-xs font-medium text-fg-2">
       {props.role}
+    </span>
+  );
+}
+
+export const CONVERGENCE_META: Readonly<
+  Record<Convergence, { label: string; text: string; dot: string }>
+> = {
+  converged: { label: 'Converged', text: tw('text-ok'), dot: tw('bg-ok-dot') },
+  progressing: {
+    label: 'Converging',
+    text: tw('text-accent-ink'),
+    dot: tw('bg-accent'),
+  },
+  blocked: { label: 'Blocked', text: tw('text-bad'), dot: tw('bg-bad-dot') },
+  unknown: { label: 'Not reported', text: tw('text-fg-3'), dot: tw('bg-fg-3') },
+};
+
+/** Desired against observed state, in words: never color alone. */
+export function ConvergenceBadge(props: { convergence: Convergence }) {
+  const meta = CONVERGENCE_META[props.convergence];
+  return (
+    <span
+      class={cx(
+        'inline-flex items-center gap-1.5 whitespace-nowrap font-medium',
+        meta.text
+      )}
+    >
+      <span role="presentation" class={cx('size-2 rounded-full', meta.dot)} />
+      {meta.label}
     </span>
   );
 }

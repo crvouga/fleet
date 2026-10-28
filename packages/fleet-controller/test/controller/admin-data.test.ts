@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { renderMetrics } from '../../src/routes/metrics';
 import type { NodeView } from '../../src/types';
-import { ADMIN_TOKEN, CI_ROLE_TOKEN } from '../support/controller';
+import { ADMIN_TOKEN, CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { heartbeatBody, nodeIdOf, T0 } from '../support/fixtures';
 
@@ -67,8 +67,8 @@ describeController('GET /v1/events', (ctx) => {
 
   test('filters by node', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
-    await h.register(2, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
+    await h.register(2, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const only = await h.admin('GET', `/v1/events?node=${nodeIdOf(2)}`);
     expect(only.body.events.length).toBeGreaterThan(0);
     expect(
@@ -212,7 +212,7 @@ describeController('settings endpoints', (ctx) => {
       sync: { pauzed: true },
       heartbeat: { intervalSeconds: 5 },
       reboot: { enabled: 'yes' },
-      secrets: {},
+      commands: {},
       alerts: { webhookUrl: 'http://insecure.example' },
     });
     expect(reply.status).toBe(400);
@@ -222,7 +222,7 @@ describeController('settings endpoints', (ctx) => {
         'sync.pauzed is not a setting',
         'heartbeat.intervalSeconds must be between 15 and 3600',
         'reboot.enabled must be true or false',
-        'secrets is not a settings section',
+        'commands is not a settings section',
         'alerts.webhookUrl must be https',
       ])
     );
@@ -250,7 +250,7 @@ describeController('settings endpoints', (ctx) => {
     expect(
       (await h.admin('GET', `/v1/settings/node:${nodeIdOf(1)}`)).status
     ).toBe(404);
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await put('fleet', {
       disk: { alertPercent: 80 },
       alerts: { offlineAfterSeconds: 120 },
@@ -333,13 +333,13 @@ describeController('GET /v1/summary', (ctx) => {
   test('counts nodes by status and role, revisions and capacity', async () => {
     const { h } = ctx();
     h.clock.set(T0);
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
-    await h.register(2, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
+    await h.register(2, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.register(3);
     await h.register(4, {
       role: 'devbox',
       hostname: 'devbox-1234',
-      roleToken: 'wrong',
+      enrollmentToken: 'wrong-token-value',
     });
     await h.asNode(
       1,
@@ -368,6 +368,13 @@ describeController('GET /v1/summary', (ctx) => {
       offline: 0,
     });
     expect(summary.byRole.ci).toEqual({ total: 2, online: 2 });
+    expect(summary.byRole.devbox).toEqual({ total: 0, online: 0 });
+    expect(summary.unassigned).toEqual({ total: 0, online: 0 });
+    await h.admin('POST', `/v1/nodes/${nodeIdOf(3)}/approve`);
+    expect((await h.admin('GET', '/v1/summary')).body.unassigned).toEqual({
+      total: 1,
+      online: 0,
+    });
     expect(summary.runnerSlots).toEqual({ total: 6, busy: 3 });
     expect(summary.withFailedUnits).toBe(1);
     expect(summary.rolledBack).toBe(1);
@@ -394,7 +401,7 @@ describeController('GET /metrics', (ctx) => {
   test('reports every series the protocol names', async () => {
     const { h } = ctx();
     h.clock.set(T0);
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.register(2);
     await h.asNode(
       1,
@@ -406,9 +413,14 @@ describeController('GET /metrics', (ctx) => {
     const lines = (await h.admin('GET', '/metrics')).text.split('\n');
     const host = `ci-${nodeIdOf(1).slice(0, 4)}`;
     expect(lines).toContain('fleet_nodes{status="online",role="ci"} 1');
-    expect(lines).toContain('fleet_nodes{status="pending",role="ci"} 1');
+    expect(lines).toContain('fleet_nodes{status="pending",role="ci"} 0');
+    expect(lines).toContain(
+      'fleet_nodes{status="pending",role="unassigned"} 1'
+    );
     expect(lines).toContain('fleet_nodes{status="offline",role="web"} 0');
     expect(lines).toContain(`fleet_node_up{node="${host}",role="ci"} 1`);
+    // Never reported a reconcile phase, so not converged.
+    expect(lines).toContain(`fleet_node_converged{node="${host}",role="ci"} 0`);
     expect(lines).toContain(`fleet_node_last_seen_seconds{node="${host}"} 20`);
     expect(lines).toContain('fleet_runner_slots{state="total"} 4');
     expect(lines).toContain('fleet_runner_slots{state="busy"} 1');
@@ -417,7 +429,7 @@ describeController('GET /metrics', (ctx) => {
 
   test('a node that falls silent goes down', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.asNode(1, 'POST', '/v1/heartbeat', heartbeatBody(1));
     h.clock.advance(1000);
     const lines = (await h.admin('GET', '/metrics')).text.split('\n');
@@ -429,7 +441,7 @@ describeController('GET /metrics', (ctx) => {
 
   test('every line is a comment or a valid sample', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.asNode(1, 'POST', '/v1/heartbeat', heartbeatBody(1));
     const lines = (await h.admin('GET', '/metrics')).text.trimEnd().split('\n');
     for (const line of lines) {
@@ -441,6 +453,7 @@ describeController('GET /metrics', (ctx) => {
     expect(types.map((l) => l.split(' ')[2])).toEqual([
       'fleet_nodes',
       'fleet_node_up',
+      'fleet_node_converged',
       'fleet_node_last_seen_seconds',
       'fleet_runner_slots',
       'fleet_node_telemetry_fresh',
@@ -460,8 +473,8 @@ describeController('GET /metrics', (ctx) => {
 
   test('retired and rejected nodes have no per-node series', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
-    await h.register(2, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
+    await h.register(2, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.asNode(1, 'POST', '/v1/heartbeat', heartbeatBody(1));
     await h.asNode(2, 'POST', '/v1/heartbeat', heartbeatBody(2));
     await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/retire`);

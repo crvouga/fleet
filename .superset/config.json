@@ -1,0 +1,5 @@
+{
+  "setup": ["bun run local:setup"],
+  "run": ["bun run local"],
+  "teardown": ["bun run local:stop"]
+}

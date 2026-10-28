@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { ConfigurationError, readControllerEnv, type EnvSource } from '../src/env';
+import {
+  ConfigurationError,
+  readControllerEnv,
+  type EnvSource,
+} from '../src/env';
 
 import { sha256 } from './support/fixtures';
 
@@ -8,10 +12,8 @@ const VALID: EnvSource = {
   FLEET_S3_BUCKET: 'test-bucket',
   AWS_ACCESS_KEY_ID: 'test-key',
   AWS_SECRET_ACCESS_KEY: 'test-secret',
-  FLEET_GITHUB_REPO: 'example/fleet',
   FLEET_ADMIN_TOKEN: 'a'.repeat(32),
   FLEET_SESSION_SECRET: 'b'.repeat(32),
-  FLEET_ROLE_TOKEN_HASHES: '{}',
 };
 
 function problems(source: EnvSource): string {
@@ -33,9 +35,16 @@ describe('readControllerEnv', () => {
       }),
       port: 8080,
       adminToken: 'a'.repeat(32),
-      roleTokenHashes: {},
-      githubRepo: 'example/fleet',
+      enrollmentTokens: [],
     });
+  });
+
+  test('core configuration needs no GitHub repository and supports an operator target revision', () => {
+    const env = readControllerEnv({
+      ...VALID,
+      FLEET_TARGET_REVISION: 'a'.repeat(40),
+    });
+    expect(env.targetRevision).toBe('a'.repeat(40));
   });
 
   test('reads every optional setting', () => {
@@ -43,16 +52,19 @@ describe('readControllerEnv', () => {
       ...VALID,
       PORT: '9000',
       VAULT_ADDR: 'https://vault.example.com/',
-      FLEET_GITHUB_REPO: 'someone/else',
-      FLEET_ROLE_TOKEN_HASHES: JSON.stringify({
-        ci: sha256('x').toUpperCase(),
-        web: sha256('y'),
-      }),
+      FLEET_ENROLLMENT_TOKENS: JSON.stringify([
+        { sha256: sha256('x').toUpperCase(), role: 'ci' },
+        { sha256: sha256('y'), role: null },
+        { sha256: sha256('z') },
+      ]),
     });
     expect(env).toMatchObject({
       port: 9000,
-      githubRepo: 'someone/else',
-      roleTokenHashes: { ci: sha256('x'), web: sha256('y') },
+      enrollmentTokens: [
+        { sha256: sha256('x'), role: 'ci' },
+        { sha256: sha256('y'), role: null },
+        { sha256: sha256('z'), role: null },
+      ],
     });
   });
 
@@ -64,7 +76,6 @@ describe('readControllerEnv', () => {
     });
     expect(env.port).toBe(8080);
     expect(env).not.toHaveProperty('vaultAddr');
-    expect(env.githubRepo).toBe('example/fleet');
   });
 
   test('names every missing variable at once', () => {
@@ -80,31 +91,56 @@ describe('readControllerEnv', () => {
     );
   });
 
-  test('refuses malformed role token hashes', () => {
-    expect(problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: 'nope' })).toContain(
-      'JSON object'
-    );
-    expect(problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: '[]' })).toContain(
-      'JSON object'
-    );
+  test('refuses the retired role token hashes and names the replacement', () => {
+    for (const value of ['{}', JSON.stringify({ ci: sha256('x') })]) {
+      const message = problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: value });
+      expect(message).toContain(
+        'FLEET_ROLE_TOKEN_HASHES is no longer supported'
+      );
+      expect(message).toContain('FLEET_ENROLLMENT_TOKENS');
+    }
     expect(
-      problems({ ...VALID, FLEET_ROLE_TOKEN_HASHES: '{"ci":"abc"}' })
-    ).toContain('64 hex');
-    expect(
-      problems({
-        ...VALID,
-        FLEET_ROLE_TOKEN_HASHES: JSON.stringify({ gpu: sha256('x') }),
-      })
-    ).toContain('unknown role "gpu"');
+      readControllerEnv({ ...VALID, FLEET_ROLE_TOKEN_HASHES: ' ' })
+    ).toBeDefined();
   });
 
-  test('refuses invalid ports, repositories and removed pooler settings', () => {
+  test('refuses malformed enrollment tokens', () => {
+    const bad = (value: unknown) =>
+      problems({ ...VALID, FLEET_ENROLLMENT_TOKENS: JSON.stringify(value) });
+    expect(problems({ ...VALID, FLEET_ENROLLMENT_TOKENS: 'nope' })).toContain(
+      'JSON array'
+    );
+    expect(bad({ sha256: sha256('x') })).toContain('JSON array');
+    expect(bad([{ sha256: 'abc', role: 'ci' }])).toContain('64 hex');
+    expect(bad([{ sha256: sha256('x'), role: 'gpu' }])).toContain(
+      'active role or null'
+    );
+    expect(bad([{ sha256: sha256('x'), role: 'web' }])).toContain(
+      'active role or null'
+    );
+    expect(bad([{ sha256: sha256('x'), role: 'ci', extra: 1 }])).toContain(
+      'only have the keys'
+    );
+    expect(
+      bad([
+        { sha256: sha256('x'), role: 'ci' },
+        { sha256: sha256('x'), role: null },
+      ])
+    ).toContain('more than once');
+    expect(
+      bad(
+        Array.from({ length: 17 }, (_, i) => ({
+          sha256: sha256(String(i)),
+          role: null,
+        }))
+      )
+    ).toContain('at most 16');
+  });
+
+  test('refuses invalid ports and removed pooler settings', () => {
     expect(problems({ ...VALID, PORT: '0' })).toContain('PORT');
     expect(problems({ ...VALID, PORT: 'http' })).toContain('PORT');
     expect(problems({ ...VALID, PORT: '70000' })).toContain('PORT');
-    expect(problems({ ...VALID, FLEET_GITHUB_REPO: 'no-slash' })).toContain(
-      'FLEET_GITHUB_REPO'
-    );
     expect(problems({ ...VALID, FLEET_DB_PREPARE: 'maybe' })).toContain(
       'FLEET_DB_PREPARE'
     );
@@ -115,7 +151,7 @@ describe('readControllerEnv', () => {
       DATABASE_URL: 'mysql://user:hunter2-secret@db/app',
       FLEET_ADMIN_TOKEN: 'tiny-admin-secret',
       FLEET_SESSION_SECRET: 'tiny-session-secret',
-      FLEET_ROLE_TOKEN_HASHES: '{"ci":"super-secret-not-hex"}',
+      FLEET_ENROLLMENT_TOKENS: '[{"sha256":"super-secret-not-hex"}]',
     });
     for (const secret of [
       'hunter2-secret',
@@ -128,17 +164,21 @@ describe('readControllerEnv', () => {
   });
 });
 
-test('browser login accepts only a complete relay configuration and exact HTTPS/loopback origins', () => {
+test('browser login accepts only a complete OIDC configuration and exact HTTPS/loopback origins', () => {
   const settings = {
     ...VALID,
     FLEET_OIDC_ISSUER: 'https://auth.example.test/realms/fleet',
     FLEET_OIDC_CLIENT_ID: 'app-id',
     FLEET_PUBLIC_ORIGIN: 'http://localhost:5173',
   };
-  expect(readControllerEnv(settings).relay?.origin).toBe('http://localhost:5173');
+  expect(readControllerEnv(settings).oidc?.origin).toBe(
+    'http://localhost:5173'
+  );
   expect(
-    readControllerEnv({ ...settings, FLEET_PUBLIC_ORIGIN: 'http://127.0.0.1:8082' })
-      .relay
+    readControllerEnv({
+      ...settings,
+      FLEET_PUBLIC_ORIGIN: 'http://127.0.0.1:8082',
+    }).oidc
   ).toBeDefined();
   for (const bad of [
     'http://fleet.example',
@@ -159,7 +199,7 @@ test('browser login accepts only a complete relay configuration and exact HTTPS/
     readControllerEnv({
       ...settings,
       FLEET_OIDC_ISSUER: 'https://login.example.org/tenant/v2.0',
-    }).relay?.issuer
+    }).oidc?.issuer
   ).toBe('https://login.example.org/tenant/v2.0');
   expect(problems({ ...settings, FLEET_OIDC_CLIENT_ID: '' })).toContain(
     'FLEET_OIDC_CLIENT_ID'
@@ -181,7 +221,7 @@ test('browser login preserves root issuer identifiers with and without a slash',
         FLEET_OIDC_ISSUER: issuer,
         FLEET_OIDC_CLIENT_ID: 'public-client',
         FLEET_PUBLIC_ORIGIN: 'https://fleet.example.org',
-      }).relay?.issuer
+      }).oidc?.issuer
     ).toBe(issuer);
   }
 });

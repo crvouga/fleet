@@ -1,14 +1,17 @@
 import type {
   Approval,
+  Capability,
   EnrolledVia,
   EventRow,
   HeartbeatPoint,
   NodeRow,
+  ReconcilePhase,
+  ReconcileReport,
   Severity,
   SettingsHistoryRow,
   SettingsRow,
 } from '../types';
-import { isRole } from '../types';
+import { isCapability, isObservedRole, isRole } from '../types';
 import type { Telemetry } from '../telemetry';
 import { telemetryOf } from '../domain/telemetry-validation';
 import { compactTelemetry } from '../domain/heartbeat-history';
@@ -23,7 +26,16 @@ const APPROVALS: readonly Approval[] = [
   'retired',
 ];
 const SEVERITIES: readonly Severity[] = ['info', 'warn', 'error'];
-const ENROLLED: readonly EnrolledVia[] = ['role-token', 'hello', 'dashboard'];
+const ENROLLED: readonly EnrolledVia[] = [
+  'enrollment-token',
+  'hello',
+  'dashboard',
+];
+const PHASES: readonly ReconcilePhase[] = [
+  'converged',
+  'progressing',
+  'blocked',
+];
 
 function bad(key: string, expected: string): never {
   throw new TypeError(`database column ${key} was not ${expected}`);
@@ -94,12 +106,57 @@ function oneOf<T extends string>(
     : bad(key, 'a known value');
 }
 
+function jsonOrNull(row: Row, key: string): Record<string, unknown> | null {
+  return row[key] === null || row[key] === undefined
+    ? null
+    : jsonObject(row, key);
+}
+
+function assignedRole(row: Row): NodeRow['role'] {
+  const role = textOrNull(row, 'role');
+  if (role !== null && !isRole(role)) bad('role', 'a known role');
+  return role as NodeRow['role'];
+}
+
+function observedRole(row: Row): NodeRow['observedRole'] {
+  const role = textOrNull(row, 'observed_role');
+  if (role !== null && !isObservedRole(role))
+    bad('observed_role', 'a known role');
+  return role as NodeRow['observedRole'];
+}
+
+/** Stored as validated; unknown capabilities are dropped, never an error. */
+function hardwareOf(row: Row): NodeRow['hardware'] {
+  const raw = jsonOrNull(row, 'hardware');
+  if (raw === null) return null;
+  const list = Array.isArray(raw['capabilities']) ? raw['capabilities'] : [];
+  return {
+    capabilities: list.filter((item): item is Capability => isCapability(item)),
+  };
+}
+
+function reconcileOf(row: Row): ReconcileReport | null {
+  const raw = jsonOrNull(row, 'reconcile');
+  if (raw === null) return null;
+  const phase = raw['phase'];
+  if (!PHASES.includes(phase as ReconcilePhase))
+    return bad('reconcile', 'a reconcile report');
+  const issues = Array.isArray(raw['issues']) ? raw['issues'] : [];
+  return {
+    phase: phase as ReconcilePhase,
+    issues: issues.filter((item): item is string => typeof item === 'string'),
+  };
+}
+
 export function toNodeRow(row: Row): NodeRow {
-  const role = text(row, 'role');
-  if (!isRole(role)) bad('role', 'a known role');
   return {
     id: text(row, 'id'),
-    role: role as NodeRow['role'],
+    role: assignedRole(row),
+    observedRole: observedRole(row),
+    observedClosure: textOrNull(row, 'observed_closure'),
+    ageRecipient: textOrNull(row, 'age_recipient'),
+    hardware: hardwareOf(row),
+    reconcile: reconcileOf(row),
     hostname: text(row, 'hostname'),
     approval: oneOf(row, 'approval', APPROVALS),
     displayName: textOrNull(row, 'display_name'),
@@ -108,7 +165,7 @@ export function toNodeRow(row: Row): NodeRow {
     facts: jsonObject(row, 'facts'),
     revision: textOrNull(row, 'revision'),
     agentVersion: textOrNull(row, 'agent_version'),
-    configRevision: textOrNull(row, 'config_revision'),
+    appliedRevision: textOrNull(row, 'applied_revision'),
     heartbeatIntervalSeconds: numberOf(row, 'heartbeat_interval_seconds'),
     remoteAddr: textOrNull(row, 'remote_addr'),
     enrolledVia: oneOf(row, 'enrolled_via', ENROLLED),

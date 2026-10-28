@@ -24,6 +24,11 @@ const OPERATIONS = {
     key: 'reopenAfter',
     done: 'The node lifts the manual drain at its next report. Low disk space or an update in progress still keep admission closed.',
   },
+  'rotate-age-key': {
+    section: 'secrets',
+    key: 'rotateAgeKeyAfter',
+    done: 'The node generates a next age identity and reports its recipient. Re-encrypt its role secrets for the next recipient and merge; the node switches once it can decrypt them.',
+  },
 } as const;
 
 type Operation = keyof typeof OPERATIONS;
@@ -63,5 +68,9 @@ export function registerRecoveryActions(app: Hono, deps: AppDeps): void {
   app.post(
     '/nodes/:id/recovery/reopen-admission',
     operate(deps, 'reopen-admission')
+  );
+  app.post(
+    '/nodes/:id/recovery/rotate-age-key',
+    operate(deps, 'rotate-age-key')
   );
 }

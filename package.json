@@ -19,7 +19,13 @@
     "test:support": "bun run --cwd packages/assert test && bun run --cwd packages/logger test && bun run --cwd packages/admin-ui test",
     "start": "bun run --cwd packages/fleet-controller start",
     "check:config": "bun run --cwd packages/fleet-controller check:config",
-    "access:allow": "bun run --cwd packages/fleet-controller access:allow"
+    "access:allow": "bun run --cwd packages/fleet-controller access:allow",
+    "local:setup": "bun packages/fleet-controller/src/local/cli.ts setup",
+    "local": "bun packages/fleet-controller/src/local/cli.ts run",
+    "local:status": "bun packages/fleet-controller/src/local/cli.ts status",
+    "local:stop": "bun packages/fleet-controller/src/local/cli.ts stop",
+    "local:doctor": "bun packages/fleet-controller/src/local/cli.ts doctor",
+    "dev:managed": "FLEET_DEV_MODE=managed bun run dev"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

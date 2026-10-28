@@ -27,9 +27,14 @@ export const SORT_KEYS = [
 ] as const;
 export type SortKey = (typeof SORT_KEYS)[number];
 
+/** The role filter value for approved nodes without an assigned role. */
+export const UNASSIGNED = 'unassigned';
+export type RoleFilter = Role | typeof UNASSIGNED;
+
 export interface NodesQuery {
   readonly status: StatusFilter;
-  readonly role: Role | null;
+  /** The ASSIGNED role, `unassigned`, or null for every node. */
+  readonly role: RoleFilter | null;
   readonly q: string;
   readonly sort: SortKey;
   readonly dir: 'asc' | 'desc';
@@ -45,7 +50,7 @@ export function parseNodesQuery(
   const role = query['role'];
   return {
     status,
-    role: isRole(role) ? role : null,
+    role: isRole(role) || role === UNASSIGNED ? role : null,
     q: (query['q'] ?? '').trim().slice(0, MAX_SEARCH_LENGTH),
     sort,
     dir:
@@ -134,7 +139,7 @@ export function filterNodes(
   return entries.filter(
     (entry) =>
       matchesStatus(entry, query.status) &&
-      (query.role === null || entry.view.role === query.role) &&
+      (query.role === null || (entry.view.role ?? UNASSIGNED) === query.role) &&
       (needle === '' || haystack(entry).includes(needle))
   );
 }
@@ -144,7 +149,7 @@ type SortValue = number | string | null;
 const SORT_VALUES: Record<SortKey, (entry: FleetEntry) => SortValue> = {
   status: (e) => STATUS_RANK[e.view.status],
   name: (e) => e.view.label.toLowerCase(),
-  role: (e) => ROLES.indexOf(e.view.role),
+  role: (e) => (e.view.role === null ? null : ROLES.indexOf(e.view.role)),
   seen: (e) => e.view.lastSeenAt?.getTime() ?? null,
   uptime: (e) => e.facts.uptimeSeconds,
   load: (e) => e.facts.load1,

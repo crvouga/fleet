@@ -49,7 +49,7 @@ describe('sign in', () => {
     );
   });
 
-  test('login uses the relay and never renders Vault credentials', async () => {
+  test('login uses the provider and never renders Vault credentials', async () => {
     const { app } = populated();
     const page = await html(app, '/login?next=/nodes', null);
     expect(page).toContain('OpenID Connect');
@@ -90,7 +90,7 @@ describe('sign in', () => {
   });
 });
 
-const ACTIONS = ['approve', 'reject', 'retire', 'delete', 'edit'];
+const ACTIONS = ['approve', 'reject', 'retire', 'delete', 'edit', 'role'];
 
 describe('csrf and auth on state changes', () => {
   test('every POST refuses a foreign or missing Origin and changes nothing', async () => {

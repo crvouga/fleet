@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { isRole, type Role } from '../types';
 import {
   RULES,
@@ -160,19 +159,12 @@ export function nodePayload(
   return rest;
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+/** JSON with object keys sorted at every level: equal content, equal text. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (isRecord(value)) {
     const keys = Object.keys(value).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
   }
   return JSON.stringify(value) ?? 'null';
-}
-
-/** A short fingerprint of a node's configuration. Equal content, equal revision. */
-export function configRevision(payload: Omit<FleetConfig, 'alerts'>): string {
-  return createHash('sha256')
-    .update(canonical(payload))
-    .digest('hex')
-    .slice(0, 16);
 }

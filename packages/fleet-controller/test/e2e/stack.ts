@@ -6,7 +6,8 @@
  * Starts a real test worker with temporary SQLite state and fake credentials.
  * Production always starts through the Litestream supervisor.
  * Prints address/credentials after /health answers and cleans up on termination.
- * Environment: FLEET_E2E_ROLE_TOKEN (default generated).
+ * Environment: FLEET_E2E_ENROLLMENT_TOKEN (default generated; the older
+ * FLEET_E2E_ROLE_TOKEN is still read). It approves and assigns ci.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +40,7 @@ async function waitHealthy(base: string): Promise<void> {
 function serverEnv(
   databaseUrl: string,
   port: number,
-  roleToken: string,
+  enrollmentToken: string,
   secrets: { admin: string; session: string }
 ): Record<string, string> {
   const env: Record<string, string> = {
@@ -52,8 +53,9 @@ function serverEnv(
     PORT: String(port),
     FLEET_ADMIN_TOKEN: secrets.admin,
     FLEET_SESSION_SECRET: secrets.session,
-    FLEET_ROLE_TOKEN_HASHES: JSON.stringify({ ci: sha256(roleToken) }),
-    FLEET_GITHUB_REPO: 'crvouga/fleet',
+    FLEET_ENROLLMENT_TOKENS: JSON.stringify([
+      { sha256: sha256(enrollmentToken), role: 'ci' },
+    ]),
   };
   return env;
 }
@@ -77,13 +79,15 @@ async function main(): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'fleet-e2e-'));
   const database = join(directory, 'fleet.db');
   const port = await freePort();
-  const roleToken =
-    process.env['FLEET_E2E_ROLE_TOKEN'] ?? randomBytes(24).toString('hex');
+  const enrollmentToken =
+    process.env['FLEET_E2E_ENROLLMENT_TOKEN'] ??
+    process.env['FLEET_E2E_ROLE_TOKEN'] ??
+    randomBytes(24).toString('hex');
   const secrets = {
     admin: randomBytes(24).toString('hex'),
     session: randomBytes(24).toString('hex'),
   };
-  const env = serverEnv(database, port, roleToken, secrets);
+  const env = serverEnv(database, port, enrollmentToken, secrets);
   const controller = spawnProcess(env);
 
   let stopping = false;
@@ -111,7 +115,9 @@ async function main(): Promise<void> {
     JSON.stringify({
       controllerUrl: base,
       adminToken: secrets.admin,
-      roleToken,
+      enrollmentToken,
+      // Older harnesses read this name; it is the same enrollment token.
+      roleToken: enrollmentToken,
       databaseUrl: database,
       mode: 'process',
     }) + '\n'

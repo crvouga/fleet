@@ -127,14 +127,9 @@ class SetupFlowTest(unittest.TestCase):
         self.state = self.root / "state.json"
         self.github = FakeGitHub(make_pem())
         self.addCleanup(self.github.close)
-        counter = self.root / "count"
-        keygen = self.root / "age-keygen"
-        keygen.write_text(textwrap.dedent(f"""\
-            #!/bin/bash
-            if [ "$1" = "-y" ]; then echo "age1pub$(tail -c 3 "$2")"; exit 0; fi
-            n=$(( $(cat {counter} 2>/dev/null || echo 0) + 1 )); echo $n > {counter}
-            printf '# public key: age1pub%03d\\nAGE-SECRET-KEY-%03d\\n' $n $n
-            """))
+        # Rendered by scripts/fleet-keys.py from the operator's key and GET /v1/recipients.
+        (self.package / ".sops.yaml").write_text(
+            "creation_rules:\n  - path_regex: secrets/fleet\\.(yaml|yml|json)$\n    age: age1pubop,age1pubnode\n")
         sops = self.root / "sops"
         self.sops_calls = self.root / "sops-calls"
         sops.write_text(textwrap.dedent(f"""\
@@ -144,11 +139,14 @@ class SetupFlowTest(unittest.TestCase):
             [ "$(stat -c %a "$file" 2>/dev/null || stat -f %Lp "$file")" = 600 ] || {{ echo 'plaintext not private' >&2; exit 1; }}
             printf 'github-app-key: ENC[AES256_GCM,data:%s]\\nsops:\\n  age: ok\\n' "$(wc -c < "$file" | tr -d ' ')"
             """))
-        for tool in (keygen, sops):
+        for tool in (sops,):
             tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+        repo_patch = mock.patch.multiple(setup, REPO="crvouga/fleet", OWNER="crvouga")
+        repo_patch.start()
+        self.addCleanup(repo_patch.stop)
         self.env = {
             "FLEET_PACKAGE": str(self.package), "FLEET_SETUP_STATE": str(self.state), "FLEET_GITHUB_API": self.github.url,
-            "FLEET_GITHUB_WEB": self.github.url, "FLEET_AGE_KEYGEN": str(keygen), "FLEET_KEYS_OUT": str(self.root / "keys.json"),
+            "FLEET_GITHUB_WEB": self.github.url,
             "FLEET_SOPS_BIN": str(sops), "FLEET_SETUP_WAIT": "20", "FLEET_SETUP_POLL": "0.05",
         }
         patch = mock.patch.dict(os.environ, self.env)
@@ -193,7 +191,7 @@ class SetupFlowTest(unittest.TestCase):
         self.assertIn("github-app-key: ENC[", encrypted)
         self.assertNotIn("PRIVATE KEY", encrypted)
         call = self.sops_calls.read_text()
-        self.assertIn("--encrypt --age age1pub", call.replace(call.split(" --encrypt")[0], ""))
+        self.assertIn("--encrypt --age age1pubop,age1pubnode", call.replace(call.split(" --encrypt")[0], ""))
         sops_yaml = (self.package / ".sops.yaml").read_text()
         self.assertIn("secrets/fleet", sops_yaml)
         self.assertNotIn("PRIVATE KEY", sops_yaml + nix)
@@ -232,6 +230,13 @@ class SetupFlowTest(unittest.TestCase):
         self.assertEqual(self.run_setup(), 0)
         self.assertEqual(json.loads(self.github_config.read_text())["repositories"], ["crvouga/private-app"])
         self.assertNotIn("crvouga/private-app", (self.package / "fleet.nix").read_text())
+
+    def test_missing_sops_recipients_are_refused_before_an_app_is_created(self):
+        (self.package / ".sops.yaml").write_text("creation_rules: []\n")
+        with self.assertRaises(SystemExit) as caught:
+            self.run_setup("--repos", "crvouga/private-app")
+        self.assertIn("fleet-keys.py", str(caught.exception))
+        self.assertEqual(self.visited, [])
 
     def test_a_malformed_repository_name_is_refused_before_anything_happens(self):
         with self.assertRaises(SystemExit):

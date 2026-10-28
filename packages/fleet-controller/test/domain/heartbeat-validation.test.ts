@@ -16,7 +16,7 @@ describe('validateHeartbeat', () => {
   test('accepts the example from PROTOCOL.md unchanged', () => {
     const body = heartbeatBody(1, {
       events: [{ kind: 'boot', severity: 'info', message: 'node started' }],
-      agent: { version: '1', configRevision: '0123456789abcdef' },
+      agent: { version: '2', desiredRevision: '0123456789abcdef' },
     });
     const result = validateHeartbeat(JSON.parse(JSON.stringify(body)));
     expect(result).toEqual({ ok: true, value: body });
@@ -40,9 +40,10 @@ describe('validateHeartbeat', () => {
 
   test('optional collections default to empty and unknown keys are dropped, not stored', () => {
     const result = validateHeartbeat({
-      v: 1,
+      v: 2,
       nodeId: heartbeatBody(1).nodeId,
       role: 'web',
+      closure: 'web',
       hostname: 'web-1234',
       agent: { version: '2' },
       secretNewField: 'ignored',
@@ -72,10 +73,10 @@ describe('validateHeartbeat', () => {
     }
   });
 
-  test('requires protocol version 1', () => {
-    expect(errors({ ...heartbeatBody(1), v: 2 })).toContain('v must be 1');
+  test('requires protocol version 2', () => {
+    expect(errors({ ...heartbeatBody(1), v: 1 })).toContain('v must be 2');
     expect(errors({ ...heartbeatBody(1), v: undefined })).toContain(
-      'v must be 1'
+      'v must be 2'
     );
   });
 
@@ -87,7 +88,7 @@ describe('validateHeartbeat', () => {
       'nodeId is required'
     );
     expect(errors({ ...heartbeatBody(1), role: 'gpu' })).toContain(
-      'role must be one of the known roles'
+      'role must be base or one of the known roles'
     );
     expect(errors({ ...heartbeatBody(1), hostname: 'bad host!' })).toContain(
       'hostname has an invalid format'
@@ -237,16 +238,84 @@ describe('validateHeartbeat', () => {
     });
   });
 
-  test('agent version is required and configRevision is a short token', () => {
+  test('agent version is required and desiredRevision is 16 hex digits', () => {
     expect(errors({ ...heartbeatBody(1), agent: {} })).toContain(
       'agent.version is required'
     );
     expect(
       errors({
         ...heartbeatBody(1),
-        agent: { version: '1', configRevision: 'bad revision' },
+        agent: { version: '2', desiredRevision: 'bad revision' },
       })
-    ).toContain('agent.configRevision has an invalid format');
+    ).toContain('agent.desiredRevision has an invalid format');
+  });
+
+  describe('protocol v2 observed state', () => {
+    const recipient = `age1${'q'.repeat(58)}`;
+
+    test('accepts the observed role, closure, hardware, recipient and reconcile report', () => {
+      const body = heartbeatBody(1, {
+        role: 'base',
+        closure: 'base',
+        hardware: { capabilities: ['gpu'] },
+        ageRecipient: recipient,
+        ageRecipientNext: `age1${'z'.repeat(58)}`,
+        reconcile: {
+          phase: 'blocked',
+          issues: ['FLEET_SECRETS_RECIPIENT_MISSING: x'],
+        },
+      });
+      expect(validateHeartbeat(JSON.parse(JSON.stringify(body)))).toEqual({
+        ok: true,
+        value: body,
+      });
+    });
+
+    test('v1 and other versions are refused', () => {
+      expect(errors({ ...heartbeatBody(1), v: 1 })).toContain('v must be 2');
+    });
+
+    test('unknown hardware capabilities are dropped, not errors', () => {
+      const result = validateHeartbeat({
+        ...heartbeatBody(1),
+        hardware: { capabilities: ['gpu', 'tpu', 'gpu'] },
+      });
+      expect(result.ok && result.value.hardware).toEqual({
+        capabilities: ['gpu'],
+      });
+    });
+
+    test('role, closure, recipient and reconcile are checked', () => {
+      const found = errors({
+        ...heartbeatBody(1),
+        role: 'gpu',
+        closure: 'Ci-GPU',
+        ageRecipient: 'AGE-SECRET-KEY-1',
+        ageRecipientNext: `age1${'b'.repeat(58)}`,
+        reconcile: { phase: 'done', issues: [] },
+      });
+      expect(found).toEqual(
+        expect.arrayContaining([
+          'role must be base or one of the known roles',
+          'closure must be base or a flake attribute such as ci-gpu',
+          'ageRecipient has an invalid format',
+          'ageRecipientNext has an invalid format',
+          'reconcile.phase must be converged, progressing or blocked',
+        ])
+      );
+      expect(
+        errors({
+          ...heartbeatBody(1),
+          reconcile: { phase: 'blocked', issues: Array(9).fill('x') },
+        })
+      ).toContain('reconcile.issues may have at most 8 entries');
+      expect(
+        errors({
+          ...heartbeatBody(1),
+          reconcile: { phase: 'blocked', issues: ['x'.repeat(501)] },
+        })
+      ).toContain('reconcile.issues[0] must be at most 500 characters');
+    });
   });
 
   test('strings with control characters or markup are only ever data', () => {

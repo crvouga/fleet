@@ -379,25 +379,6 @@ class PermissionPromptTests(WizardCase):
         self.assertIn("Nothing on this computer", job["result"]["guidance"]["safety"])
 
 
-class ApprovalReuseTests(unittest.TestCase):
-    def test_a_retry_reuses_this_sessions_unused_approval(self):
-        import server
-        wizard = server.Wizard("Linux")
-        wizard.approved["ci"] = "hvs.earlier"
-        job = server.Job()
-        lookup = mock.Mock(return_value={"status": "ok", "detail": "", "fix": ""})
-        with mock.patch.dict(decide.NET, {"lookup": lookup}), mock.patch.object(decide, "self_enroll") as enroll:
-            plan = wizard.enroll(job, {"role": "ci", "token": None})
-        enroll.assert_not_called()
-        self.assertEqual(plan["token"], "hvs.earlier")
-        lookup.return_value = {"status": "fail", "detail": "used", "fix": ""}
-        with mock.patch.dict(decide.NET, {"lookup": lambda token, role: {"status": "ok" if token == "hvs.new" else "fail", "detail": "", "fix": ""}}), \
-                mock.patch.object(decide, "self_enroll", return_value=("hvs.new", None)) as enroll:
-            plan = wizard.enroll(job, {"role": "ci", "token": None})
-        enroll.assert_called_once()
-        self.assertEqual(plan["token"], "hvs.new", "a used or expired approval is replaced by a fresh one")
-
-
 class GuidanceMatchingTests(unittest.TestCase):
     def test_failed_restart_cancellation_explains_why_staged_files_remain(self):
         advice = diagnostics.guidance("the scheduled restart could not be confirmed cancelled", decide.WINDOWS_RESTART_RECOVERY_FIX, changed=True)

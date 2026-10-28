@@ -16,7 +16,7 @@ class JournalVersionTests(unittest.TestCase):
             journal = decide.WindowsJournal(directory)
             journal.path.write_text(json.dumps({'version': 1, 'disk': 0}))
             self.assertEqual(journal.load()['version'], 1)
-            journal.record(role='ci')
+            journal.record(letter='C')
             self.assertEqual(json.loads(journal.path.read_text())['version'], 2)
             self.assertEqual(journal.load()['version'], 2)
 

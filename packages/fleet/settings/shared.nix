@@ -43,13 +43,15 @@
   repo = {
     # Every role polls main over HTTPS. There is no deploy branch and no
     # canary branch.
-    url = "https://github.com/crvouga/fleet.git";
+    url = "TODO"; # Set your Git update source; no hosting provider is assumed.
     flakeDir = "packages/fleet";
     branch = "main";
     pollSeconds = 300;
     # none until a read-only deploy key or token is encrypted into this role's
     # sops file. Then set "ssh" or "token". CI and web still use different age keys.
     auth = "none";
+    # Required for SSH Git sources: operator-supplied public host-key pins.
+    sshKnownHosts = "";
     # Tests and broken configs can install the script without starting the timer.
     timer = true;
   };

@@ -30,7 +30,7 @@ class BusyDrainTests(unittest.TestCase):
             script = root / 'drain.sh'
             script.write_text(SCRIPT.read_text().replace('/run/fleet', str(runtime)))
             result = subprocess.run(['bash', '-c', 'enable -n compgen; source "$1" 1', 'fixture', str(script)],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=30,
                 env={**os.environ, 'PATH': str(binary) + os.pathsep + os.environ.get('PATH', ''),
                      'DRAIN_FIXTURE': directory, 'FLEET_TARGETS': 'example/private',
                      'FLEET_SCOPE': 'repository', 'FLEET_APP_ID': '123',

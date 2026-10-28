@@ -21,39 +21,22 @@ flash-usb iso device:
 fetch-iso:
     bash scripts/fetch-iso.sh fleet-installer.iso
 
-bootstrap role ip:
-    bash scripts/bootstrap.sh {{quote(role)}} {{quote(ip)}}
+# Forward a keyboard to fleet-install on a machine already in the live image.
+# The installer takes no role; assign it in the Fleet app after approval.
+bootstrap ip:
+    bash scripts/bootstrap.sh {{quote(ip)}}
 
-# Create the missing per-role age keys: private keys go to the vault root's
-# ignored auto.tfvars.json, public recipients go to .sops.yaml. Safe to repeat.
-fleet-keys:
-    python3 scripts/fleet-keys.py
+# Print .sops.yaml creation rules from the controller's GET /v1/recipients JSON
+# (a file, or - for stdin) plus your operator recipients. No network, no secrets.
+# Example: just fleet-keys --operator age1... recipients.json > .sops.yaml
+fleet-keys *args:
+    python3 scripts/fleet-keys.py {{args}}
 
-# The one-time setup the repository owner does, once for the whole fleet: role
-# age keys, the runner GitHub App, the encrypted CI secrets, fleet.nix. A new
-# node never repeats any of it. Example: just setup --repos crvouga/private-app
+# The one-time setup the repository owner does, once for the whole fleet: the
+# runner GitHub App, the encrypted CI secrets, fleet.nix. Render .sops.yaml with
+# fleet-keys first. A new node never repeats any of it. Example: just setup --repos owner/private-app
 setup *args:
     python3 scripts/setup.py {{args}}
-
-# Mint a single-use token for the role's key and print two ways to use it on
-# the new node: one shell line, or a prompt to give an agent running there.
-# Nothing is written to disk and the token is not logged.
-enroll role:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    python3 scripts/fleet_roles.py require-active {{quote(role)}}
-    for tool in bao jq; do command -v "$tool" >/dev/null || { echo "Next: install $tool, then run this again." >&2; exit 1; }; done
-    token=$(bao kv get -wrap-ttl=1h -format=json "secret/fleet/{{role}}" | jq -er '.wrap_info.token') \
-      || { echo "Next: could not read secret/fleet/{{role}}. Run 'bao login', and 'just fleet-keys' plus an applied vault root if the key was never created." >&2; exit 1; }
-    release=https://github.com/crvouga/fleet/releases/download/fleet-installer/fleet-node.sh
-    guide=https://raw.githubusercontent.com/crvouga/fleet/main/packages/fleet/docs/agent-install.md
-    echo "# Single use. Expires in 1 hour. Paste ONE of these on the new {{role}} node." >&2
-    echo >&2
-    echo "# 1. A shell on the node:" >&2
-    echo "curl -fsSL -o fleet-node.sh $release && sudo env FLEET_ENROLL_TOKEN=$token bash fleet-node.sh {{role}} --yes"
-    echo >&2
-    echo "# 2. An agent on the node (it checks first and asks you to confirm the disk):" >&2
-    echo "Set this machine up as a fleet {{role}} node by following $guide and use this single-use enrollment token (valid 1 hour): $token"
 
 status node:
     bash scripts/node.sh status {{quote(node)}}

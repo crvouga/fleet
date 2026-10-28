@@ -1,15 +1,20 @@
 import { describe, expect, test } from 'bun:test';
 
-import { configRevision } from '../../src/config/schema';
-import { CI_ROLE_TOKEN } from '../support/controller';
+import { desiredRevision } from '../../src/domain/desired-state';
+import { CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { heartbeatBody, nodeIdOf, secretOf, T0 } from '../support/fixtures';
 
-const EMPTY_REVISION = configRevision({});
+/** An approved ci node with no settings anywhere. */
+const EMPTY_REVISION = desiredRevision({
+  role: 'ci',
+  closure: 'ci',
+  values: {},
+});
 
 describeController('POST /v1/heartbeat', (ctx) => {
   const enroll = async (n = 1) =>
-    ctx().h.register(n, { roleToken: CI_ROLE_TOKEN });
+    ctx().h.register(n, { enrollmentToken: CI_ENROLLMENT_TOKEN });
   const beat = (n = 1, overrides = {}) =>
     ctx().h.asNode(n, 'POST', '/v1/heartbeat', heartbeatBody(n, overrides));
 
@@ -88,7 +93,7 @@ describeController('POST /v1/heartbeat', (ctx) => {
   });
 
   describe('the response', () => {
-    test('has ok, status, the controller time and the current config the first time', async () => {
+    test('has ok, status, the controller time and the desired document the first time', async () => {
       const { h } = ctx();
       await enroll();
       h.clock.set(new Date('2026-10-14T12:00:00.000Z'));
@@ -98,35 +103,40 @@ describeController('POST /v1/heartbeat', (ctx) => {
         ok: true,
         status: 'approved',
         serverTime: '2026-10-14T12:00:00.000Z',
-        config: { revision: EMPTY_REVISION, values: {} },
+        desired: {
+          revision: EMPTY_REVISION,
+          role: 'ci',
+          closure: 'ci',
+          values: {},
+        },
       });
     });
 
-    test('config is left out once the node reports the revision it has', async () => {
+    test('desired is left out once the node reports the revision it applied', async () => {
       await enroll();
       const reply = await beat(1, {
-        agent: { version: '1', configRevision: EMPTY_REVISION },
+        agent: { version: '2', desiredRevision: EMPTY_REVISION },
       });
       expect(reply.status).toBe(200);
-      expect('config' in reply.body).toBe(false);
+      expect('desired' in reply.body).toBe(false);
     });
 
-    test('a changed setting brings the config back with a new revision', async () => {
+    test('a changed setting brings the desired document back with a new revision', async () => {
       const { h } = ctx();
       await enroll();
-      const had = { agent: { version: '1', configRevision: EMPTY_REVISION } };
-      expect('config' in (await beat(1, had)).body).toBe(false);
+      const had = { agent: { version: '2', desiredRevision: EMPTY_REVISION } };
+      expect('desired' in (await beat(1, had)).body).toBe(false);
       await h.admin('PUT', '/v1/settings/fleet', { sync: { paused: true } });
       const changed = await beat(1, had);
-      expect(changed.body.config.values).toEqual({ sync: { paused: true } });
-      expect(changed.body.config.revision).not.toBe(EMPTY_REVISION);
+      expect(changed.body.desired.values).toEqual({ sync: { paused: true } });
+      expect(changed.body.desired.revision).not.toBe(EMPTY_REVISION);
       const echoed = await beat(1, {
-        agent: { version: '1', configRevision: changed.body.config.revision },
+        agent: { version: '2', desiredRevision: changed.body.desired.revision },
       });
-      expect('config' in echoed.body).toBe(false);
+      expect('desired' in echoed.body).toBe(false);
     });
 
-    test('config merges fleet, then role, then node, and the node revision follows content', async () => {
+    test('values merge fleet, then the assigned role, then node, and the revision follows content', async () => {
       const { h } = ctx();
       await enroll();
       await h.admin('PUT', '/v1/settings/fleet', {
@@ -142,16 +152,16 @@ describeController('POST /v1/heartbeat', (ctx) => {
         sync: { paused: true },
       });
       const reply = await beat();
-      expect(reply.body.config.values).toEqual({
+      expect(reply.body.desired.values).toEqual({
         sync: { paused: true },
         disk: { alertPercent: 70 },
         runners: { extraLabels: ['b'] },
       });
       await h.admin('PUT', '/v1/settings/role:web', { sync: { paused: true } });
       const same = await beat(1, {
-        agent: { version: '1', configRevision: reply.body.config.revision },
+        agent: { version: '2', desiredRevision: reply.body.desired.revision },
       });
-      expect('config' in same.body).toBe(false);
+      expect('desired' in same.body).toBe(false);
     });
 
     test('the controller-only alerts section never reaches a node', async () => {
@@ -165,7 +175,7 @@ describeController('POST /v1/heartbeat', (ctx) => {
         sync: { paused: true },
       });
       const reply = await beat();
-      expect(reply.body.config.values).toEqual({ sync: { paused: true } });
+      expect(reply.body.desired.values).toEqual({ sync: { paused: true } });
       expect(reply.text).not.toContain('hooks.example');
       expect(reply.text).not.toContain('alerts');
     });
@@ -180,31 +190,33 @@ describeController('POST /v1/heartbeat', (ctx) => {
       });
       const reply = await beat();
       expect(reply.body.status).toBe('pending');
-      expect(reply.body.config.values).toEqual({
-        heartbeat: { intervalSeconds: 30 },
+      expect(reply.body.desired).toMatchObject({
+        role: null,
+        closure: null,
+        values: { heartbeat: { intervalSeconds: 30 } },
       });
     });
 
     test('a pending node with no interval configured is told the default', async () => {
       await ctx().h.register(1);
-      expect((await beat()).body.config.values).toEqual({
+      expect((await beat()).body.desired.values).toEqual({
         heartbeat: { intervalSeconds: 60 },
       });
     });
 
-    test('once approved, the next report returns the full config', async () => {
+    test('once approved, the next report returns the full desired document', async () => {
       const { h } = ctx();
       await h.register(1);
       await h.admin('PUT', '/v1/settings/fleet', { sync: { paused: true } });
       const pending = await beat();
       const echo = {
-        agent: { version: '1', configRevision: pending.body.config.revision },
+        agent: { version: '2', desiredRevision: pending.body.desired.revision },
       };
-      expect('config' in (await beat(1, echo)).body).toBe(false);
+      expect('desired' in (await beat(1, echo)).body).toBe(false);
       await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/approve`);
       const approved = await beat(1, echo);
       expect(approved.body.status).toBe('approved');
-      expect(approved.body.config.values).toEqual({ sync: { paused: true } });
+      expect(approved.body.desired.values).toEqual({ sync: { paused: true } });
     });
   });
 
@@ -234,7 +246,7 @@ describeController('POST /v1/heartbeat', (ctx) => {
         status: 'approved',
         labels: ['trusted'],
         displayName: 'root',
-        enrolledVia: 'role-token',
+        enrolledVia: 'enrollment-token',
       });
       expect(reply.status).toBe(200);
       expect(reply.body.status).toBe('pending');
@@ -317,12 +329,12 @@ describeController('POST /v1/heartbeat', (ctx) => {
       const reply = await h.asNode(1, 'POST', '/v1/heartbeat', {
         ...heartbeatBody(1),
         load1: 'x',
-        v: 3,
+        v: 'two',
       });
       expect(reply.status).toBe(400);
       expect(reply.body.error).toBe('invalid_request');
       expect(reply.body.errors).toEqual(
-        expect.arrayContaining(['v must be 1', 'load1 must be a number'])
+        expect.arrayContaining(['v must be 2', 'load1 must be a number'])
       );
     });
 
@@ -390,7 +402,7 @@ describeController('POST /v1/heartbeat', (ctx) => {
 
 describeController('POST /v1/retire', (ctx) => {
   const enroll = async (n = 1) =>
-    ctx().h.register(n, { roleToken: CI_ROLE_TOKEN });
+    ctx().h.register(n, { enrollmentToken: CI_ENROLLMENT_TOKEN });
 
   test('marks the node retired, records an event and answers ok', async () => {
     const { h, store } = ctx();

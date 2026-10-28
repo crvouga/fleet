@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 
 import type { NodeEventInput, RecoveryFacts } from '../../src/types';
-import { CI_ROLE_TOKEN } from '../support/controller';
+import { CI_ENROLLMENT_TOKEN } from '../support/controller';
 import { describeController } from '../support/describe-controller';
 import { heartbeatBody, nodeIdOf } from '../support/fixtures';
 
@@ -30,7 +30,7 @@ const INTERRUPTED = {
 describeController('recovery reports', (ctx) => {
   test('a resent outbox event is stored once, with its key, time and evidence', async () => {
     const { h } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     await h.admin('POST', `/v1/nodes/${nodeIdOf(1)}/approve`);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       // The node did not see the answer, so it sends the same event again.
@@ -59,7 +59,7 @@ describeController('recovery reports', (ctx) => {
 
   test('recovery facts are kept with the report; a malformed key is refused', async () => {
     const { h, store } = ctx();
-    await h.register(1, { roleToken: CI_ROLE_TOKEN });
+    await h.register(1, { enrollmentToken: CI_ENROLLMENT_TOKEN });
     const ok = await h.asNode(
       1,
       'POST',
