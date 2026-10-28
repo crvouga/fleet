@@ -58,16 +58,16 @@ When('I reload the installer page', async ({ page }) => {
   await page.reload();
 });
 
-When('I choose the CI runner role', async ({ page }) => {
+When('I choose to turn this computer into a node', async ({ page }) => {
   await page.getByRole('button', { name: /Turn THIS computer/ }).click();
-  await page.locator('input[name="role"][value="ci"]').check();
 });
 
 Then(
-  'SSH key and manual enrollment fields stay out of the normal flow',
+  'no role, SSH key or enrollment field is in the normal flow',
   async ({ page }) => {
-    await expect(page.locator('#ssh-key')).toBeHidden();
+    await expect(page.locator('input[name="role"]')).toHaveCount(0);
+    await expect(page.locator('#ssh-key')).toHaveCount(0);
     await expect(page.locator('#token')).toBeHidden();
-    await expect(page.getByText(/Enrollment is automatic/)).toBeVisible();
+    await expect(page.getByText(/assign its role there/)).toBeVisible();
   }
 );

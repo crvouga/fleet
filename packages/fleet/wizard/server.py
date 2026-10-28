@@ -245,6 +245,15 @@ class Wizard:
                              "For a USB, put enrollment.token on a separate FLEET-KEY volume instead.")
             decide.invariant(len(token) <= TOKEN_MAX and decide.ENROLL_RE.fullmatch(token) is not None,
                              "that does not look like an enrollment token", "Paste the token exactly as your Fleet operator gave it.")
+        git_credential = body.get("git_credential") or None
+        if git_credential is not None:
+            decide.invariant(mode == "here", "a Git read credential is carried only when this computer installs itself",
+                             "For a USB, put git-read-key or git-read-token on a separate FLEET-KEY volume instead.")
+            parsed = fleet_wifi.git_credential(git_credential)
+            decide.invariant(parsed is not None, "that does not look like a Git read token or OpenSSH private key",
+                             "Paste the read credential of the fleet's private repository exactly as your Fleet operator gave it.")
+            git_credential = parsed[1]
+            decide.REDACT_VALUES.add(git_credential.strip())
         disks, disk_error = self.disks()
         decide.invariant(not disk_error, "could not list the disks", disk_error or "")
         directory = decide.state_dir()
@@ -289,14 +298,14 @@ class Wizard:
             network = None
         plan = {
             "id": secrets.token_hex(8), "mode": mode, "reinstall": reinstall, "token": token, "disk_id": disk_id, "path": target,
-            "wifi": wifi,
+            "wifi": wifi, "git_credential": git_credential,
             "erase": erase, "summary": summary, "findings": findings, "network": network, "ready": not problems, "created": time.time(),
         }
         with self.lock:
             decide.invariant(self.job.snapshot()["state"] in ("idle", "done", "failed", "cancelled"),
                              "a job is already running", "Wait for the current job to finish.")
             self.plan = plan
-        public = {k: v for k, v in plan.items() if k not in ("token", "wifi", "path", "created")}
+        public = {k: v for k, v in plan.items() if k not in ("token", "git_credential", "wifi", "path", "created")}
         decide.log(f"plan {plan['id']} mode={mode} ready={plan['ready']} erase={erase}")
         return public
 
@@ -412,7 +421,8 @@ class Wizard:
         handed_off = False
         try:
             request = {"attempt": job.attempt, "action": "write-usb" if plan["mode"] == "usb" else "install-here", "iso": str(iso), "sha256": sha,
-                       "disk_id": plan["disk_id"], "path": plan["path"], "reinstall": plan["reinstall"], "token": plan["token"], "wifi": plan.get("wifi")}
+                       "disk_id": plan["disk_id"], "path": plan["path"], "reinstall": plan["reinstall"], "token": plan["token"], "wifi": plan.get("wifi"),
+                       "git_credential": plan.get("git_credential")}
             fd = os.open(scratch / "request.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as handle:
                 json.dump(request, handle)

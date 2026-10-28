@@ -1,4 +1,4 @@
-> Historical validation record. Current enrollment and downloads are app-owned; follow CONFIGURATION.md. The former GitHub-issue workflow is removed.
+> Historical validation record. Entries describe the code as it was then. The current installer takes no role, carries no age keys and uses no Vault/OpenBao or GitHub-issue enrollment: it installs `base`, waits for approval in the Fleet app, and the role is assigned there ([installer](installer.md)). Follow CONFIGURATION.md for current setup.
 
 # Validation record
 

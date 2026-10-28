@@ -145,7 +145,7 @@ jobs:
         with:
           path: packages/fleet/.ci/nix-results.json
           key: ${{ steps.vm_cache.outputs.cache-primary-key }}
-      - name: Validate every role's boot material in the built ISO
+      - name: Validate the installer boot material in the built ISO
         if: matrix.group == 'image'
         run: python3 packages/fleet/scripts/release-image.py --check
           packages/fleet/result-iso/iso/fleet-installer.iso
@@ -425,7 +425,7 @@ jobs:
 
           test -n "$iso"
 
-          # The offline image contains every role and exceeds the 2 GiB asset
+          # The offline image contains the base system and exceeds the 2 GiB asset
 
           # limit. Clients assemble verified 1 GiB parts into one local ISO.
 

@@ -23,7 +23,14 @@ bootstrap = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bootstrap)
 
 
+TOKEN = 'enroll.test-only-token'
+NODE = 'a' * 64
+
+
 class OnboardingTests(unittest.TestCase):
+    """The installer checks the base closure, the optional token and approval.
+    It never decrypts secrets, registers GitHub runners or compares a role."""
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -31,13 +38,12 @@ class OnboardingTests(unittest.TestCase):
         self.system = self.root / 'system'
         self.etc = self.system / 'etc/fleet'
         self.etc.mkdir(parents=True)
-        self.key, self.token = self.root / 'age.key', self.root / 'ci.api'
-        self.key.write_text('test-only-age-key')
-        self.token.write_text('test-only-role-token')
-        self.metadata = {'version': 1, 'role': 'ci', 'blocked': [], 'apiUrl': 'https://fleet.invalid',
-                         'cacheUrl': 'https://cache.invalid/fleet', 'cachePublicKey': 'fixture:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', 'secretsFile': '/fixture/encrypted.yaml',
-                         'requiredSecrets': ['github-app-key'], 'github': {'scope': 'repository',
-                         'repositories': ['example/private'], 'appId': '1', 'installationId': '2'}}
+        self.token = self.root / 'enrolled' / 'enrollment-token'
+        self.token.parent.mkdir()
+        self.token.write_text(TOKEN + '\n')
+        self.metadata = {'version': 1, 'role': 'base', 'blocked': [], 'installBlocked': [], 'apiUrl': 'https://fleet.invalid',
+                         'cacheUrl': 'https://cache.invalid/fleet', 'cachePublicKey': 'fixture:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+                         'secretsFile': None, 'requiredSecrets': [], 'github': None}
         self.write_metadata()
 
     def write_metadata(self):
@@ -45,13 +51,15 @@ class OnboardingTests(unittest.TestCase):
 
     def run_check(self, run):
         api = mock.Mock()
-        bootstrap.check(self.system, 'ci', self.key, self.token, run=run, api=api)
+        bootstrap.check(self.system, self.token, run=run, api=api)
         return api
 
+    def reporter(self, http):
+        return BootstrapReporter(self.system, self.token, identity={'id': NODE, 'hostname': 'base-aaaa'}, http=http)
+
     def test_local_mode_checks_closure_without_remote_credentials(self):
-        self.metadata.update(approvalMode="local", apiUrl="", secretsFile=None, requiredSecrets=[], github=None, updateMode="local")
+        self.metadata.update(approvalMode="local", apiUrl="", updateMode="local")
         self.write_metadata()
-        self.key.unlink()
         self.token.unlink()
         api = self.run_check(lambda *a, **kw: SimpleNamespace(returncode=0))
         api.assert_not_called()
@@ -62,72 +70,57 @@ class OnboardingTests(unittest.TestCase):
         with self.assertRaises(bootstrap.NotReady):
             self.run_check(mock.Mock())
 
-    def test_managed_mode_still_requires_enrollment(self):
-        self.metadata.update(approvalMode="managed")
-        self.write_metadata()
+    def test_managed_mode_without_a_token_waits_for_app_approval(self):
         self.token.unlink()
-        with self.assertRaises(bootstrap.NotReady):
-            self.run_check(mock.Mock())
+        api = self.run_check(mock.Mock(return_value=SimpleNamespace(returncode=0)))
+        api.assert_called_once_with('https://fleet.invalid', '')
 
-    def test_integration_checks_precede_disk_operations_and_keep_secrets_out_of_arguments(self):
-        calls = []
-        def run(args, **kwargs):
-            calls.append(args)
-            if args[0] == 'sops':
-                self.assertEqual(kwargs['env']['SOPS_AGE_KEY_FILE'], str(self.key))
-                return SimpleNamespace(returncode=0, stdout=b'{"github-app-key":"test-only-private-material"}')
-            if len(args) > 1 and args[1].endswith('runner_control.py'):
-                key = Path(args[-2])
-                if os.name != 'nt':
-                    self.assertEqual(key.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(key.read_text(), 'test-only-private-material')
-            return SimpleNamespace(returncode=0, stdout=b'{}')
-        api = self.run_check(run)
-        self.assertEqual([args[0] for args in calls[:2]], ['nix', 'sops'])
-        self.assertNotIn('test-only-private-material', repr(calls))
-        self.assertNotIn(self.token.read_text(), repr(calls))
-        api.assert_called_once_with('https://fleet.invalid', 'ci', self.token.read_text())
-
-    def test_a_github_refusal_reaches_the_installer_screen_as_said(self):
-        def run(args, **kwargs):
-            if args[0] == 'sops':
-                return SimpleNamespace(returncode=0, stdout=b'{"github-app-key":"test-only-private-material"}')
-            if len(args) > 1 and args[1].endswith('runner_control.py'):
-                return SimpleNamespace(returncode=78, stdout=b'', stderr=(
-                    b'FLEET_GITHUB_SCOPE: GitHub answered HTTP 404 for the runner target: the App installation '
-                    b'cannot reach this repository or organization\n'))
-            return SimpleNamespace(returncode=0, stdout=b'{}')
-        with self.assertRaises(bootstrap.NotReady) as caught:
-            self.run_check(run)
-        self.assertTrue(str(caught.exception).startswith('FLEET_GITHUB_SCOPE: GitHub answered HTTP 404'), str(caught.exception))
-        self.assertIn('(target example/private). Nothing was erased.', str(caught.exception))
-
-    def test_missing_cache_configuration_refuses_without_network_or_secret_access(self):
-        self.metadata['blocked'] = ['FLEET_CACHE_UNCONFIGURED: configure the cache']
-        self.write_metadata()
+    def test_a_malformed_token_is_refused_before_any_check(self):
+        self.token.write_text('short\n')
         run = mock.Mock()
-        with self.assertRaisesRegex(bootstrap.NotReady, 'FLEET_PLATFORM_NOT_READY'):
+        with self.assertRaisesRegex(bootstrap.NotReady, 'FLEET_ENROLLMENT_INVALID') as caught:
             self.run_check(run)
+        self.assertNotIn('short', str(caught.exception))
         run.assert_not_called()
 
-    def test_physical_cache_also_requires_the_independent_cloud_update_cache(self):
-        self.metadata.update(providesCache=True, installBlocked=[], blocked=['FLEET_CACHE_UNCONFIGURED'],
-                             cacheUrl='https://cache.invalid/fleet', github=None)
+    def test_checks_never_decrypt_secrets_and_keep_the_token_out_of_arguments(self):
+        self.metadata.update(secretsFile='/fixture/encrypted.yaml', requiredSecrets=['github-app-key'],
+                             github={'scope': 'repository', 'repositories': ['example/private'], 'appId': '1', 'installationId': '2'})
         self.write_metadata()
-        run = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=b'{"github-app-key":"fixture"}'))
+        run = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=b''))
+        api = self.run_check(run)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list], ['nix'])
+        self.assertNotIn(TOKEN, repr(run.call_args_list))
+        api.assert_called_once_with('https://fleet.invalid', TOKEN)
+
+    def test_the_single_blocked_list_refuses_without_network_access(self):
+        for key in ('installBlocked', 'blocked'):
+            with self.subTest(key=key):
+                self.metadata = {k: v for k, v in self.metadata.items() if k != 'installBlocked'}
+                self.metadata[key] = ['FLEET_REPOSITORY_UNCONFIGURED: configure the repository']
+                self.write_metadata()
+                run = mock.Mock()
+                with self.assertRaisesRegex(bootstrap.NotReady, 'FLEET_PLATFORM_NOT_READY'):
+                    self.run_check(run)
+                run.assert_not_called()
+                self.metadata[key] = []
+
+    def test_install_blocked_takes_precedence_over_the_running_nodes_list(self):
+        self.metadata.update(installBlocked=[], blocked=['FLEET_RUNNERS_UNCONFIGURED'])
+        self.write_metadata()
+        run = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=b''))
         self.run_check(run)
-        self.assertEqual(run.call_args_list[0].args[0][0], 'nix')
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
 
     def test_local_build_metadata_checks_bundled_closure_without_private_cache(self):
-        self.metadata.update(updateMode='local', cacheUrl=None, cachePublicKey=None, github=None)
+        self.metadata.update(updateMode='local', cacheUrl=None, cachePublicKey=None)
         self.write_metadata()
-        run = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=b'{"github-app-key":"fixture"}'))
+        run = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=b''))
         self.run_check(run)
         self.assertEqual(run.call_args_list[0].args[0], ['nix', 'path-info', '--recursive', str(self.system)])
         self.assertNotIn('--store', repr(run.call_args_list))
 
-    def test_missing_bundled_closure_refuses_before_secret_access(self):
+    def test_missing_bundled_closure_refuses_before_disk_changes(self):
         self.metadata.update(updateMode='local', cacheUrl=None, cachePublicKey=None)
         self.write_metadata()
         run = mock.Mock(return_value=SimpleNamespace(returncode=1, stdout=b''))
@@ -135,94 +128,138 @@ class OnboardingTests(unittest.TestCase):
             self.run_check(run)
         self.assertEqual(run.call_count, 1)
 
-    def test_missing_or_mismatched_role_key_never_reaches_registration(self):
-        run = mock.Mock(side_effect=[SimpleNamespace(returncode=0, stdout=b'{}'),
-                                    SimpleNamespace(returncode=1, stdout=b'private-contents')])
-        with self.assertRaisesRegex(bootstrap.NotReady, 'FLEET_ROLE_SECRETS') as error:
-            self.run_check(run)
-        self.assertNotIn('private-contents', str(error.exception))
-        self.assertEqual(run.call_count, 2)
-
     def test_unpublished_revision_is_a_retryable_pre_wipe_failure(self):
         run = mock.Mock(return_value=SimpleNamespace(returncode=1, stdout=b''))
         with self.assertRaisesRegex(bootstrap.Retryable, 'FLEET_CACHE_UNAVAILABLE'):
             self.run_check(run)
         self.assertEqual(run.call_count, 1)
 
+    def test_token_check_follows_the_enrollment_check_contract(self):
+        seen = []
+
+        class Reply:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                return self.body
+
+        def opener(*_handlers):
+            def open_(request, timeout):
+                seen.append(json.loads(request.data))
+                return Reply(b'{"ok":true,"role":"devbox"}')
+            return SimpleNamespace(open=open_)
+        with mock.patch.object(bootstrap.urllib.request, 'build_opener', opener):
+            bootstrap.check_api('https://fleet.invalid', TOKEN)
+            bootstrap.check_api('https://fleet.invalid', '')
+        # The role in the answer is the controller's decision, never compared.
+        self.assertEqual(seen, [{'enrollmentToken': TOKEN}])
+
+    def test_a_refused_token_stops_before_disk_changes(self):
+        def opener(*_handlers):
+            def open_(request, timeout):
+                raise bootstrap.urllib.error.HTTPError(request.full_url, 401, 'no', {}, None)
+            return SimpleNamespace(open=open_)
+        with mock.patch.object(bootstrap.urllib.request, 'build_opener', opener):
+            with self.assertRaisesRegex(bootstrap.NotReady, 'FLEET_ENROLLMENT_REJECTED') as caught:
+                bootstrap.check_api('https://fleet.invalid', TOKEN)
+        self.assertNotIn(TOKEN, str(caught.exception))
+
+    def test_registration_has_no_role_and_carries_the_token(self):
+        requests = []
+        def http(method, url, headers, body, timeout):
+            requests.append((url, headers, json.loads(body)))
+            return (201, b'{"status":"approved","role":null}') if url.endswith('/register') else (200, b'{"ok":true}')
+        reporter = self.reporter(http)
+        reporter.begin(mock.Mock())
+        registered = requests[0][2]
+        self.assertTrue(requests[0][0].endswith('/v1/nodes/register'))
+        self.assertEqual(set(registered), {'nodeId', 'hostname', 'secret', 'enrollmentToken'})
+        self.assertEqual(registered['enrollmentToken'], TOKEN)
+        self.assertEqual(registered['hostname'], 'base-aaaa')
+
     def test_reporter_reuses_the_credential_that_the_installed_node_will_receive(self):
         requests = []
         def http(method, url, headers, body, timeout):
             requests.append((url, headers, json.loads(body)))
             return (201, b'{"status":"approved"}') if url.endswith('/register') else (200, b'{"ok":true}')
-        identity = {'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'}
-        reporter = BootstrapReporter(self.system, 'ci', self.token, identity=identity, http=http)
+        reporter = self.reporter(http)
         reporter.begin(mock.Mock())
         secret = reporter.paths.secret.read_text().strip()
+        self.assertEqual(reporter.paths.secret, self.token.parent / 'agent/node.secret')
         self.assertEqual(requests[0][2]['secret'], secret)
-        self.assertEqual(requests[1][1]['Authorization'], 'Bearer ' + 'a' * 64 + '.' + secret)
-        self.assertIsNone(requests[1][2]['revision'])
-        self.assertIn('FLEET_INSTALLING', requests[1][2]['readiness']['issues'][0])
-        again = BootstrapReporter(self.system, 'ci', self.token, identity=identity, http=http)
+        self.assertEqual(requests[1][1]['Authorization'], 'Bearer ' + NODE + '.' + secret)
+        heartbeat = requests[1][2]
+        self.assertEqual((heartbeat['v'], heartbeat['role'], heartbeat['closure']), (2, 'base', 'base'))
+        self.assertEqual(heartbeat['agent'], {'version': '2', 'desiredRevision': None})
+        self.assertIsNone(heartbeat['revision'])
+        self.assertIn('FLEET_INSTALLING', heartbeat['readiness']['issues'][0])
+        again = self.reporter(http)
         again.begin(mock.Mock())
         self.assertEqual(again.paths.secret.read_text().strip(), secret)
         if os.name != 'nt':
             self.assertEqual(reporter.paths.secret.stat().st_mode & 0o777, 0o600)
 
-    def test_pending_node_without_role_token_waits_for_explicit_app_approval(self):
-        self.token.unlink(missing_ok=True)
+    def test_pending_node_waits_for_app_approval_whatever_role_fleet_answers(self):
+        self.token.unlink()
         calls = []
         def http(method, url, headers, body, timeout):
             payload = json.loads(body) if body else None
             calls.append((url, payload))
             if url.endswith('/register'):
-                return 200, b'{"status":"pending"}'
+                return 200, b'{"status":"pending","role":null}'
             if url.endswith('/enrollment/status'):
-                return 200, json.dumps({'status': 'approved', 'nodeId': 'a' * 64, 'role': 'ci'}).encode()
+                return 200, json.dumps({'status': 'approved', 'nodeId': NODE, 'role': 'devbox'}).encode()
             return 200, b'{"ok":true}'
-        reporter = BootstrapReporter(self.system, 'ci', self.token,
-            identity={'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'}, http=http)
+        reporter = self.reporter(http)
         with mock.patch('bootstrap_report.time.sleep'):
             reporter.begin(mock.Mock())
         self.assertTrue(reporter.started)
-        self.assertNotIn('roleToken', calls[0][1])
+        self.assertNotIn('enrollmentToken', calls[0][1])
+        self.assertNotIn('role', calls[0][1])
         self.assertTrue(calls[1][0].endswith('/enrollment/status'))
         self.assertEqual(reporter.paths.secret.read_text().strip(), calls[0][1]['secret'])
 
     def test_pending_approval_timeout_never_authorizes_installation(self):
-        self.token.unlink(missing_ok=True)
-        reporter = BootstrapReporter(self.system, 'ci', self.token,
-            identity={'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'},
-            http=lambda *args: (200, b'{"status":"pending"}'))
+        self.token.unlink()
+        reporter = self.reporter(lambda *args: (200, b'{"status":"pending"}'))
         with mock.patch.dict(os.environ, {'FLEET_APPROVAL_WAIT_SECONDS': '0'}):
             with self.assertRaisesRegex(ApprovalRefused, 'Pending'):
                 reporter.begin(mock.Mock())
         self.assertFalse(reporter.started)
 
     def test_rejected_identity_is_refused_before_installation(self):
-        reporter = BootstrapReporter(self.system, 'ci', self.token,
-            identity={'id': 'a' * 64, 'role': 'ci', 'hostname': 'ci-aaaa'},
-            http=lambda *args: (200, b'{"status":"rejected"}'))
+        reporter = self.reporter(lambda *args: (200, b'{"status":"rejected"}'))
         with self.assertRaisesRegex(ApprovalRefused, 'FLEET_APPROVAL_REQUIRED'):
             reporter.begin(mock.Mock())
 
-    def test_installer_manifest_blocks_before_withdrawal_or_boot_preparation(self):
+    def test_installer_manifest_blocks_before_admission_or_boot_preparation(self):
         tree = iso_fixture.installer_tree()
-        tree['fleet-readiness.json'] = json.dumps({'version': 1, 'roles': {'ci': {'blocked': ['FLEET_CACHE_UNCONFIGURED']}}}).encode()
+        tree['fleet-readiness.json'] = json.dumps({'version': 2, 'blocked': ['FLEET_REPOSITORY_UNCONFIGURED']}).encode()
         image = self.root / 'installer.iso'
         image.write_bytes(iso_fixture.build(tree))
         with mock.patch.object(decide.wifi_module(), 'simulated', return_value=False), mock.patch.object(decide, 'wifi_profile', return_value=None), \
-                mock.patch.object(decide, 'retire_runner_for_install') as retire, mock.patch.object(decide, 'stage_reboot') as reboot:
+                mock.patch.object(decide, 'close_job_admission') as close, mock.patch.object(decide, 'stage_reboot') as reboot:
             with self.assertRaisesRegex(decide.Invariant, 'FLEET_PLATFORM_NOT_READY'):
-                decide.perform_install('Linux', 'ci', image, None, None, self.root, {'ok': True, 'disk_id': 'fixture'})
-            retire.assert_not_called()
+                decide.perform_install('Linux', image, None, self.root, {'ok': True, 'disk_id': 'fixture'})
+            close.assert_not_called()
             reboot.assert_not_called()
 
-    def test_missing_readiness_manifest_fails_closed(self):
-        image = self.root / 'installer.iso'
-        image.write_bytes(iso_fixture.build(iso_fixture.installer_tree()))
-        with mock.patch.object(decide.wifi_module(), 'simulated', return_value=False):
-            with self.assertRaisesRegex(decide.Invariant, 'FLEET_INSTALLER_READINESS_MISSING'):
-                decide.check_installer_readiness(image, 'ci')
+    def test_missing_or_per_role_readiness_manifest_fails_closed(self):
+        old = iso_fixture.installer_tree()
+        old['fleet-readiness.json'] = json.dumps({'version': 1, 'roles': {'ci': {'blocked': []}}}).encode()
+        for tree in (iso_fixture.installer_tree(), old):
+            image = self.root / 'installer.iso'
+            image.write_bytes(iso_fixture.build(tree))
+            with mock.patch.object(decide.wifi_module(), 'simulated', return_value=False):
+                with self.assertRaises(decide.Invariant):
+                    decide.check_installer_readiness(image)
 
     @unittest.skipIf(os.name == 'nt', 'Source-system recovery runs on NixOS')
     def test_source_boot_recovery_only_undoes_its_own_reinstall_withdrawal(self):
@@ -246,6 +283,9 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn('FLEET_READINESS_FAILED', node_readiness.issues(None, {}, mock.Mock(), None, {})[0])
 
     def test_readiness_requires_current_sync_proof_and_live_github_runners(self):
+        self.metadata.update(role='ci', github={'scope': 'repository', 'repositories': ['example/private'],
+                                                'appId': '1', 'installationId': '2'})
+        self.write_metadata()
         runtime = self.root / 'run'
         runtime.mkdir()
         (runtime / 'slot-count').write_text('1')

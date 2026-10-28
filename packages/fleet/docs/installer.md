@@ -1,9 +1,10 @@
 # Fleet installer (the wizard)
 
-Download it, open it, choose what to install and confirm the disk. Accept the
+Download it, open it, choose what to do and confirm the disk. Accept the
 operating system's permission prompt. After the live installer starts, approve
 the computer under Pending in your Fleet app. Preparation, downloads, verification and installation
-then run automatically. No separate doctor command or manual setup checklist
+then run automatically. The installer only sets up the node: every machine
+installs the same `base` system. Assign its role in the Fleet app afterwards. No separate doctor command or manual setup checklist
 is required. Windows, macOS and ordinary Linux need no Python or Nix installation.
 On an existing fleet node, run `fleet-installer`; on other NixOS machines, use
 the native launcher below.
@@ -78,10 +79,9 @@ Firmware changes, connecting cables, choosing a backup destination, unsigned-app
 approval and booting another computer from USB cannot be performed silently by
 this installer. It shows only the relevant problems. The current image supports
 x86-64 UEFI targets; Apple silicon and ARM boards make media for other machines.
-USB media still asks for its role at boot and does not carry enrollment secrets:
-for a CI target, supply the canonical CI key on a `FLEET-KEY` volume as described
-in the [checklist](checklist.md). A plain USB by itself cannot enroll a working
-CI runner. Prefer enrolled in-place conversion on supported Windows/Linux PCs.
+USB media carries no enrollment token. A person approves the computer in the
+Fleet app, or you can add an optional token on a separate volume (see
+[Enrollment token](#enrollment-token)).
 
 ## 1. Download
 
@@ -113,8 +113,9 @@ the latest installer. If it persists, check Windows Update, the computer's clock
 and any organization-managed HTTPS inspection. This is separate from publisher
 signing and SmartScreen reputation.
 
-The currently published Windows and macOS downloads are unsigned. Warnings
-can recur with each release; the installer cannot dismiss a browser or operating
+Windows release publication requires the verified publisher configuration in
+[signing operations](windows-signing.md); local Windows builds and macOS builds
+are unsigned by default. Warnings can recur with each release; the installer cannot dismiss a browser or operating
 system block before it runs.
 
 **Microsoft Edge: “isn't commonly downloaded.”** This is SmartScreen's download
@@ -128,9 +129,8 @@ opening it. An organization can prohibit this entirely; the installer cannot ove
 that policy. Another permitted Windows, Linux or macOS computer can prepare
 installer USB media without running the blocked download on the target.
 
-[Windows signing status](https://github.com/crvouga/fleet/issues/130) tracks
-the verified-publisher prerequisite. [Signing operations](windows-signing.md)
-describes the automated release path. A signed release still cannot promise no
+[Signing operations](windows-signing.md) documents the verified-publisher
+prerequisite and automated release path. A signed release still cannot promise no
 reputation warnings or compatibility with every managed Windows policy.
 
 Platform launch behavior:
@@ -182,25 +182,26 @@ signature is invalid, stop rather than using the reputation-warning instructions
 1. The wizard looks at the computer and says what it can do. If the installer has not been published yet, or there is no internet, it says so here and stops.
 2. Choose one:
    - **Make an install USB stick for another computer.** Works from Windows, macOS, and Linux. Plug in a USB stick (at least 8 GB; everything on it is erased), choose it, review, confirm.
-   - **Turn THIS computer into a node.** On x86-64 Windows (UEFI, GPT, Secure Boot off) and on x86-64 Linux with `kexec`. Choose the kind of node, review, confirm. The live installer registers with Fleet; approve the computer under Pending in the app (see Approval below). The computer then restarts into the installer, erases its disk (Windows included), installs, and restarts as the node. macOS cannot do this; the wizard tells you and offers the USB instead.
-     For a **Remote devbox**, choose your SSH public `.pub` file in the wizard. Keep the matching private key on the computer you will connect from. A missing or malformed public key blocks installation.
+   - **Turn THIS computer into a node.** On x86-64 Windows (UEFI, GPT, Secure Boot off) and on x86-64 Linux with `kexec`. Review, confirm. The live installer registers with Fleet; approve the computer under Pending in the app (see Approval below). The computer then restarts into the installer, erases its disk (Windows included), installs, and restarts as the node. macOS cannot do this; the wizard tells you and offers the USB instead.
+     Optional: expand **Have an enrollment token?** and paste a token from your Fleet operator. See [Enrollment token](#enrollment-token).
 3. **Review** names the exact disk and what will be erased, shows preparation the installer will perform, and surfaces only warnings and checks that need your attention. The full automatic checks are available under a disclosure. Nothing is changed until you tick the box and press **Erase and install**.
 4. The operating system asks for permission (Windows: the shield prompt, macOS: your password, Linux: the polkit dialog). Accept it. Declining changes nothing.
 
 ## 4. After the USB is made
 
-Plug the stick into the new computer and start it from the stick (usually F12, F11, Esc, or Option at power-on; turn Secure Boot off once in the firmware settings). Choose **ci** or **devbox** in the installer menu, then press Enter. The UEFI menu waits for your choice; every entry erases the internal disk. The installer erases the computer's internal disk, installs, and restarts. Remove the stick when it says so.
+Plug the stick into the new computer and start it from the stick (usually F12, F11, Esc, or Option at power-on; turn Secure Boot off once in the firmware settings). The menu has one entry, **Fleet node - ERASES internal disk**; press Enter. The installer erases the computer's internal disk, installs, and restarts. Remove the stick when it says so. Then approve the
+computer under Pending in your Fleet app and assign its role.
 
-## Changing a node's kind
+## Changing a node's role
 
-- On an existing fleet node, run `sudo fleet-node devbox` (or `ci`). It checks first, names the disk, and reinstalls. A same-role invocation keeps a healthy existing installation; use `--reinstall` to deliberately replace it.
-- On any other Linux computer, the wizard's **Turn THIS computer into a node** does the same thing.
+Change it in the Fleet app. The node drains, then reboots into the new role's
+system. Nothing is reinstalled and the disk is not erased.
 
 ## NixOS
 
 Use the native Nix package rather than the ordinary Linux download. It includes
 its own Python and disk/boot tools and works without `nix-ld`. Current fleet
-images install both `fleet-installer` and `fleet-node` on every role.
+images install both `fleet-installer` and `fleet-node` on every node.
 
 For the browser wizard on this machine:
 
@@ -212,54 +213,83 @@ sudo ./result/bin/fleet-installer --no-browser
 Open the loopback address printed in the terminal in a browser on that same
 machine. If it is headless, use the CLI below instead. Root access lets the
 wizard stage the image on the node's persistent `/nix` filesystem. The erase
-checkbox and disk confirmation still apply. In the wizard, choose the existing
-role and select **Hard reinstall** to replace a node with the same role.
+checkbox and disk confirmation still apply. Select **Hard reinstall** to
+deliberately erase and replace an existing node.
 
 For a hard reinstall from a terminal, first preview the exact disk and checks:
 
 ```sh
-sudo fleet-node ci --reinstall --plan
-sudo fleet-node ci --reinstall
+sudo fleet-node install --reinstall --plan
+sudo fleet-node install --reinstall
 ```
 
 If the installed command predates this flag, run the latest native CLI:
 
 ```sh
-sudo nix --extra-experimental-features 'nix-command flakes' run 'github:crvouga/fleet/main?dir=packages/fleet#fleet-node' -- ci --reinstall --plan
-sudo nix --extra-experimental-features 'nix-command flakes' run 'github:crvouga/fleet/main?dir=packages/fleet#fleet-node' -- ci --reinstall
+sudo nix --extra-experimental-features 'nix-command flakes' run 'github:crvouga/fleet/main?dir=packages/fleet#fleet-node' -- install --reinstall --plan
+sudo nix --extra-experimental-features 'nix-command flakes' run 'github:crvouga/fleet/main?dir=packages/fleet#fleet-node' -- install --reinstall
 ```
 
-Replace `ci` with the intended role. The second command asks you to confirm the
-role and exact internal disk before anything is prepared. A hard reinstall
-wipes the OS and every file on that disk; it requests fresh GitHub enrollment
-so the newly installed role can decrypt its shared secrets. Do not use
-`--no-enroll` when those secrets are needed. Active CI jobs block the operation;
-an idle runner is withdrawn and new job admission is closed before handoff.
-If the handoff fails, the node remains withdrawn and the hard reinstall can be
-retried. Changing roles also erases the disk.
+The second command asks you to confirm the exact internal disk before anything
+is prepared. A hard reinstall wipes the OS and every file on that disk. Without
+`--reinstall`, `install` on an installed node wipes nothing. A running CI job
+blocks the operation; new job admission is closed before handoff and reopened
+if staging fails. The reinstalled machine keeps its hardware identity, so after
+approval the Fleet app gives it back its stored role.
 
 NixOS ARM64 can make install USB media. Fleet nodes still require x86-64 UEFI;
 the program refuses to convert an ARM64 machine in place.
 
 ## Connecting to a remote devbox
 
-Connect as `dev`: `ssh dev@<address>`. The node console shows its hostname, status, network address and host-key fingerprint. Check that fingerprint before accepting the SSH connection. The home directory is `/nix/devbox`; it survives reboot and system updates. Git, Bun, Node, Python, a C/C++ toolchain, Just and tmux are installed. Use `nix develop` for project dependencies. The dev account has no sudo; fleet system configuration comes from Git. Reinstalling into another role erases project work: back it up before converting.
+Connect as `dev`: `ssh dev@<address>`. The node console shows its hostname, status, network address and host-key fingerprint. Check that fingerprint before accepting the SSH connection. The home directory is `/nix/devbox`; it survives reboot and system updates. Git, Bun, Node, Python, a C/C++ toolchain, Just and tmux are installed. Use `nix develop` for project dependencies. The dev account has no sudo; fleet system configuration comes from Git. A hard reinstall erases project work: back it up first.
 
-For a USB devbox install, choose **devbox** in the boot menu. The console asks you to paste the public key before touching the disk. Alternatively place the public key in `devbox.pub` on a separate filesystem labeled `FLEET-KEY` and plug it in before booting. The private SSH key never belongs on the installer.
+Public SSH keys for `dev` are the `devbox.authorizedKeys` setting in the Fleet app. The installer never asks for one. The private SSH key never leaves the computer you connect from.
 
 ## Approval
 
-The live installer registers the hardware identity and a fresh private per-node
-credential directly with the controller configured in the image. Open **Pending**
-in Fleet, review the computer and approve it. It waits up to five minutes before
-disk changes; rejection and timeout stop without erasing. A retry reuses the same
-credential during that live boot, and the installed system receives that private
-credential. No GitHub issue, account, workflow or shared role token is required.
+The live installer registers the hardware identity, with no role, and a fresh
+private per-node credential directly with the controller configured in the
+image. Open **Pending** in Fleet, review the computer and approve it. It waits
+up to five minutes before disk changes; rejection and timeout stop without
+erasing. A retry reuses the same credential during that live boot, and the
+installed system receives that private credential. Then assign its role in the
+app. Without a configured controller (local mode) there is no approval step.
 
-Encrypted shared role secrets are separate from app approval. Supply their
-operator-owned role age key on a private `FLEET-KEY` volume, or use an explicitly
-provided wrapped-secret token. A role without shared encrypted secrets creates
-its own age key. `--no-enroll` does not bypass the app's approval gate.
+The installer never handles age keys. The node creates its own age identity on
+first boot and reports its public recipient to Fleet. The operator encrypts
+role secrets to it; until then the node reports the missing recipient.
+
+## Enrollment token
+
+A token is optional. It lets Fleet approve the computer without a person; if
+the operator's token entry names a role, Fleet also assigns that role. When a
+token is present the live installer checks it with Fleet before erasing.
+It is never printed and never put on a kernel command line or in arguments.
+
+- **This computer:** paste it under **Have an enrollment token?** in the
+  wizard, or pass `--token-file PATH` (or `FLEET_ENROLL_TOKEN`) to
+  `fleet-node.sh`. It travels in the same private handoff as the Wi-Fi profile.
+- **USB:** put it in a file `enrollment.token` on a separate volume labelled
+  `FLEET-KEY` and plug it in before booting. It is mounted read-only. The
+  wizard does not write tokens to the USB.
+
+## Private Git repository
+
+A fleet whose `repo.auth` is `ssh` or `token` follows a private repository, and
+the role-less `base` system has no secret to fetch it with. Supply its read
+credential at install time: an OpenSSH private key (`ssh`) or one token line
+(`token`). The live installer refuses before erasing with
+`FLEET_GIT_CREDENTIAL_MISSING` when none is supplied, and refuses one of the
+wrong kind. With `repo.auth = none` a supplied credential is ignored. It is
+installed as `/nix/fleet-state/secrets/git-read-key` or `git-read-token` (root,
+0600) and, like the token, never printed or put on a kernel command line.
+
+- **This computer:** paste it under **Does this fleet follow a private Git
+  repository?** in the wizard, or pass `--git-credential-file PATH` (or
+  `FLEET_GIT_CREDENTIAL_FILE`) to `fleet-node.sh`.
+- **USB:** put it in `git-read-key` or `git-read-token` on the `FLEET-KEY`
+  volume.
 
 ## Windows
 
@@ -277,7 +307,7 @@ for the first run.
 
 The five downloads are for the computer making the USB, not five node architectures. Nodes currently require x86-64, UEFI, supported Wi-Fi or Ethernet networking and one unambiguous internal disk; Apple silicon and ARM boards can make install media but cannot become fleet nodes. The ordinary Linux downloads require glibc; Alpine/musl and old Linux distributions are not supported. NixOS uses the native Nix package on x86-64 or ARM64; it does not need a foreign ELF loader. macOS installations use a USB and require a physical firmware boot. Windows converts itself but needs Secure Boot turned off once. The wizard cannot automate firmware settings, hardware replacement, or unsigned-app approval. No claim of universal hardware support is made.
 
-An interrupted USB write leaves an incomplete stick. Keep it plugged in, restart the wizard and write the whole image again; it never reports that stick as ready before verification passes. A role reinstall erases the old OS and files.
+An interrupted USB write leaves an incomplete stick. Keep it plugged in, restart the wizard and write the whole image again; it never reports that stick as ready before verification passes. A reinstall erases the old OS and files.
 
 ## When something goes wrong
 
@@ -315,7 +345,7 @@ The same report controls are available when review checks block installation.
 
 If the administrator step is still running when something goes wrong, the wizard keeps waiting for it rather than reporting a result it cannot know.
 
-**Cancel** works while the installer downloads and while the permission prompt is open: it withdraws the request, so accepting the prompt afterwards does nothing. Once the administrator step has started, it runs to the end; the wizard will not quit in the middle of it. Closing the terminal does not stop it either. Running the wizard again after an interrupted attempt is always safe: a Windows conversion that never finished is taken back first, an approval GitHub gave earlier in the same session is reused, and a node withdrawn from CI by an interrupted reinstall is restored if the retry fails too.
+**Cancel** works while the installer downloads and while the permission prompt is open: it withdraws the request, so accepting the prompt afterwards does nothing. Once the administrator step has started, it runs to the end; the wizard will not quit in the middle of it. Closing the terminal does not stop it either. Running the wizard again after an interrupted attempt is always safe: a Windows conversion that never finished is taken back first, and a node whose CI job admission was closed by an interrupted reinstall has it reopened if the retry fails too.
 
 | You see                                           | Do this                                                                                 |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------- |

@@ -5,7 +5,9 @@
 
 Each node creates its own age identity on first boot and reports only the
 public recipient. `GET /v1/recipients` on the controller lists them per
-assigned role: { "roles": { "ci": [{ "nodeId", "hostname", "recipient" }] } }.
+assigned role: { "roles": { "ci": [{ "nodeId", "hostname", "recipient", "next" }] } }.
+`next` is a second age recipient while that node rotates its key, otherwise
+null (older controllers omit it); both are rendered so either key decrypts.
 Save that JSON to a file (or pipe it on stdin); this helper prints one
 creation rule per role secrets file in roles.json (secrets/fleet.yaml for ci,
 secrets/devbox.yaml for devbox), each listing the operator recipients given
@@ -49,6 +51,11 @@ def node_recipients(document, role):
         require(RECIPIENT.fullmatch(entry["recipient"]) is not None,
                 f"roles.{role} has a recipient that is not an age public key")
         found.append(entry["recipient"])
+        upcoming = entry.get("next")
+        require(upcoming is None or (isinstance(upcoming, str) and RECIPIENT.fullmatch(upcoming) is not None),
+                f"roles.{role} has a next recipient that is not an age public key or null")
+        if upcoming is not None:
+            found.append(upcoming)
     return found
 
 

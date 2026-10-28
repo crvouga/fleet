@@ -17,10 +17,10 @@ Feature: Minimize manual steps on every installer platform
       | Linux   | x86_64  |
       | Linux   | aarch64 |
 
-  Scenario: CI installation does not ask for unrelated devbox access
+  Scenario: Installing this computer asks for no role
     Given I open the wizard on "Linux" with "x86_64" hardware
-    When I choose the CI runner role
-    Then SSH key and manual enrollment fields stay out of the normal flow
+    When I choose to turn this computer into a node
+    Then no role, SSH key or enrollment field is in the normal flow
 
   Scenario: Review a hidden WPA3 Wi-Fi handoff without exposing its password
     Given I open the USB wizard on "Windows" with "AMD64" hardware

@@ -80,11 +80,17 @@ SECRET_RE = re.compile(
     r"|--token(?:=|\s+)\S+"
     r"|\bgh[opsur]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"
     r"|\b[A-Z][A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|PRIVATE_KEY)[A-Z0-9_]*=\S+"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
 )
+# Credentials this run read (a Git read token has no recognizable shape).
+REDACT_VALUES = set()
 
 
 def redact(text):
-    return SECRET_RE.sub("[redacted]", str(text))
+    text = SECRET_RE.sub("[redacted]", str(text))
+    for value in REDACT_VALUES:
+        text = text.replace(value, "[redacted]")
+    return text
 
 
 def _stamp():
@@ -1165,17 +1171,21 @@ def wifi_profile(os_name, supplied=None):
         invariant(False, str(exc), "Enter the Wi-Fi settings in the wizard before installing. Nothing was erased.")
 
 
-def handoff_initrd(wifi=None, token=None):
+def handoff_initrd(wifi=None, token=None, git_credential=None):
     """The private supplemental initramfs for the live installer, or b"" when
-    nothing rides along. It holds the Wi-Fi profile and the enrollment token;
-    neither is ever put on the kernel command line."""
-    if wifi is None and not token:
+    nothing rides along. It holds the Wi-Fi profile, the enrollment token and
+    the Git read credential; none is ever put on the kernel command line."""
+    if wifi is None and not token and not git_credential:
         return b""
     invariant(token is None or ENROLL_RE.fullmatch(token) is not None, "refusing to hand off a malformed enrollment token")
+    invariant(not git_credential or wifi_module().git_credential(git_credential) is not None,
+              "refusing to hand off a malformed Git read credential")
+    if git_credential:
+        return wifi_module().initrd(wifi, token, git_credential)
     return wifi_module().initrd(wifi, token)
 
 
-def stage_reboot(os_name, iso, token=None, wifi=None):
+def stage_reboot(os_name, iso, token=None, wifi=None, git_credential=None):
     """Load the ISO's own kernel. The shell initrd finds the file and copies it to RAM."""
     tool = os_boot_tool(os_name)
     flash = "Next: this computer cannot reboot into the installer. Nothing was written. Plug in one USB disk and run this program again with the word flash."
@@ -1195,7 +1205,7 @@ def stage_reboot(os_name, iso, token=None, wifi=None):
         invariant(os.path.isfile(staged_file) and os.path.getsize(staged_file) > 0, "a file the installer needs is missing or empty before reboot", file=str(staged_file))
     private_initrd = None
     try:
-        extra = handoff_initrd(wifi, token)
+        extra = handoff_initrd(wifi, token, git_credential)
         if extra:
             private_initrd = Path(initrd).with_name("initrd-handoff")
             wifi_module().write_private(private_initrd, Path(initrd).read_bytes() + extra)
@@ -2416,7 +2426,7 @@ def write_durably(path, data):
         os.fsync(handle.fileno())
 
 
-def stage_windows(iso, token=None, chosen=None, on_progress=None, writer=None, firmware="auto", wifi=None):
+def stage_windows(iso, token=None, chosen=None, on_progress=None, writer=None, firmware="auto", wifi=None, git_credential=None):
     """Carve a partition out of C:, put the installer in it, and arrange one boot
     into it. Returns 0 once the restart is scheduled; anything else changed nothing.
     firmware is the UEFI variable access (tests hand in a stand-in); "auto" asks open_firmware()."""
@@ -2439,7 +2449,7 @@ def stage_windows(iso, token=None, chosen=None, on_progress=None, writer=None, f
         return 2
     linux_path, initrd_path, append, grub = iso_boot_material(iso)
     cmdline = _boot_command(append, iso, findiso=False, origin="windows", wifi=wifi is not None)
-    private_initrd = handoff_initrd(wifi, token)
+    private_initrd = handoff_initrd(wifi, token, git_credential)
     config = grub_config(linux_path, initrd_path, cmdline, handoff=bool(private_initrd))
     disk, need, letter = int(facts["DiskNumber"]), windows_need(iso_size), facts["Letter"]
     sector = int(facts.get("LogicalSectorSize") or 512)
@@ -2798,6 +2808,9 @@ def cmd_doctor(argv):
     argv, token, token_error = enroll_token(argv)
     if token_error:
         return fail(token_error, 2)
+    argv, git_credential, git_error = git_credential_arg(argv)
+    if git_error:
+        return fail(git_error, 2)
     if argv:
         return fail(ROLE_ARGUMENT, 2)
     os_name = current_os()
@@ -2807,6 +2820,8 @@ def cmd_doctor(argv):
     chosen = choose_disk(os_name, "install")
     found = preflight(os_name, "install", token, directory,
                       disk_path=chosen["path"] if chosen["ok"] else None, iso_path=directory / "fleet-installer.iso")
+    if git_credential:
+        found.append(dict(GIT_CREDENTIAL_FINDING))
     if chosen["ok"]:
         found.append(finding("disk", "ok", chosen["plain"]))
     else:
@@ -2892,6 +2907,7 @@ def cmd_status():
 
 # An optional enrollment token (FLEET_ENROLLMENT_TOKENS on the controller).
 ENROLL_RE = re.compile(r"^[A-Za-z0-9._-]{8,512}$")
+GIT_CREDENTIAL_FINDING = finding("git", "info", "a Git read credential rides along privately; the live installer checks it matches this fleet's repo.auth before erasing")
 
 # ---- Optional GitHub bug reports -----------------------------------------------
 # Node approval uses the Fleet controller protocol; these links are diagnostics only.
@@ -2972,6 +2988,41 @@ def enroll_token(argv):
     return rest, token or None, None
 
 
+def git_credential_arg(argv):
+    """Return (rest, credential, error). The optional read credential of a
+    private Git repository (a token line or an OpenSSH private key) rides to the
+    live installer like the enrollment token: read from a file named by
+    --git-credential-file or FLEET_GIT_CREDENTIAL_FILE, never an argument value,
+    never printed. The live installer checks it matches the fleet's repo.auth."""
+    rest = []
+    path = os.environ.get("FLEET_GIT_CREDENTIAL_FILE", "")
+    items = iter(argv)
+    for item in items:
+        if item == "--git-credential" or item.startswith("--git-credential="):
+            return argv, None, "Next: pass the Git read credential with --git-credential-file PATH, not as an argument. Nothing was written."
+        if item == "--git-credential-file":
+            path = next(items, "")
+            if not path:
+                return argv, None, "Next: --git-credential-file needs a path. Nothing was written."
+        elif item.startswith("--git-credential-file="):
+            path = item.split("=", 1)[1]
+        else:
+            rest.append(item)
+    if not path:
+        return rest, None, None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read(wifi_module().GIT_CREDENTIAL_MAX + 1)
+    except (OSError, UnicodeDecodeError):
+        return argv, None, "Next: the Git read credential file could not be read. Nothing was written."
+    parsed = wifi_module().git_credential(text)
+    if parsed is None:
+        return argv, None, ("Next: the Git read credential is malformed (one token line of 8 to 1024 letters, digits or "
+                            "'._~+/=-', or one OpenSSH private key of at most 16 KiB). Nothing was written.")
+    REDACT_VALUES.add(parsed[1].strip())
+    return rest, parsed[1], None
+
+
 def cmd_install(argv, action):
     assume_yes = flag(os.environ.get("FLEET_YES")) or any(a in ("--yes", "-y") for a in argv)
     plan_only = "--plan" in argv
@@ -2984,6 +3035,11 @@ def cmd_install(argv, action):
         return fail(token_error, 2)
     if token and action != "install":
         return fail("Next: flash takes no token. Nothing was written.", 2)
+    argv, git_credential, git_error = git_credential_arg(argv)
+    if git_error:
+        return fail(git_error, 2)
+    if git_credential and action != "install":
+        return fail("Next: flash takes no Git read credential; put git-read-key or git-read-token on a separate FLEET-KEY volume. Nothing was written.", 2)
     os_name = current_os()
     if os_name not in ("Linux", "Darwin", "Windows"):
         return fail(f"Next: {os_name} cannot start this installer. Nothing was written.", 2)
@@ -2999,6 +3055,8 @@ def cmd_install(argv, action):
     # confirm, so a doomed install never gets as far as the prompt.
     found = preflight(os_name, action, token, directory, disk_path=chosen["path"],
                       iso_path=directory / "fleet-installer.iso")
+    if git_credential:
+        found.append(dict(GIT_CREDENTIAL_FINDING))
     show_findings(found)
     problems = [item for item in found if item["status"] == "fail"]
     if problems:
@@ -3050,7 +3108,8 @@ def cmd_install(argv, action):
               "the disk changed while the installer was downloading or waiting for approval",
               "Review the exact disk again. Nothing was erased.")
     if action == "install":
-        return perform_install(os_name, str(iso), token, directory, chosen)
+        return perform_install(os_name, str(iso), token, directory, chosen,
+                               **({"git_credential": git_credential} if git_credential else {}))
     network = wifi_profile(os_name)
     capacity = int(chosen["disk"].get("size") or 0)
     if not wifi_module().simulated():
@@ -3111,16 +3170,20 @@ def check_installer_readiness(iso):
               "The platform administrator must resolve these Fleet configuration errors and publish a new installer. Reopen the wizard afterward. Nothing was erased.")
 
 
-def perform_install(os_name, iso, token, directory, chosen, on_progress=None, wifi=None):
+def perform_install(os_name, iso, token, directory, chosen, on_progress=None, wifi=None, git_credential=None):
     """The point of no return, shared by the command line and the wizard. On a
     real machine kexec does not come back; the marker is for the test seam."""
     invariant(chosen.get("ok") and chosen.get("disk_id"), "perform_install needs a chosen disk", chosen=chosen)
     invariant(os.path.isfile(iso) and os.path.getsize(iso) > 0, "perform_install needs the verified installer image", iso=str(iso))
     invariant(token is None or ENROLL_RE.fullmatch(token) is not None, "perform_install was given a malformed enrollment token")
+    invariant(not git_credential or wifi_module().git_credential(git_credential) is not None,
+              "perform_install was given a malformed Git read credential")
     # Read credentials before closing job admission or changing partitions.
     network = wifi_profile(os_name, wifi)
     check_installer_readiness(iso)
     handoff = {"wifi": network} if network is not None else {}
+    if git_credential:
+        handoff["git_credential"] = git_credential
     started = False
     closed = False
     try:
@@ -3156,9 +3219,10 @@ def close_job_admission():
     """A node that runs CI jobs must be idle before its disk is erased. Serialize
     with the job-start hook (modules/runners.nix) so no job begins between this
     check and the reboot. Returns whether admission was closed here."""
-    root = Path(os.environ.get("FLEET_BUSY_DIR", "/run/fleet"))
-    if not (root / "gate").exists():
+    if not Path(os.environ.get("FLEET_RUNNER_CONF", "/etc/fleet/runner.conf")).is_file():
         return False  # no runner slots on this machine
+    root = Path(os.environ.get("FLEET_BUSY_DIR", "/run/fleet"))
+    root.mkdir(parents=True, exist_ok=True)
     import fcntl
     with open(root / "gate", "a") as gate:
         fcntl.flock(gate, fcntl.LOCK_EX)
@@ -3296,7 +3360,7 @@ USAGE = """usage: fleet-node.sh COMMAND
   flash             write the installer to a USB disk
   guide             print the runbook an agent follows
 
-Flags: --yes (take the confirmation as typed), --token-file PATH (optional enrollment token), --json (doctor), --plan (print the exact steps and sizes, change nothing).
+Flags: --yes (take the confirmation as typed), --token-file PATH (optional enrollment token), --git-credential-file PATH (read key or token of a private fleet repository), --json (doctor), --plan (print the exact steps and sizes, change nothing).
 --reinstall deliberately erases an existing installation; disk checks and confirmation still apply.
 The role is assigned in the Fleet app after the node is approved, never here.
 Every run writes a log; its path is printed when something fails.

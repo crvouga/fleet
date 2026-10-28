@@ -13,6 +13,10 @@
     secretsFile = if settings.secretsFile == null then null else toString settings.secretsFile;
     requiredSecrets = builtins.attrNames config.sops.secrets;
     github = settings.github or null;
+    # How the node authenticates to its Git source. For "ssh" or "token" the
+    # installer requires the matching read credential at runtime (a flag, the
+    # private handoff or a FLEET-KEY volume) and refuses before erasing without it.
+    repoAuth = settings.repo.auth or "none";
     # The installer reads installBlocked of the base closure only (the single
     # `blocked` list in /fleet-readiness.json). Role-specific blockers apply to
     # the running node and are reported by it, never checked at install time.

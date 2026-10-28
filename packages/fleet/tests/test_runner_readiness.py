@@ -167,15 +167,15 @@ class BootstrapProgressTests(unittest.TestCase):
             secret = root / 'node.secret'
             secret.write_text('a' * 64)
             log = root / 'install.log'
-            log.write_text('old\n' * 20000 + 'Latest password=private-value test-only-role-token\n')
+            log.write_text('old\n' * 20000 + 'Latest password=private-value test-only-enrollment-token\n')
             reporter = SimpleNamespace(paths=SimpleNamespace(secret=secret), worker=SimpleNamespace(),
-                                       token='test-only-role-token', report=mock.Mock())
+                                       token='test-only-enrollment-token', report=mock.Mock())
             with mock.patch.object(bootstrap_report, 'BootstrapReporter', return_value=reporter), \
                     mock.patch.object(bootstrap_report.cattle, 'read_machine_digest', return_value='b' * 64), \
                     mock.patch.object(bootstrap_report.os, 'kill', side_effect=[None, ProcessLookupError]), \
                     mock.patch.object(bootstrap_report.time, 'sleep'), \
                     mock.patch.dict(bootstrap_report.os.environ, {'FLEET_INSTALL_LOG': str(log)}):
-                bootstrap_report.main(['fixture-system', 'ci', 'fixture-token', 'Waiting', '123'])
+                bootstrap_report.main(['fixture-system', 'fixture-token', 'Waiting', '123'])
             reported = reporter.report.call_args.args[0]
             self.assertIn('Latest', reported)
             self.assertNotIn('private-value', reported)

@@ -205,6 +205,11 @@ def install_here(request, progress):
     decide.invariant(os_name in ("Linux", "Windows") or os.environ.get("FLEET_ALLOW_ANY_OS_INSTALL") == "1", "installing in place is only possible from Linux or Windows", "Make an install USB instead.", os=os_name)
     token = request.get("token") or None
     decide.invariant(token is None or TOKEN_RE.fullmatch(str(token)) is not None, "the enrollment token is malformed")
+    git_credential = request.get("git_credential") or None
+    decide.invariant(git_credential is None or fleet_wifi.git_credential(git_credential) is not None,
+                     "the Git read credential is malformed")
+    if git_credential is not None:
+        decide.REDACT_VALUES.add(git_credential.strip())
     iso, sha = verified_iso(request, progress)
     # The unprivileged wizard already downloaded this checksum-verified image.
     # Elevation must not require an inherited source URL or a second download.
@@ -265,6 +270,7 @@ def install_here(request, progress):
                 os_name, str(staged), token, directory, chosen,
                 lambda done, total: progress.emit("write", "Writing the installer into a new partition and checking it", int(done * 100 / total) if total else None),
                 **({"wifi": request["wifi"]} if request.get("wifi") is not None else {}),
+                **({"git_credential": git_credential} if git_credential is not None else {}),
             )
         finally:
             decide.HANDOFF.clear()

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ] && [ "${FLEET_ALLOW_UNPRIVILEGED:-}" != 1 ]; then
-  exec sudo -n --preserve-env=FLEET_AUTO,FLEET_CMDLINE,FLEET_KEY_DIR,FLEET_MANIFEST,FLEET_ENROLL_TOKEN,FLEET_LIVE,FLEET_LIVE_STATE -- "$0" "$@"
+  exec sudo -n --preserve-env=FLEET_AUTO,FLEET_CMDLINE,FLEET_KEY_DIR,FLEET_MANIFEST,FLEET_ENROLL_TOKEN,FLEET_GIT_CREDENTIAL_FILE,FLEET_LIVE,FLEET_LIVE_STATE -- "$0" "$@"
 fi
 
 # One timestamped line per step, kept on the live image and copied to the
@@ -88,7 +88,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# An optional FLEET-KEY volume may hold enrollment.token. It is only read.
+# An optional FLEET-KEY volume may hold enrollment.token, git-read-key or
+# git-read-token. It is only read.
 if [ -z "${FLEET_KEY_DIR:-}" ] && [ -e /dev/disk/by-label/FLEET-KEY ]; then
   key_dir=$(mktemp -d)
   mount -o ro /dev/disk/by-label/FLEET-KEY "$key_dir"
@@ -133,8 +134,9 @@ elif [ -n "$key_dir" ] && [ -s "$key_dir/enrollment.token" ]; then
   token_source='the FLEET-KEY volume'
 fi
 if [ -n "$token_source" ]; then
-  token_pattern='^[A-Za-z0-9._-]{8,512}$'
-  if [[ ! "$token" =~ $token_pattern ]]; then
+  # Bash regular expressions cap a repetition at 255; check the length apart.
+  token_pattern='^[A-Za-z0-9._-]+$'
+  if [[ ! "$token" =~ $token_pattern ]] || [ "${#token}" -lt 8 ] || [ "${#token}" -gt 512 ]; then
     unset token
     note "enrollment token from $token_source is malformed; nothing wiped"
     echo "Next: the enrollment token from $token_source is malformed (8 to 512 letters, digits, '.', '_' or '-'). Replace it, or remove it and approve this computer in the Fleet app. Nothing was wiped." >&2
@@ -165,6 +167,103 @@ fi
 if [ -z "$disko" ] || [ ! -x "$disko" ]; then
   echo 'fleet-install: disko script is missing on this image' >&2
   exit 1
+fi
+
+# A fleet that follows a private Git repository (bootstrap.json repoAuth "ssh"
+# or "token") needs its read credential on the node: base has no SOPS secrets.
+# It comes from FLEET_GIT_CREDENTIAL_FILE (a manual run), the private handoff
+# initrd (in-place conversion) or a FLEET-KEY volume (git-read-key or
+# git-read-token), never from the kernel command line, and is never printed.
+# Without a matching one, nothing is erased.
+git_staged=$enroll_dir/git-credential
+rm -f "$git_staged"
+refuse_git() {
+  printf '%s\n' "$1" > "$log.diagnostic"
+  printf '%s\n' "$1" >&2
+  note "${1%%:*}: refused; nothing wiped"
+  exit 2
+}
+repo_auth=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        value = json.load(handle).get("repoAuth", "none")
+except (OSError, ValueError, AttributeError):
+    value = "none"  # fleet-bootstrap-ready reports a missing or broken file
+print(value if value in ("none", "ssh", "token") else "invalid")
+' "$toplevel/etc/fleet/bootstrap.json")
+if [ "$repo_auth" = invalid ]; then
+  refuse_git 'FLEET_METADATA_INVALID: the installer bootstrap metadata names an unknown repo.auth. Download the current Fleet installer. Nothing was wiped.'
+fi
+git_source=""
+git_path=""
+git_named=""
+handoff_git=${FLEET_GIT_CREDENTIAL_HANDOFF:-/run/fleet-git-credential/credential}
+if [ -n "${FLEET_GIT_CREDENTIAL_FILE:-}" ]; then
+  git_path=$FLEET_GIT_CREDENTIAL_FILE
+  git_source=environment
+elif [ -s "$handoff_git" ]; then
+  git_path=$handoff_git
+  git_source='the private handoff'
+elif [ -n "$key_dir" ]; then
+  # Prefer the kind this fleet uses; the other kind is refused below.
+  if [ "$repo_auth" = token ]; then names='git-read-token git-read-key'; else names='git-read-key git-read-token'; fi
+  for name in $names; do
+    if [ -s "$key_dir/$name" ]; then
+      git_path=$key_dir/$name
+      git_named=token
+      if [ "$name" = git-read-key ]; then git_named=ssh; fi
+      git_source='the FLEET-KEY volume'
+      break
+    fi
+  done
+fi
+if [ -n "$git_source" ] && [ "$repo_auth" = none ]; then
+  note "git read credential: from $git_source ignored; this fleet's repository is public (repo.auth = none)"
+elif [ -n "$git_source" ]; then
+  # Validated and normalized by Python; it prints only the kind, never the value.
+  git_kind=$( umask 077; python3 -c '
+import re, sys
+TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{8,1024}")
+LINE = re.compile(r"[A-Za-z0-9+/=]+")
+BEGIN, END = "-----BEGIN OPENSSH PRIVATE KEY-----", "-----END OPENSSH PRIVATE KEY-----"
+try:
+    with open(sys.argv[1], "rb") as handle:
+        raw = handle.read(16 * 1024 + 1)
+    text = raw.decode("ascii")
+except (OSError, UnicodeDecodeError):
+    sys.exit(1)
+if len(raw) > 16 * 1024:
+    sys.exit(1)
+stripped = text.strip()
+lines = stripped.replace("\r\n", "\n").split("\n")
+if TOKEN.fullmatch(stripped):
+    kind, body = "token", stripped + "\n"
+elif len(lines) >= 3 and lines[0] == BEGIN and lines[-1] == END and all(LINE.fullmatch(line) for line in lines[1:-1]):
+    kind, body = "ssh", "\n".join(lines) + "\n"
+else:
+    sys.exit(1)
+with open(sys.argv[2], "w", encoding="ascii") as handle:
+    handle.write(body)
+print(kind)
+' "$git_path" "$git_staged.new" 2>/dev/null ) || git_kind=""
+  if [ -z "$git_kind" ]; then
+    rm -f "$git_staged.new"
+    refuse_git "FLEET_GIT_CREDENTIAL_INVALID: the Git read credential from $git_source is malformed (one token line of 8 to 1024 letters, digits or '._~+/=-', or one OpenSSH private key of at most 16 KiB). Replace it. Nothing was wiped."
+  fi
+  if [ -n "$git_named" ] && [ "$git_named" != "$git_kind" ]; then
+    # git-read-key must hold a key and git-read-token a token.
+    git_kind=$git_named-mismatch
+  fi
+  if [ "$git_kind" != "$repo_auth" ]; then
+    rm -f "$git_staged.new"
+    refuse_git "FLEET_GIT_CREDENTIAL_WRONG_KIND: this fleet follows a private repository (repo.auth = $repo_auth), but the Git read credential from $git_source is not of that kind. Supply its $repo_auth read credential with --git-credential-file or a FLEET-KEY volume. Nothing was wiped."
+  fi
+  mv "$git_staged.new" "$git_staged"
+  note "git read credential: $git_kind from $git_source"
+fi
+if [ "$repo_auth" != none ] && [ ! -s "$git_staged" ]; then
+  refuse_git "FLEET_GIT_CREDENTIAL_MISSING: this fleet follows a private repository (repo.auth = $repo_auth). Supply its read credential with --git-credential-file or a FLEET-KEY volume."
 fi
 
 select_disk=${FLEET_SELECT_DISK:-select-disk}
@@ -247,6 +346,20 @@ if [ -s "$token_file" ]; then
     exit 1
   }
   note 'enrollment token: installed'
+fi
+
+# The node reads its Git read credential from this fixed path (repo.auth).
+if [ -s "$git_staged" ]; then
+  git_name=git-read-key
+  if [ "$repo_auth" = token ]; then git_name=git-read-token; fi
+  install -d -m 0700 "$mnt/nix/fleet-state/secrets"
+  install -m 0600 "$git_staged" "$mnt/nix/fleet-state/secrets/$git_name"
+  cmp -s "$git_staged" "$mnt/nix/fleet-state/secrets/$git_name" || {
+    echo 'FLEET-FAIL: the installed Git read credential did not read back correctly.' >&2
+    exit 1
+  }
+  rm -f "$git_staged"
+  note "git read credential: installed as $git_name"
 fi
 
 node_secret=$enroll_dir/agent/node.secret

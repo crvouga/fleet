@@ -92,12 +92,12 @@ def installer_tree(kernel=b"kernel-bytes\n", initrd=b"initrd-bytes\n", grub=b"gr
     # /boot//nix/store/..., while the actual ISO has ordinary directory names.
     linux_path = KERNEL_PATH.replace("/boot/", "/boot//") if nix_store else "/boot/bzImage"
     initrd_path = INITRD_PATH.replace("/boot/", "/boot//") if nix_store else "/boot/initrd"
-    entries = [("boot", "ci", "")] + [(f"boot-{role}", role, "") for role in ("devbox",)]
-    entries.append(("boot-copytoram", "ci", " copytoram"))
+    # One installer entry (it installs base; Fleet assigns the role later),
+    # plus the copytoram variant nixpkgs adds.
     config = ["DEFAULT boot"]
-    for label, role, extra in entries:
+    for label, extra in (("boot", ""), ("boot-copytoram", " copytoram")):
         config += [f"LABEL {label}", f"LINUX {linux_path}",
-                   f"APPEND init=/nix/store/fleet/init root=LABEL=FLEET_ISO fleet.role={role}{extra}", f"INITRD {initrd_path}"]
+                   f"APPEND init=/nix/store/fleet/init root=LABEL=FLEET_ISO{extra}", f"INITRD {initrd_path}"]
     return {
         "isolinux": {"isolinux.cfg": ("\n".join(config) + "\n").encode()},
         "boot": {"nix": {"store": {KERNEL_STORE: {"bzImage": kernel}, INITRD_STORE: {"initrd": initrd}}}} if nix_store else {"bzImage": kernel, "initrd": initrd},

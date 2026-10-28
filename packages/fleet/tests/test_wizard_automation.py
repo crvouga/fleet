@@ -112,15 +112,15 @@ class HelperPreparationTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.iso = self.root / "image.iso"
         tree = iso_fixture.installer_tree()
-        tree['fleet-readiness.json'] = b'{"version":1,"roles":{"ci":{"blocked":[]}}}'
+        tree['fleet-readiness.json'] = b'{"version":2,"blocked":[]}'
         self.iso.write_bytes(iso_fixture.build(tree))
         self.chosen = {"ok": True, "disk_id": "original", "path": "/dev/test"}
-        self.request = {"role": "ci", "iso": str(self.iso), "sha256": imaging.sha256_of(self.iso), "disk_id": "original"}
+        self.request = {"iso": str(self.iso), "sha256": imaging.sha256_of(self.iso), "disk_id": "original"}
         patches = (
             mock.patch.object(decide, "current_os", return_value="Linux"),
             mock.patch.object(decide, "state_dir", return_value=self.root / "state"),
             mock.patch.object(decide, "choose_disk", return_value=self.chosen),
-            mock.patch.object(decide, "installed_for", return_value=False),
+            mock.patch.object(decide, "installed", return_value=False),
             mock.patch.object(preparation, "linux_boot_commands", return_value=[["apt-get", "install", "kexec-tools"]]),
         )
         for patch in patches:

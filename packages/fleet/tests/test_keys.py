@@ -1,93 +1,100 @@
 #!/usr/bin/env python3
-"""fleet-keys creates each role's key once and never prints a private key."""
+"""fleet-keys renders .sops.yaml rules from GET /v1/recipients. It makes no
+network request, reads no private key and keeps every role's recipients apart."""
 
 import json
-import os
-import stat
 import subprocess
+import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "fleet-keys.py"
+OPERATOR = "age1" + "q" * 58
+CI_NODE = "age1" + "p" * 58
+DEVBOX_NODE = "age1" + "z" * 58
+
+
+def recipients(**roles):
+    return {"roles": {role: [{"nodeId": "a" * 64, "hostname": f"{role}-aaaa", "recipient": value} for value in values]
+                      for role, values in roles.items()}}
 
 
 class KeysTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        counter = self.root / "count"
-        tool = self.root / "age-keygen"
-        tool.write_text(textwrap.dedent(f"""\
-            #!/bin/bash
-            if [ "$1" = "-y" ]; then echo "age1pub$(tail -c 3 "$2")"; exit 0; fi
-            n=$(( $(cat {counter} 2>/dev/null || echo 0) + 1 )); echo $n > {counter}
-            printf '# public key: age1pub%03d\\nAGE-SECRET-KEY-%03d\\n' $n $n
-            """))
-        tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
-        self.out = self.root / "vault" / "keys.auto.tfvars.json"
-        self.sops = self.root / ".sops.yaml"
-        self.env = os.environ.copy()
-        self.env.update({"FLEET_AGE_KEYGEN": str(tool), "FLEET_KEYS_OUT": str(self.out), "FLEET_SOPS": str(self.sops)})
+        self.addCleanup(self.tmp.cleanup)
+        self.input = Path(self.tmp.name) / "recipients.json"
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def run_keys(self, document, *args, stdin=False):
+        text = document if isinstance(document, str) else json.dumps(document)
+        if stdin:
+            return subprocess.run([sys.executable, str(SCRIPT), *args, "-"], input=text, capture_output=True, text=True, check=False)
+        self.input.write_text(text)
+        return subprocess.run([sys.executable, str(SCRIPT), *args, str(self.input)], capture_output=True, text=True, check=False)
 
-    def run_keys(self):
-        return subprocess.run([str(SCRIPT)], capture_output=True, text=True, env=self.env, check=False)
+    def rules(self, output):
+        lines = output.splitlines()
+        found = {}
+        for index, line in enumerate(lines):
+            if line.startswith("  - path_regex: "):
+                found[line.split(": ", 1)[1]] = lines[index + 1].split("age: ", 1)[1].split(",")
+        return found
 
-    def test_creates_distinct_keys_for_every_active_role_without_printing_them(self):
-        result = self.run_keys()
+    def test_one_rule_per_role_secrets_file_with_operator_then_node_recipients(self):
+        result = self.run_keys(recipients(ci=[CI_NODE], devbox=[DEVBOX_NODE], web=[CI_NODE]), "--operator", OPERATOR)
         self.assertEqual(result.returncode, 0, result.stderr)
-        keys = json.loads(self.out.read_text())["fleet_age_keys"]
-        self.assertEqual(sorted(keys), ["ci", "devbox"])
-        self.assertEqual(len(set(keys.values())), 2)
-        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o600)
-        self.assertNotIn("AGE-SECRET-KEY", result.stdout + result.stderr)
-        sops = self.sops.read_text()
-        self.assertNotIn("TODO", sops)
-        self.assertNotIn("AGE-SECRET-KEY", sops)
-        self.assertEqual(sops.count("age: age1"), 2)
-        self.assertIn("secrets/fleet\\.(yaml|yml|json)$", sops)
-        self.assertIn("secrets/devbox\\.(yaml|yml|json)$", sops)
+        self.assertEqual(self.rules(result.stdout), {
+            "secrets/fleet\\.(yaml|yml|json)$": [OPERATOR, CI_NODE],
+            "secrets/devbox\\.(yaml|yml|json)$": [OPERATOR, DEVBOX_NODE],
+        })
+        self.assertTrue(result.stdout.splitlines()[2] == "creation_rules:")
 
-    def test_a_second_run_keeps_every_key(self):
-        self.run_keys()
-        before = (self.out.read_bytes(), self.sops.read_bytes())
-        again = self.run_keys()
-        self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertIn("created: none", again.stderr)
-        self.assertEqual((self.out.read_bytes(), self.sops.read_bytes()), before)
-
-    def test_a_missing_role_is_added_and_the_rest_are_kept(self):
-        self.run_keys()
-        data = json.loads(self.out.read_text())
-        kept = data["fleet_age_keys"]["ci"]
-        del data["fleet_age_keys"]["devbox"]
-        self.out.write_text(json.dumps(data))
-        self.run_keys()
-        keys = json.loads(self.out.read_text())["fleet_age_keys"]
-        self.assertEqual(keys["ci"], kept)
-        self.assertIn("devbox", keys)
-
-    def test_a_retired_role_keeps_its_key_but_gets_no_recipient(self):
-        # The vault root still holds secret/fleet/web until a reviewed change
-        # deletes the role; dropping the key here would make that plan fail.
-        self.out.parent.mkdir(parents=True)
-        self.out.write_text(json.dumps({"fleet_age_keys": {"web": "AGE-SECRET-KEY-900"}}))
-        result = self.run_keys()
+    def test_a_devbox_identity_never_decrypts_the_ci_file(self):
+        result = self.run_keys(recipients(ci=[], devbox=[DEVBOX_NODE]), "--operator", OPERATOR, stdin=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        keys = json.loads(self.out.read_text())["fleet_age_keys"]
-        self.assertEqual(keys["web"], "AGE-SECRET-KEY-900")
-        self.assertNotIn("secrets/web", self.sops.read_text())
+        self.assertEqual(self.rules(result.stdout)["secrets/fleet\\.(yaml|yml|json)$"], [OPERATOR])
 
-    def test_a_key_for_a_role_outside_the_registry_is_refused(self):
-        self.out.parent.mkdir(parents=True)
-        self.out.write_text(json.dumps({"fleet_age_keys": {"kiosk": "AGE-SECRET-KEY-901"}}))
-        result = self.run_keys()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Keys for roles not in roles.json: kiosk", result.stderr)
+    def test_duplicates_are_listed_once(self):
+        result = self.run_keys(recipients(ci=[OPERATOR, CI_NODE, CI_NODE]), "--operator", OPERATOR)
+        self.assertEqual(self.rules(result.stdout)["secrets/fleet\\.(yaml|yml|json)$"], [OPERATOR, CI_NODE])
+
+    def test_a_rotating_node_lists_its_current_and_next_recipient(self):
+        rotating = "age1" + "r" * 58
+        document = {"roles": {"ci": [
+            {"nodeId": "a" * 64, "hostname": "ci-aaaa", "recipient": CI_NODE, "next": rotating},
+            {"nodeId": "b" * 64, "hostname": "ci-bbbb", "recipient": "age1" + "s" * 58, "next": None},
+            {"nodeId": "c" * 64, "hostname": "ci-cccc", "recipient": "age1" + "t" * 58},
+        ]}}
+        result = self.run_keys(document, "--operator", OPERATOR)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.rules(result.stdout)["secrets/fleet\\.(yaml|yml|json)$"],
+                         [OPERATOR, CI_NODE, rotating, "age1" + "s" * 58, "age1" + "t" * 58])
+
+    def test_a_malformed_next_recipient_is_refused(self):
+        for bad in ("age1short", 7, "AGE-SECRET-KEY-1NOTAPUBLICKEY"):
+            with self.subTest(bad=bad):
+                document = {"roles": {"ci": [{"nodeId": "a" * 64, "hostname": "ci-aaaa", "recipient": CI_NODE, "next": bad}]}}
+                result = self.run_keys(document, "--operator", OPERATOR)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("AGE-SECRET-KEY", result.stderr)
+
+    def test_refuses_without_an_operator_or_with_bad_input_and_writes_nothing(self):
+        cases = [
+            (recipients(ci=[CI_NODE]), ()),
+            (recipients(ci=[CI_NODE]), ("--operator", "AGE-SECRET-KEY-1NOTAPUBLICKEY")),
+            (recipients(ci=["age1short"]), ("--operator", OPERATOR)),
+            ({"nodes": []}, ("--operator", OPERATOR)),
+            ("not json", ("--operator", OPERATOR)),
+        ]
+        for document, args in cases:
+            with self.subTest(args=args, document=str(document)[:40]):
+                result = self.run_keys(document, *args)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.startswith("fleet-keys: "))
+                self.assertNotIn("AGE-SECRET-KEY", result.stderr)
 
 
 if __name__ == "__main__":

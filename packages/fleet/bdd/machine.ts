@@ -33,15 +33,14 @@ async function configure(
 ): Promise<NodeJS.ProcessEnv> {
   await mkdir(join(directory, 'state'));
   await mkdir(join(directory, 'busy', 'slot-1'), { recursive: true });
-  await writeFile(
-    join(directory, 'state/installed'),
-    `role=${role}\nstatus=installed\n`
-  );
+  await writeFile(join(directory, 'state/installed'), 'status=installed\n');
   await writeFile(join(directory, 'node.conf'), `role=${role}\n`);
-  await writeFile(
-    join(directory, 'runner.conf'),
-    'scope=repository\napp_id=123\ninstallation_id=456\ntarget=example/private\n'
-  );
+  // Only a closure with runner slots has a runner configuration.
+  if (role === 'ci')
+    await writeFile(
+      join(directory, 'runner.conf'),
+      'scope=repository\napp_id=123\ninstallation_id=456\ntarget=example/private\n'
+    );
   await writeFile(join(directory, 'credential'), 'bdd-only-not-a-key', {
     mode: 0o600,
   });
@@ -77,7 +76,6 @@ async function configure(
     FLEET_EUID: '0',
     FLEET_EFI_DIR: directory,
     FLEET_ISO_FS: 'ext4',
-    FLEET_NO_ENROLL: '1',
     FLEET_ENROLL_TOKEN: '',
     FLEET_ENROLL_TOKEN_FILE: '',
   };
