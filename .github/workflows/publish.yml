@@ -1,0 +1,53 @@
+name: Publish image
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: fleet-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  container:
+    name: Container
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/browsers
+        with:
+          packages: packages/fleet-controller/node_modules/@playwright/test
+      - run: bun run check
+      - run: python -m pip install 'moto[server]==5.1.17'
+      - name: Build production image without secrets
+        run: docker build --platform linux/amd64 --pull -t fleet-controller:test .
+      - name: Verify readiness, restart, restore and denied writes
+        run: python scripts/check-container.py fleet-controller:test
+  publish:
+    needs: container
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    uses: crvouga/workspace/.github/workflows/publish.yml@main
+    secrets:
+      DEPLOY_DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+      CALLER_GITHUB_TOKEN: ${{ github.token }}
+    with:
+      service_id: fleet-api
+      dockerfile: ./Dockerfile
+      context: .
+      image_owner: crvouga
+      image_prefix: chrisvouga
+      infra_github_repo: crvouga/workspace
+      # Enable dispatch after the hosting inventory and Vault bindings land.
+      notify_deploy: false
