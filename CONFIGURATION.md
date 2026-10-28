@@ -115,6 +115,35 @@ is no implicit provider construction inside the browser auth service.
 
 ## Keep it running
 
+### Container hosting
+
+The root `Dockerfile` packages the same controller and Litestream supervisor for
+`linux/amd64` hosting. Build without secrets with `docker build -t fleet .`.
+It pins Bun 1.4.4 and Litestream 0.5.17, builds dashboard assets, installs frozen
+production dependencies, and runs as the unprivileged `bun` user. The entrypoint
+receives SIGTERM directly. Supply the settings above as runtime environment
+variables; no Vault client or credentials are included in the image.
+
+The working file defaults to `/var/lib/fleet/fleet.db`. Its directory is writable
+without a persistent volume: ordinary container restarts retain it, and a newly
+created container restores from S3. A mounted directory must also be writable by
+the container user. Allow at least 60 seconds for shutdown and a startup grace
+covering both restore and initial sync (60 seconds each by default). Configure
+one replica with **stop-before-start deployment**, including rollback; ordinary
+rolling deployment can corrupt the replica by running two writers concurrently.
+
+`.github/workflows/publish.yml` builds and tests the Linux image on pull requests.
+The container check uses disposable Moto S3 storage to exercise readiness,
+graceful shutdown, restart persistence, fresh-container restore, denied writes
+and refusal to start without configuration. Trusted main pushes call workspace's
+reusable publisher for `ghcr.io/crvouga/chrisvouga-fleet-api:<commit-sha>` and
+`:latest`. Deployment notification is disabled until the workspace inventory and
+Vault bindings are ready. Hosting, secrets and DNS remain OpenTofu-owned in the
+operator's platform repository. Image publication does not establish live
+deployment, real R2 permissions, replica freshness or OIDC acceptance.
+
+### Native service manager
+
 Use your OS service manager to restart `bun run start` after a failure. An
 [example systemd unit](examples/deployment/fleet-controller.service) supplies the same
 environment from `/etc/fleet/fleet.env`, restarts after unexpected exits and allows 60
