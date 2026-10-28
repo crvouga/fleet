@@ -33,11 +33,35 @@ describe('readControllerEnv', () => {
         replicated: true,
         path: expect.stringContaining('fleet.db'),
       }),
+      ownership: {
+        renewMs: 5_000,
+        expireMs: 30_000,
+        fenceMs: 20_000,
+        pollMs: 2_000,
+      },
       port: 8080,
       adminToken: 'a'.repeat(32),
       enrollmentTokens: [],
       github: { apiUrl: 'https://api.github.com' },
     });
+  });
+  test('validates writer ownership timing', () => {
+    expect(
+      readControllerEnv({
+        ...VALID,
+        FLEET_OWNERSHIP_RENEW_SECONDS: '1',
+        FLEET_OWNERSHIP_EXPIRE_SECONDS: '15',
+      }).ownership
+    ).toEqual({ renewMs: 1000, expireMs: 15000, fenceMs: 10000, pollMs: 1000 });
+    for (const [key, value] of [
+      ['FLEET_OWNERSHIP_RENEW_SECONDS', '0'],
+      ['FLEET_OWNERSHIP_EXPIRE_SECONDS', '14'],
+      ['FLEET_OWNERSHIP_EXPIRE_SECONDS', '10s'],
+      ['FLEET_OWNERSHIP_RENEW_SECONDS', '10'],
+    ])
+      expect(() =>
+        readControllerEnv({ ...VALID, [key as string]: value })
+      ).toThrow('FLEET_OWNERSHIP_');
   });
 
   test('core configuration needs no GitHub repository and supports an operator target revision', () => {

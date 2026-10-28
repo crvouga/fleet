@@ -157,6 +157,23 @@ export const API_SPECS: readonly Spec[] = [
   { key: 'GET /v1/nodes/:id/restarts', kind: 'read', path: at(1, '/restarts') },
   { key: 'GET /metrics', kind: 'read', path: fixed('/metrics') },
   { key: 'GET /v1/audit', kind: 'admin-read', path: fixed('/v1/audit') },
+  { key: 'GET /v1/access', kind: 'admin-read', path: fixed('/v1/access') },
+  {
+    key: 'PUT /v1/access/:email',
+    kind: 'write',
+    path: fixed('/v1/access/matrix-person%40example.test'),
+    ok: [404],
+    audit:
+      'the rig has no browser access list (404 access_unavailable); audited as access.allow in test/controller/admin-access.test.ts',
+  },
+  {
+    key: 'DELETE /v1/access/:email',
+    kind: 'write',
+    path: fixed('/v1/access/nobody%40example.test'),
+    ok: [404],
+    audit:
+      'the rig has no browser access list (404 access_unavailable); audited as access.revoke in test/controller/admin-access.test.ts',
+  },
   {
     key: 'GET /v1/enrollment/grants',
     kind: 'read',

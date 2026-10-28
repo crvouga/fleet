@@ -274,3 +274,13 @@ rollback). The node page shows the same list.
 - Tests: `test/controller/{rbac,credential-rotation,settings-safety,desired-history}.test.ts`,
   `test/domain/settings-impact.test.ts`, `test/auth/access-roles.test.ts`,
   `test/ui/access-safety.test.ts`, `packages/fleet/tests/test_credential_rotation.py`.
+
+## Allowlist API (`/v1/access`)
+
+For hosts where nobody can run `bun run access:allow` beside the service, the admin token (or a signed-in administrator) manages the browser allowlist over HTTP:
+
+- `GET /v1/access` lists allowed emails (administrators only; a viewer gets 403 and a denied audit row).
+- `PUT /v1/access/:email` allows an address as an administrator. Allowing an existing address changes nothing.
+- `DELETE /v1/access/:email` removes one. The last administrator cannot be removed (409 `cannot_revoke`).
+
+The access store writes `access.allow` and `access.revoke` audit rows in the same transaction as the change; a refused revoke leaves an `access.revoke` row with outcome `failed`. Use the `/access` page to grant the `viewer` role.

@@ -7,11 +7,14 @@ import type { AppEnv } from './deps';
 import { readGithubEnv } from './github/env';
 import { readIssuesEnv } from './issues/env';
 import { readHeartbeatRetentionDays } from './jobs/retention';
+import type { OwnershipTiming } from './ownership/acquire';
+import { readOwnershipTiming } from './ownership/timing';
 
 /** Everything the process reads from its environment, parsed once at boot. */
 export interface ControllerEnv extends AppEnv {
   readonly oidc?: OidcConfig;
   readonly storage: StorageConfig;
+  readonly ownership: OwnershipTiming;
   readonly port: number;
   /** Heartbeat history retention, whole days 1-365; absent means the default 30. */
   readonly heartbeatRetentionDays?: number;
@@ -110,6 +113,7 @@ export function readControllerEnv(
   const env: ControllerEnv = {
     ...(oidc ? { oidc } : {}),
     storage: readStorage(source, problems),
+    ownership: readOwnershipTiming(source, problems),
     port: parsePort(source, problems),
     ...readHeartbeatRetentionDays(source, problems),
 

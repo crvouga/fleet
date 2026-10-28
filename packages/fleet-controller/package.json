@@ -38,6 +38,7 @@
     "@pkgs/assert": "workspace:*",
     "@pkgs/logger": "workspace:*",
     "@tabler/icons-react": "^3.49.0",
+    "aws4fetch": "catalog:",
     "hono": "catalog:",
     "openid-client": "6.8.8",
     "react": "^19.3.1",

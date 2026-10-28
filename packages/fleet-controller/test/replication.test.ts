@@ -168,8 +168,11 @@ test.skipIf(!enabled || !process.env['FLEET_TEST_DENIED_BUCKET'])(
       const output =
         (await new Response(child.stdout).text()) +
         (await new Response(child.stderr).text());
-      expect(output).toContain('Initial Litestream replication failed');
-      expect(output).toContain('List/Get/Put/Delete permissions');
+      // Writer ownership needs a conditional write, so denied writes stop startup there.
+      expect(output).toContain(
+        'Object storage refused or ignored a conditional write'
+      );
+      expect(output).toContain('Put/Get/Delete permissions');
       expect(
         await fetch(`http://127.0.0.1:${port}/health`).then(
           () => true,

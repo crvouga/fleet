@@ -56,26 +56,41 @@ def main():
                 "Action": "s3:PutObject", "Resource": "arn:aws:s3:::fleet-container-denied/*"}]
         }))
 
-        def start(bucket):
+        def start(bucket, generic=False, listen=None):
+            listen = listen or port
             name = "fleet-image-test-" + secrets.token_hex(6)
             names.append(name)
-            env = {"FLEET_ADMIN_TOKEN": token, "FLEET_S3_BUCKET": bucket,
-                   "FLEET_S3_ENDPOINT": endpoint, "FLEET_S3_PREFIX": "container-test",
-                   "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
-                   "AWS_REGION": "us-east-1", "PORT": str(port),
-                   "FLEET_STARTUP_TIMEOUT_SECONDS": "10"}
+            # generic: only the shared-platform S3_* names, as a hosting inventory supplies them.
+            storage = ({"S3_BUCKET": bucket, "S3_ENDPOINT": endpoint, "S3_REGION": "us-east-1",
+                        "S3_ACCESS_KEY_ID": "test", "S3_SECRET_ACCESS_KEY": "test"}
+                       if generic else
+                       {"FLEET_S3_BUCKET": bucket, "FLEET_S3_ENDPOINT": endpoint,
+                        "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
+                        "AWS_REGION": "us-east-1"})
+            env = {"FLEET_ADMIN_TOKEN": token, "FLEET_S3_PREFIX": "container-test",
+                   "PORT": str(listen), "FLEET_STARTUP_TIMEOUT_SECONDS": "10",
+                   "FLEET_OWNERSHIP_RENEW_SECONDS": "1", "FLEET_OWNERSHIP_EXPIRE_SECONDS": "15",
+                   **storage}
             args = ["run", "-d", "--name", name, "--network", "host"]
             for key, value in env.items():
                 args.extend(["-e", f"{key}={value}"])
             docker(*args, image)
             return name
 
-        def ready(name):
-            for _ in range(300):
+        def healthy(at):
+            try:
+                with urlopen(at + "/health", timeout=1) as response:
+                    return response.status == 200
+            except OSError:
+                return False
+
+        def ready(name, at=None):
+            at = at or base
+            for _ in range(600):
                 if docker("inspect", "-f", "{{.State.Running}}", name) != "true":
                     raise RuntimeError("container exited before readiness: " + docker("logs", name))
                 try:
-                    with urlopen(base + "/health", timeout=1) as response:
+                    with urlopen(at + "/health", timeout=1) as response:
                         if response.status == 200 and json.load(response) == {"ok": True}:
                             return
                 except OSError:
@@ -83,8 +98,8 @@ def main():
                 time.sleep(0.1)
             raise RuntimeError("container readiness timed out")
 
-        def settings(method="GET", body=None):
-            request = Request(base + "/v1/settings/fleet", method=method,
+        def settings(method="GET", body=None, at=None):
+            request = Request((at or base) + "/v1/settings/fleet", method=method,
                               headers={"Authorization": "Bearer " + token,
                                        "Content-Type": "application/json"},
                               data=None if body is None else json.dumps(body).encode())
@@ -125,12 +140,43 @@ def main():
         assert "91" in settings(), "ordinary restart lost settings"
         stop(name)
         docker("rm", name)
-        # Entire local filesystem is gone; same prefix restores the durable replica.
-        name = start("fleet-container-test")
+        # Entire local filesystem is gone; same prefix restores the durable replica,
+        # configured through the generic S3_* names Litestream must still receive.
+        name = start("fleet-container-test", generic=True)
         ready(name)
         assert_schema(name, "restored replica")
         assert "91" in settings(), "replacement failed to restore settings"
         stop(name)
+        docker("rm", name)
+
+        # Rolling deploy as the platform does it: the new container starts while the
+        # old one still serves writes. The old one hands over and stays as a standby.
+        old = start("fleet-container-test")
+        ready(old)
+        new_port = free_port()
+        new_base = f"http://127.0.0.1:{new_port}"
+        new = start("fleet-container-test", listen=new_port)
+        acknowledged, value, refused = None, 200, 0
+        for _ in range(1200):
+            if healthy(new_base):
+                break
+            try:
+                settings("PUT", {"heartbeat": {"intervalSeconds": value}})
+                acknowledged = value
+            except OSError:
+                refused += 1
+            value += 1
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("new container never took over: " + docker("logs", new))
+        assert refused > 0, "old writer never paused writes during hand-over"
+        assert f'"intervalSeconds":{acknowledged}' in settings(at=new_base).replace(" ", ""), \
+            "acknowledged write lost in hand-over"
+        assert docker("inspect", "-f", "{{.State.Running}}", old) == "true", "old container must stay as standby"
+        stop(old)
+        stop(new)
+        docker("rm", old, new)
+
         denied = start("fleet-container-denied")
         assert docker("wait", denied) != "0", "denied writes must fail startup"
         try:
@@ -138,7 +184,7 @@ def main():
                 raise AssertionError("write-denied container accepted traffic")
         except OSError:
             pass
-        print("PASS: configuration refusal, readiness, schema version, graceful stop, restart, fresh restore, denied writes")
+        print("PASS: configuration refusal, readiness, schema version, graceful stop, restart, fresh restore via S3_* names, rolling hand-over, denied writes")
     finally:
         for name in names:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)

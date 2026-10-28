@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test';
+import { afterAll, expect, test } from 'bun:test';
+import { createRuntime as createS3 } from '@crvouga/mockingbird-service-s3';
 import {
   existsSync,
   mkdtempSync,
@@ -13,6 +14,8 @@ const fake = `#!/usr/bin/env bun
 import { appendFileSync } from 'node:fs';
 const command = process.argv[2];
 appendFileSync(process.env.FLEET_TEST_INVOCATIONS, command + '\\n');
+if (process.env.FLEET_TEST_EXPECT_KEY && command !== 'version')
+  appendFileSync(process.env.FLEET_TEST_INVOCATIONS, (process.env.AWS_ACCESS_KEY_ID === process.env.FLEET_TEST_EXPECT_KEY && process.env.AWS_SECRET_ACCESS_KEY === process.env.FLEET_TEST_EXPECT_SECRET ? 'credentials' : 'wrong-credentials') + '\\n');
 if (command === 'version') { console.log(process.env.FLEET_TEST_VERSION ?? '0.5.17'); process.exit(0); }
 if (command === 'replicate' && process.argv.includes('-once')) process.exit(Number(process.env.FLEET_TEST_WRITE_EXIT ?? 0));
 if (command === 'restore' && process.env.FLEET_TEST_HANG_RESTORE) {
@@ -23,6 +26,18 @@ if (command === 'restore' && process.env.FLEET_TEST_HANG_RESTORE) {
 if (command === 'restore') process.exit(Number(process.env.FLEET_TEST_RESTORE_EXIT ?? 0));
 process.exit(Number(process.env.FLEET_TEST_WORKER_EXIT ?? 27));
 `;
+
+/** Loopback S3 with conditional writes, for writer-ownership checks at startup. */
+const s3 = createS3({
+  buckets: ['test-bucket'],
+  credentials: { 'private-key-id': 'private-secret' },
+});
+const s3Server = Bun.serve({
+  hostname: '127.0.0.1',
+  port: 0,
+  fetch: (request) => s3.fetch(request),
+});
+afterAll(() => s3Server.stop(true));
 
 async function launch(
   overrides: Record<string, string>,
@@ -42,6 +57,8 @@ async function launch(
       AWS_ACCESS_KEY_ID: 'private-key-id',
       AWS_SECRET_ACCESS_KEY: 'private-secret',
       FLEET_S3_BUCKET: 'test-bucket',
+      FLEET_S3_ENDPOINT: `http://127.0.0.1:${s3Server.port}`,
+      FLEET_S3_PREFIX: `launcher-${Math.random().toString(16).slice(2)}`,
       FLEET_DATABASE_PATH: path,
       FLEET_LITESTREAM_BIN: binary,
       FLEET_TEST_INVOCATIONS: calls,
@@ -82,7 +99,8 @@ test('restore failure aborts startup before opening a database or starting repli
 test('a failed replication process fails the deployment instead of falling back to an unreplicated controller', async () => {
   expect(await launch({})).toMatchObject({
     code: 27,
-    calls: 'version\nrestore\nreplicate\nreplicate\n',
+    // restore, initial sync, the supervised worker, then an explicit final sync.
+    calls: 'version\nrestore\nreplicate\nreplicate\nreplicate\n',
     databaseCreated: true,
   });
 });
@@ -91,6 +109,25 @@ test('missing default credentials are requested before invoking Litestream', asy
   const result = await launch({ AWS_SECRET_ACCESS_KEY: '' });
   expect(result).toMatchObject({ code: 1, calls: '', databaseCreated: false });
   expect(result.output).toContain('AWS_SECRET_ACCESS_KEY is required');
+});
+
+test('generic S3_* names reach Litestream as AWS credentials when Fleet names are unset', async () => {
+  const result = await launch({
+    AWS_ACCESS_KEY_ID: '',
+    AWS_SECRET_ACCESS_KEY: '',
+    FLEET_S3_BUCKET: '',
+    S3_ACCESS_KEY_ID: 'private-key-id',
+    S3_SECRET_ACCESS_KEY: 'private-secret',
+    S3_BUCKET: 'test-bucket',
+    FLEET_TEST_EXPECT_KEY: 'private-key-id',
+    FLEET_TEST_EXPECT_SECRET: 'private-secret',
+  });
+  expect(result).toMatchObject({
+    code: 27,
+    calls:
+      'version\nrestore\ncredentials\nreplicate\ncredentials\nreplicate\ncredentials\nreplicate\ncredentials\n',
+    databaseCreated: true,
+  });
 });
 
 test('the controller worker entry point refuses default mode rather than running without replication', async () => {
