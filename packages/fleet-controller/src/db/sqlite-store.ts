@@ -1,7 +1,15 @@
 import type { FleetConfig, Scope } from '../config/schema';
-import type { NodePatch, RegisterInput, Store, EventQuery } from '../store';
+import type {
+  AuditQuery,
+  NodePatch,
+  RegisterInput,
+  Store,
+  EventQuery,
+} from '../store';
 import type {
   Approval,
+  AuditInput,
+  AuditRow,
   EventInput,
   EventRow,
   HeartbeatBody,
@@ -12,6 +20,7 @@ import type {
   SettingsRow,
 } from '../types';
 
+import { insertAudit, selectAudit } from './audit-queries';
 import type { Db } from './client';
 import { insertEvent, selectEvents } from './event-queries';
 import { deleteOlder, selectPoints, storeHeartbeat } from './heartbeat-queries';
@@ -221,6 +230,14 @@ export class SqliteStore implements Store {
     limit: number
   ): Promise<readonly SettingsHistoryRow[]> {
     return selectHistory(this.db, scope, limit);
+  }
+
+  audit(entry: AuditInput): Promise<void> {
+    return insertAudit(this.db, entry);
+  }
+
+  listAudit(query: AuditQuery): Promise<readonly AuditRow[]> {
+    return selectAudit(this.db, query);
   }
 
   async nodesDueOfflineNotice(

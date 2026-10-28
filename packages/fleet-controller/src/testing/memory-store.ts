@@ -2,9 +2,17 @@ import type { FleetConfig, Scope } from '../config/schema';
 import { storedEvent, unseen } from '../domain/event-keys';
 import { boundedHistory, compactTelemetry } from '../domain/heartbeat-history';
 import { diskPercent, readFacts } from '../ui/lib/facts';
-import type { EventQuery, NodePatch, RegisterInput, Store } from '../store';
+import type {
+  AuditQuery,
+  EventQuery,
+  NodePatch,
+  RegisterInput,
+  Store,
+} from '../store';
 import type {
   Approval,
+  AuditInput,
+  AuditRow,
   EventInput,
   EventRow,
   HeartbeatBody,
@@ -27,6 +35,8 @@ export class MemoryStore implements Store {
   private readonly events: EventRow[] = [];
   private readonly settings = new Map<string, SettingsRow>();
   private readonly history: SettingsHistoryRow[] = [];
+  private readonly auditRows: AuditRow[] = [];
+  private nextAuditId = 1;
   private nextEventId = 1;
   private nextHistoryId = 1;
 
@@ -251,6 +261,31 @@ export class MemoryStore implements Store {
       points.filter((point) => point.at >= since),
       since
     );
+  }
+
+  async audit(entry: AuditInput): Promise<void> {
+    this.auditRows.push({
+      id: this.nextAuditId++,
+      at: this.clock(),
+      actor: entry.actor,
+      actorRole: entry.actorRole ?? null,
+      action: entry.action,
+      targetKind: entry.targetKind,
+      targetId: entry.targetId ?? null,
+      outcome: entry.outcome ?? 'success',
+      requestId: entry.requestId ?? null,
+      detail: entry.detail ?? {},
+    });
+  }
+
+  async listAudit(query: AuditQuery): Promise<readonly AuditRow[]> {
+    return this.auditRows
+      .filter((row) => !query.targetKind || row.targetKind === query.targetKind)
+      .filter((row) => !query.targetId || row.targetId === query.targetId)
+      .filter((row) => !query.actor || row.actor === query.actor)
+      .filter((row) => query.beforeId === undefined || row.id < query.beforeId)
+      .sort((a, b) => b.id - a.id)
+      .slice(0, query.limit);
   }
 
   async addEvent(event: EventInput): Promise<void> {

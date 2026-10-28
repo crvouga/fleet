@@ -1,6 +1,8 @@
 import type { FleetConfig, Scope } from './config/schema';
 import type {
   Approval,
+  AuditInput,
+  AuditRow,
   EnrolledVia,
   EventInput,
   EventRow,
@@ -38,6 +40,15 @@ export interface EventQuery {
   readonly nodeId?: string;
   readonly severity?: 'warn' | 'error';
   /** Only events with an id below this, for paging. */
+  readonly beforeId?: number;
+  readonly limit: number;
+}
+
+export interface AuditQuery {
+  readonly targetKind?: string;
+  readonly targetId?: string;
+  readonly actor?: string;
+  /** Only entries with an id below this, for paging. */
   readonly beforeId?: number;
   readonly limit: number;
 }
@@ -90,6 +101,10 @@ export interface Store {
 
   addEvent(event: EventInput): Promise<void>;
   listEvents(query: EventQuery): Promise<readonly EventRow[]>;
+
+  /** Append-only audit trail of security- and operations-relevant actions. */
+  audit(entry: AuditInput): Promise<void>;
+  listAudit(query: AuditQuery): Promise<readonly AuditRow[]>;
 
   getSettings(scope: Scope): Promise<SettingsRow | null>;
   listSettings(): Promise<readonly SettingsRow[]>;
