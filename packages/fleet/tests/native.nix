@@ -16,7 +16,7 @@
   '';
 in pkgs.testers.runNixOSTest {
   name = "fleet-native";
-  # No route to the fleet API in the VM: leave the agent out.
+  # No route to the fleet controller in the VM: leave the agent out.
   node.specialArgs = { settings = settings // { repo = settings.repo // { timer = false; }; fleetApi = { url = ""; }; }; };
   nodes.machine = {
     imports = [ sopsModule diskoModule ../hosts/devbox.nix ];

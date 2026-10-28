@@ -6,13 +6,11 @@
                  (unwrap the key, install the node's credentials)
   approval       scripts/enroll.py, the code the `Fleet enroll` workflow runs
   fleet node     scripts/agent.py, reading a node's /proc, /run/fleet, /etc/fleet
-  fleet server   the real fleet API (bun src/server.ts, or its Docker image when
-                 FLEET_E2E_IMAGE is set) on a throwaway Postgres whose schema is
-                 built by the real Atlas CLI
+  fleet server   the real fleet controller worker with a throwaway SQLite database initialized by the API
   dashboard      the pages and the JSON API, over HTTP
 
 Only the outside world is faked: GitHub's issues API, Vault, the release host,
-the disk listing and kexec. Needs bun, atlas, Postgres binaries and curl. Without
+the disk listing and kexec. Needs bun and curl. Without
 them the test skips, unless FLEET_E2E_REQUIRED=1 (CI sets it), when it fails.
 """
 
@@ -24,6 +22,7 @@ import secrets
 import shlex
 import shutil
 import stat
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -91,8 +90,8 @@ class FullChainTest(unittest.TestCase):
         cls.role_token = secrets.token_hex(24)
         cls.vault = ChainVault(cls.role_token)
         cls.github = FakeGitHub()
-        cls.stack = Stack(cls.role_token, cls.vault.url, os.environ.get("FLEET_E2E_IMAGE"))
-        cls.api = cls.stack.info["apiUrl"]
+        cls.stack = Stack(cls.role_token, cls.vault.url)
+        cls.controller = cls.stack.info["controllerUrl"]
         cls.admin = cls.stack.info["adminToken"]
         cls.release = cls._start_release_server()
 
@@ -136,7 +135,7 @@ class FullChainTest(unittest.TestCase):
     # ---- helpers --------------------------------------------------------------
 
     def admin_get(self, path):
-        status, data, _ = http("GET", self.api + path, self.admin)
+        status, data, _ = http("GET", self.controller + path, self.admin)
         return status, jsonbody(data) if data[:1] in (b"{", b"[") else data.decode()
 
     def node_view(self, node_id):
@@ -270,7 +269,7 @@ class FullChainTest(unittest.TestCase):
 
         identity = machine_id("chain-a")
         node = NodeFiles(mnt, f"ci-{identity[:4]}", "ci", identity, slots=4)
-        first = node.agent(self.api, "once")
+        first = node.agent(self.controller, "once")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertNotIn(self.role_token, first.stdout + first.stderr)
         self.assertIn("registration: approved", first.stdout)
@@ -283,16 +282,16 @@ class FullChainTest(unittest.TestCase):
         self.assertNotIn("secretHash", json.dumps(view))
         self.assertNotIn(self.role_token, json.dumps(view))
 
-        status, page, _ = http("GET", self.api + "/", self.admin)
+        status, page, _ = http("GET", self.controller + "/", self.admin)
         self.assertEqual(status, 200)
         self.assertIn("Overview", page.decode())
-        status, page, _ = http("GET", self.api + "/nodes", self.admin)
+        status, page, _ = http("GET", self.controller + "/nodes", self.admin)
         self.assertEqual(status, 200)
         self.assertIn(f"ci-{identity[:4]}", page.decode())
-        status, page, _ = http("GET", self.api + f"/nodes/{identity}", self.admin)
+        status, page, _ = http("GET", self.controller + f"/nodes/{identity}", self.admin)
         self.assertEqual(status, 200)
         self.assertIn("ci-" + identity[:4], page.decode())
-        status, css, headers = http("GET", self.api + "/assets/app.css")
+        status, css, headers = http("GET", self.controller + "/assets/app.css")
         self.assertEqual(status, 200)
         self.assertIn("text/css", headers.get("Content-Type", ""))
         self.assertGreater(len(css), 1000)
@@ -300,20 +299,20 @@ class FullChainTest(unittest.TestCase):
     def test_02_unknown_node_waits_for_a_person_then_receives_config(self):
         identity = machine_id("chain-b")
         node = NodeFiles(self.root / "node-b", f"devbox-{identity[:4]}", "devbox", identity)
-        first = node.agent(self.api, "once")
+        first = node.agent(self.controller, "once")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertIn("registration: pending", first.stdout)
         self.assertEqual(self.node_view(identity)["status"], "pending")
 
-        status, page, _ = http("GET", self.api + "/pending", self.admin)
+        status, page, _ = http("GET", self.controller + "/pending", self.admin)
         self.assertEqual(status, 200)
         self.assertIn(f"devbox-{identity[:4]}", page.decode())
         cached = json.loads((node.state / "config.json").read_text())
         self.assertEqual(set(cached["values"]), {"heartbeat"}, "a pending node learns its report interval and nothing else")
 
-        status, _data, _ = http("POST", self.api + f"/v1/nodes/{identity}/approve", self.admin, {})
+        status, _data, _ = http("POST", self.controller + f"/v1/nodes/{identity}/approve", self.admin, {})
         self.assertEqual(status, 200)
-        second = node.agent(self.api, "once")
+        second = node.agent(self.controller, "once")
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertIn("registration: approved", second.stdout)
         view = self.node_view(identity)
@@ -324,7 +323,7 @@ class FullChainTest(unittest.TestCase):
         node = NodeFiles(self.root / "node-c", f"ci-{identity[:4]}", "ci", identity, slots=4)
         (node.state).mkdir(parents=True)
         (node.state / "role-token").write_text(self.role_token + "\n")
-        self.assertEqual(node.agent(self.api, "once").returncode, 0)
+        self.assertEqual(node.agent(self.controller, "once").returncode, 0)
 
         desired = {
             "heartbeat": {"intervalSeconds": 30},
@@ -332,15 +331,15 @@ class FullChainTest(unittest.TestCase):
             "runners": {"extraLabels": ["lab-a"], "repositories": ["crvouga/private-app"]},
             "capacity": {"slotMax": 2},
         }
-        status, data, _ = http("PUT", self.api + "/v1/settings/fleet", self.admin, desired)
+        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
         self.assertEqual(status, 200, data)
-        status, data, _ = http("PUT", self.api + "/v1/settings/fleet", self.admin, {"heartbeat": {"intervalSeconds": 1}})
+        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, {"heartbeat": {"intervalSeconds": 1}})
         self.assertEqual(status, 400, "an out-of-range value must be refused, not stored")
-        status, data, _ = http("PUT", self.api + "/v1/settings/fleet", self.admin, {"runner": {}})
+        status, data, _ = http("PUT", self.controller + "/v1/settings/fleet", self.admin, {"runner": {}})
         self.assertEqual(status, 400, "a typo must not silently do nothing")
-        http("PUT", self.api + "/v1/settings/fleet", self.admin, desired)
+        http("PUT", self.controller + "/v1/settings/fleet", self.admin, desired)
 
-        run = node.agent(self.api, "once")
+        run = node.agent(self.controller, "once")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         # agent/config.json remembers the revision; fleet-state/config.json is what shell scripts read.
         cached = json.loads((node.state / "config.json").read_text())
@@ -356,38 +355,38 @@ class FullChainTest(unittest.TestCase):
 
         # The next report carries the revision the node applied; the server
         # remembers it and does not send the same settings again.
-        again = node.agent(self.api, "once")
+        again = node.agent(self.controller, "once")
         self.assertEqual(again.returncode, 0)
         self.assertEqual(self.node_view(identity)["configRevision"], cached["revision"])
         self.assertEqual(json.loads((node.state / "config.json").read_text()), cached)
 
         # A node-scoped setting wins over the fleet's, and is visible as effective config.
-        status, data, _ = http("PUT", self.api + f"/v1/settings/node:{identity}", self.admin, {"sync": {"paused": False}})
+        status, data, _ = http("PUT", self.controller + f"/v1/settings/node:{identity}", self.admin, {"sync": {"paused": False}})
         self.assertEqual(status, 200, data)
-        node.agent(self.api, "once")
+        node.agent(self.controller, "once")
         refreshed = json.loads((node.state / "config.json").read_text())
         self.assertEqual(refreshed["values"]["sync"], {"paused": False})
         self.assertNotEqual(refreshed["revision"], cached["revision"])
         _status, document = self.admin_get(f"/v1/settings/node:{identity}")
         self.assertEqual(document["effective"]["sync"], {"paused": False})
-        http("PUT", self.api + f"/v1/settings/node:{identity}", self.admin, {})
-        http("PUT", self.api + "/v1/settings/fleet", self.admin, {})
+        http("PUT", self.controller + f"/v1/settings/node:{identity}", self.admin, {})
+        http("PUT", self.controller + "/v1/settings/fleet", self.admin, {})
 
     def test_04_a_forgotten_node_registers_again_and_removal_is_recorded(self):
         identity = machine_id("chain-d")
         node = NodeFiles(self.root / "node-d", f"ci-{identity[:4]}", "ci", identity, slots=2)
         node.state.mkdir(parents=True)
         (node.state / "role-token").write_text(self.role_token + "\n")
-        self.assertEqual(node.agent(self.api, "once").returncode, 0)
+        self.assertEqual(node.agent(self.controller, "once").returncode, 0)
 
-        status, _data, _ = http("DELETE", self.api + f"/v1/nodes/{identity}", self.admin)
+        status, _data, _ = http("DELETE", self.controller + f"/v1/nodes/{identity}", self.admin)
         self.assertEqual(status, 200)
         self.assertIsNone(self.node_view(identity))
-        healed = node.agent(self.api, "once")
+        healed = node.agent(self.controller, "once")
         self.assertEqual(healed.returncode, 0, healed.stdout + healed.stderr)
         self.assertEqual(self.node_view(identity)["status"], "online", "the 401 must lead to a fresh registration")
 
-        retire = node.agent(self.api, "retire")
+        retire = node.agent(self.controller, "retire")
         self.assertEqual(retire.returncode, 0, retire.stdout + retire.stderr)
         self.assertEqual(self.node_view(identity)["status"], "retired")
         _status, events = self.admin_get(f"/v1/events?node={identity}&limit=50")
@@ -399,7 +398,7 @@ class FullChainTest(unittest.TestCase):
         node = NodeFiles(self.root / "node-e", f"ci-{identity[:4]}", "ci", identity, slots=2)
         node.state.mkdir(parents=True)
         (node.state / "role-token").write_text("not-the-role-token-at-all\n")
-        node.agent(self.api, "once")
+        node.agent(self.controller, "once")
         self.assertEqual(self.node_view(identity)["status"], "pending")
 
     def test_06_rollbacks_and_failed_units_reach_the_events_feed(self):
@@ -407,22 +406,22 @@ class FullChainTest(unittest.TestCase):
         node = NodeFiles(self.root / "node-f", f"ci-{identity[:4]}", "ci", identity, slots=2)
         node.state.mkdir(parents=True)
         (node.state / "role-token").write_text(self.role_token + "\n")
-        node.agent(self.api, "once")
+        node.agent(self.controller, "once")
         (node.root / "run/fleet/health-failure").write_text("mode=switch\nfleet-sync.service failed its health check\n")
-        node.agent(self.api, "once")
+        node.agent(self.controller, "once")
         view = self.node_view(identity)
         self.assertTrue(view["facts"]["sync"]["rolledBack"], view["facts"])
         _status, events = self.admin_get(f"/v1/events?node={identity}&limit=50")
         self.assertTrue(any("roll" in e["kind"] for e in events["events"]), events)
 
     def test_07_dashboard_has_no_vault_password_login_and_metrics_require_admin(self):
-        status, _data, _ = http("GET", self.api + "/", follow=False)
+        status, _data, _ = http("GET", self.controller + "/", follow=False)
         self.assertIn(status, (302, 303))
-        self.assertEqual(http("GET", self.api + "/metrics")[0], 401)
-        status, text, _ = http("GET", self.api + "/metrics", self.admin)
+        self.assertEqual(http("GET", self.controller + "/metrics")[0], 401)
+        status, text, _ = http("GET", self.controller + "/metrics", self.admin)
         self.assertEqual(status, 200)
         self.assertIn("fleet_nodes", text.decode())
-        status, page, _ = http("GET", self.api + "/login")
+        status, page, _ = http("GET", self.controller + "/login")
         self.assertEqual(status, 200)
         self.assertIn("OpenID Connect", page.decode())
         self.assertNotIn('type="password"', page.decode())
@@ -431,47 +430,35 @@ class FullChainTest(unittest.TestCase):
         # Fleet's auth/browser-journey.test.ts owns the signed-token browser flow.
         for password in ("wrong", self.vault.password):
             form = urlencode({"username": "crvouga", "password": password})
-            request = urllib.request.Request(self.api + "/login", data=form.encode(), method="POST", headers={"Origin": self.api})
+            request = urllib.request.Request(self.controller + "/login", data=form.encode(), method="POST", headers={"Origin": self.controller})
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.build_opener(_NoRedirect).open(request, timeout=20)
             self.assertEqual(caught.exception.code, 410)
             self.assertIsNone(caught.exception.headers.get("Set-Cookie"))
-        status, page, _ = http("GET", self.api + "/", self.admin)
+        status, page, _ = http("GET", self.controller + "/", self.admin)
         self.assertEqual(status, 200)
         self.assertIn("Fleet", page.decode())
 
-    def test_08_everything_lives_in_the_fleet_schema(self):
-        psql = shutil.which("psql")
-        if psql is None:
-            self.skipTest("psql is not installed")
-        url = self.stack.info["databaseUrl"]
-        listing = subprocess.run(
-            [psql, url, "-At", "-c",
-             "select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace "
-             "where c.relkind in ('r','p','v','m','S','f') and n.nspname not in ('pg_catalog','information_schema','pg_toast') order by 1"],
-            capture_output=True, text=True, timeout=30,
-        )
-        self.assertEqual(listing.returncode, 0, listing.stderr)
-        outside = [line for line in listing.stdout.split() if not line.startswith("fleet.")]
-        self.assertEqual(outside, [], "the fleet API created something outside its schema")
-        self.assertIn("fleet.nodes", listing.stdout)
-        self.assertIn("fleet.heartbeats", listing.stdout)
-        secret_leak = subprocess.run(
-            [psql, url, "-At", "-c", f"select count(*) from fleet.nodes where secret_hash like '%{self.role_token}%'"],
-            capture_output=True, text=True, timeout=30,
-        )
-        self.assertEqual(secret_leak.stdout.strip(), "0")
-        stored = subprocess.run([psql, url, "-At", "-c", "select secret_hash from fleet.nodes limit 1"], capture_output=True, text=True)
-        self.assertRegex(stored.stdout.strip(), r"^[0-9a-f]{64}$", "only a hash of the node secret is stored")
+    def test_08_sqlite_persists_nodes_and_only_stores_secret_hashes(self):
+        path = Path(self.stack.info["databaseUrl"])
+        self.assertTrue(path.is_file())
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+            tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
+            self.assertTrue({"nodes", "heartbeats", "events", "allowed_emails"}.issubset(tables))
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            hashes = [row[0] for row in db.execute("select secret_hash from nodes")]
+            self.assertTrue(hashes)
+            for stored in hashes:
+                self.assertRegex(stored, r"^[0-9a-f]{64}$", "only a hash of the node secret is stored")
+                self.assertNotIn(self.role_token, stored)
 
     def test_09_the_server_refuses_to_start_misconfigured(self):
         done = subprocess.run(
-            ["bun", "src/server.ts"], cwd=ROOT.parent / "fleet-api", capture_output=True, text=True, timeout=60,
-            env={"PATH": os.environ["PATH"], "DATABASE_URL": "postgres://nobody@127.0.0.1:1/x"},
+            ["bun", "src/controller.ts"], cwd=ROOT.parent / "fleet-controller", capture_output=True, text=True, timeout=60,
+            env={"PATH": os.environ["PATH"]},
         )
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("FLEET_ADMIN_TOKEN", done.stdout + done.stderr)
-        self.assertNotIn("postgres://nobody", done.stdout + done.stderr)
 
 
 if __name__ == "__main__":

@@ -124,7 +124,7 @@ def machine_digest(uuid_text, mac):
     """The full sha256 hex of the machine's stable hardware material (64 digits).
 
     Its first 4 digits are the hostname suffix. The whole digest is the node id
-    the fleet API knows this machine by; it is derived from hardware and is not a secret.
+    the fleet controller knows this machine by; it is derived from hardware and is not a secret.
     """
     uuid = normalize_uuid(uuid_text)
     if uuid:
@@ -316,7 +316,7 @@ def _write(path, text, mode):
 
 
 def dynamic_settings(root="/"):
-    """Settings the fleet API last sent, already validated. Any problem gives {} (built-in values)."""
+    """Settings the fleet controller last sent, already validated. Any problem gives {} (built-in values)."""
     try:
         fleetconf = _fleetconf()
         return fleetconf.load(str(Path(root) / "nix/fleet-state/config.json"))
@@ -342,7 +342,7 @@ CAPACITY_NAMES = {
 
 
 def effective_capacity(conf, dynamic):
-    """The image's capacity constants, overridden by the API's capacity.* keys.
+    """The image's capacity constants, overridden by the controller's capacity.* keys.
 
     slot_max can only go down: the closure holds units slot-1..slot_max and no more.
     """
@@ -357,7 +357,7 @@ def effective_capacity(conf, dynamic):
 
 
 def merged_labels(arch, tags, dynamic):
-    """Labels the image sets, then the API's runners.extraLabels, without repeats."""
+    """Labels the image sets, then the controller's runners.extraLabels, without repeats."""
     labels = runner_labels(arch, tags)
     for extra in dynamic.get("runners.extraLabels") or []:
         if extra not in labels:
@@ -389,10 +389,10 @@ def sync_assignments(directory, assignments):
 
 
 def apply_dynamic(fleet, conf, dynamic, ram_mib, cores, arch, tags):
-    """Write the runtime files in the /run/fleet directory `fleet` that the API's settings change: runner labels, slot count, slot assignments.
+    """Write the runtime files in the /run/fleet directory `fleet` that the controller's settings change: runner labels, slot count, slot assignments.
 
     Used at boot (from the cached settings, so a node behaves the same before the
-    agent has spoken to the API) and by the agent when new settings arrive.
+    agent has spoken to the controller) and by the agent when new settings arrive.
     """
     fleet = Path(fleet)
     labels = merged_labels(arch, tags, dynamic)

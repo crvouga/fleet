@@ -11,7 +11,7 @@
       };
       # Supply your public SSH keys before installing a development box.
       sshKeys = [ ];
-      # Leave empty for local approval; set your HTTPS API for managed approval.
+      # Leave empty for local approval; set your HTTPS fleet controller for managed approval.
       fleetApi.url = "";
     };
     # Configure roles.ci.github and roles.ci.secretsFile to enable CI installation.

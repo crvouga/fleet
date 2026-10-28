@@ -46,7 +46,7 @@ error serializer. Do not enable request/response-body logging to diagnose auth.
 | Service                                                      | Instrumentation                                                                                                                              |
 | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Auth relay gateway                                           | Request/reference IDs, status/duration, database/identity/assets readiness, named callback/cleanup/manager steps, lifecycle and job outcomes |
-| Fleet API                                                    | Shared HTTP correlation, structured unexpected errors and database readiness errors; existing fleet metrics and job logs                     |
+| Fleet controller                                                    | Shared HTTP correlation, structured unexpected errors and database readiness errors; existing fleet metrics and job logs                     |
 | Remote cache                                                 | Shared HTTP correlation and structured artifact errors; existing Vault boot/renewal events                                                   |
 | Keycloak                                                     | Native JSON console logs, native readiness and existing metrics configuration; gateway forwards request IDs and W3C trace headers            |
 | OpenBao                                                      | Native JSON operational logs and existing health probes; secret audit infrastructure remains separately managed                              |

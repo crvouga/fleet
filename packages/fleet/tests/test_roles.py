@@ -132,8 +132,8 @@ class CopyTests(unittest.TestCase):
         rewritten = roles.sync(bigger, self.root)
         self.assertEqual(roles.stale_copies(bigger, self.root), [])
         self.assertEqual(roles.sync(bigger, self.root), [])
-        self.assertIn("packages/fleet-api/schema.hcl", rewritten)
-        self.assertIn("'kiosk'", (self.root / "packages/fleet-api/schema.hcl").read_text())
+        self.assertIn("packages/fleet-controller/src/db/schema.sql", rewritten)
+        self.assertIn("'kiosk'", (self.root / "packages/fleet-controller/src/db/schema.sql").read_text())
         # An active-only copy does not learn a retired role.
         self.assertNotIn("kiosk", (self.root / "packages/fleet/scripts/decide.py").read_text())
 

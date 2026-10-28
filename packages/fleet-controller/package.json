@@ -1,0 +1,57 @@
+{
+  "name": "@pkgs/fleet-controller",
+  "version": "1.0.0",
+  "private": true,
+  "exports": {
+    "./*": [
+      "./src/*.ts",
+      "./src/*.tsx",
+      "./src/*/index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "bun run build:css && bun run build:console && test -f src/db/schema.sql",
+    "build:css": "tailwindcss -i src/ui/app.css -o dist/app.css --minify",
+    "dev": "bun run build && bun src/dev.ts",
+    "lint": "eslint src test playwright.config.ts --max-warnings 0",
+    "tc": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test ./test && bun run test:bdd",
+    "demo": "bun run build && bun run scripts/demo.ts",
+    "test:bdd": "bddgen && playwright test",
+    "dev:fixtures": "FLEET_DEV_MODE=fixtures bun run dev",
+    "build:console": "bun build ./src/console/console.tsx ./src/console/theme-init.ts --outdir ./dist --target browser --production",
+    "test:unit": "bun test ./test",
+    "test:ui": "bun test ./test/ui",
+    "test:browser": "bun test ./test/auth/browser-journey.test.ts",
+    "start": "bun src/start.ts",
+    "access:allow": "bun src/db/allow-email.ts",
+    "check:config": "bun src/start.ts --check",
+    "dev:controller": "bun run dev"
+  },
+  "dependencies": {
+    "@mantine/charts": "9.7.3",
+    "@mantine/core": "^9.7.3",
+    "@mantine/form": "^9.7.3",
+    "@mantine/hooks": "^9.7.3",
+    "@pkgs/admin-ui": "workspace:*",
+    "@pkgs/assert": "workspace:*",
+    "@pkgs/logger": "workspace:*",
+    "@tabler/icons-react": "^3.49.0",
+    "hono": "catalog:",
+    "openid-client": "6.8.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "recharts": "^3.10.1",
+    "yaml": "catalog:"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@tailwindcss/cli": "catalog:",
+    "@types/bun": "catalog:",
+    "playwright-bdd": "9.2.1",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
+  }
+}

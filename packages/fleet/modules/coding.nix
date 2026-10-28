@@ -3,7 +3,7 @@
 in {
   imports = [ ./coding-desktop.nix ];
   # Subscription credentials belong to the person using this account. They
-  # never enter sops, the Nix store, runner environments or the fleet API.
+  # never enter sops, the Nix store, runner environments or the fleet controller.
   environment.systemPackages = [
     tools.session tools.ssh tools.browser pkgs.omp
     pkgs.claude-code pkgs.codex pkgs.chromium pkgs.ripgrep pkgs.tmux pkgs.xdg-utils

@@ -129,11 +129,11 @@ class NodeConsoleTests(unittest.TestCase):
 
     def test_no_network_and_a_silent_agent_are_named(self):
         (self.root / "offline").touch()
-        self.agent([], reported=3600, lastError="API unreachable (timed out)")
+        self.agent([], reported=3600, lastError="controller unreachable (timed out)")
         screen = self.drawn()
         self.assertIn("STATUS PROBLEM. Still not ready after 25 min 0 s. This node has no network connection", screen)
         self.assertIn("[!] Network no connection", screen)
-        self.assertIn("[!] Fleet last report failed: API unreachable", screen)
+        self.assertIn("[!] Fleet last report failed: controller unreachable", screen)
 
     def test_failed_service_prerequisite_names_the_git_managed_repair(self):
         self.agent(['FLEET_RUNNER_PREREQUISITE_FAILED: runner slot-1 failed gh discovery/execution inside its service environment.'])

@@ -1,7 +1,7 @@
 { pkgs, lib, sopsModule, diskoModule }: let
   settings = import ../fleet.nix;
   testSettings = settings // {
-    # The VM has no route to the fleet API. Leave the agent out so the test stays offline.
+    # The VM has no route to the fleet controller. Leave the agent out so the test stays offline.
     fleetApi = { url = ""; };
     secretsFile = null;
     # Lowered so a small VM can show the high-mem tag. Production uses 60 GiB.

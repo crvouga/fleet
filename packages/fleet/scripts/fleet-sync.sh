@@ -30,7 +30,7 @@ if [ "$BRANCH" != "main" ]; then
   exit 1
 fi
 
-# Dynamic settings from the fleet API (scripts/fleetconf.py). The fleet works
+# Dynamic settings from the fleet controller (scripts/fleetconf.py). The fleet works
 # without them: a missing or unreadable setting gives the value built into this
 # image, and a failing reader never stops a sync.
 conf() {
@@ -408,7 +408,7 @@ report_failure() {
     printf '%s\n' "$reason"
   } > "$report_path"
   cp "$report_path" "$state_dir/health-failure"
-  # The node agent reports this safe persisted failure through the Fleet API.
+  # The node agent reports this safe persisted failure through the Fleet controller.
 }
 
 clear_failure() {

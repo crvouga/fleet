@@ -3625,7 +3625,7 @@ def cmd_remove():
 
 
 def retire_from_fleet_api():
-    """Tell the fleet API this node is leaving. Best effort: ten seconds at most, and no failure here
+    """Tell the fleet controller this node is leaving. Best effort: ten seconds at most, and no failure here
     ever blocks or fails the removal. FLEET_AGENT names the command (tests); a test state directory
     without it skips the call."""
     command = os.environ.get("FLEET_AGENT")

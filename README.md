@@ -2,7 +2,7 @@
 
 Git-managed NixOS machines with a cross-platform installer and an optional management dashboard. Fleet provides CI runner and development-box roles, hardware capability variants, pull updates, rollback, telemetry, and node enrollment. There are no per-machine host definitions.
 
-Fleet runs on hardware you control. It does not require Railway, Cloudflare, a particular Vault, the author's infrastructure, or a cloud account. The optional dashboard runs anywhere Bun and PostgreSQL run. Browser login uses a configurable HTTPS OpenID Connect provider with authorization code + S256 PKCE and verified email claims.
+Fleet runs on hardware you control. It does not require Railway, Cloudflare, a particular Vault, the author's infrastructure, or a cloud account. The optional Fleet controller coordinates enrollment, node settings, telemetry and recovery through a dashboard, backed by Bun and SQLite. By default, Litestream restores and replicates its database to your S3-compatible bucket, so the compute is replaceable. Browser login uses a configurable HTTPS OpenID Connect provider with authorization code + S256 PKCE and verified email claims.
 
 ## Try the dashboard
 
@@ -13,7 +13,7 @@ bun install --frozen-lockfile
 bun run dev:fixtures
 ```
 
-Open the loopback URL printed by the command. Fixtures are synthetic, kept in memory, and explicitly selected. Normal `bun run dev` uses your environment and fails if database credentials are missing.
+Open the loopback URL printed by the command. Fixtures are synthetic, kept in memory, and explicitly selected. Normal `bun run dev` uses your configured storage and authentication. Use `bun run dev:fixtures` for local development without S3; managed development requires the same settings as production.
 
 ## Configure your machines
 
@@ -31,27 +31,31 @@ NixOS builds and VM tests require x86_64 Linux with Nix; VM tests also need KVM.
 
 Installer downloads default to this project's GitHub releases. For private/fork builds set `FLEET_INSTALLER_URL` to your published ISO URL and `FLEET_GITHUB_REPO` to your fork for enrollment/issues. Publish matching checksums/parts using `scripts/release-image.py`; never point an installer at an unverified image. This extraction does not promise an already-published installer release.
 
-## Host the dashboard
+## Host the Fleet controller
 
-Build `packages/fleet-api/Dockerfile` with this repository root as context, or run `bun run build` and `bun run start`. Supply:
+Fleet runs directly on one node with **Bun 1.4.4 + Litestream 0.5.17**. SQLite is built into Bun. Litestream restores and continuously replicates the database to your S3-compatible bucket.
 
-- `DATABASE_URL`: PostgreSQL connection string.
-- `FLEET_ADMIN_TOKEN`: random secret of at least 32 characters.
-- `FLEET_ROLE_TOKEN_HASHES`: JSON map of role to SHA-256 token hash; `{}` allows only pending registrations requiring approval.
-- `FLEET_GITHUB_REPO`: repository whose revisions nodes follow.
-- `PORT`: defaults to 8080.
-- Optional browser login: `FLEET_OIDC_ISSUER`, `FLEET_OIDC_CLIENT_ID`, and `FLEET_PUBLIC_ORIGIN`. Register the exact callback `${FLEET_PUBLIC_ORIGIN}/auth/callback`. All three values must be supplied together.
+**Required configuration:** `FLEET_ADMIN_TOKEN`, `FLEET_GITHUB_REPO`, `FLEET_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`. For non-AWS storage, also set `FLEET_S3_ENDPOINT`.
 
-Apply [schema.hcl](packages/fleet-api/schema.hcl) using your migration system before startup. Provision your own database, TLS, OIDC client, backups and secrets through your infrastructure tooling. Fleet does not create these resources. Insert the initial authorized email into `fleet.allowed_emails` through the database owner; first sign-in never grants access. Without OIDC the bearer-token node/admin API remains available, while browser login is disabled.
+```sh
+bun install --frozen-lockfile
+bun run build
+cp deployment.env.example deployment.env
+# Fill in deployment.env with your repository, admin secret and S3 credentials.
+bun --env-file=deployment.env run check:config
+bun --env-file=deployment.env run start
+```
+
+See **[CONFIGURATION.md](CONFIGURATION.md)** for every setting, defaults, startup checks, error remedies, browser login, and the service-manager example. The [environment template](deployment.env.example) contains all supported settings. Startup refuses traffic until configuration, local prerequisites, restore, schema initialization and an initial S3 sync succeed. Failures exit nonzero with a corrective action. One node owns the SQLite working file and replica prefix; stop it before starting a replacement. Ordinary restarts retain data, and a replacement can restore from the bucket. Abrupt host loss may lose recent unreplicated writes.
 
 Shared role-key enrollment through Vault/OpenBao is optional. Configure `FLEET_VAULT_ADDR` on installer clients and `FLEET_VAULT_ADDR` repository variable for the opt-in enrollment workflow. Configure its JWT trust to your exact repository, workflow and branch. An example wrapped-read policy is under `packages/fleet/examples/vault/`. For a standalone node without shared role secrets, use `fleet-node devbox --no-enroll` after building your configured installer. The installer generates its own age key; shared encrypted role credentials require your own enrollment configuration. `FLEET_KEYS_OUT` controls private key output (default `~/.config/fleet/`, mode 0600). Never commit private keys or tokens.
 
 ## Develop
 
 ```sh
-bun run check          # typecheck, lint, Python/API tests, dashboard build
+bun run check          # typecheck, lint, Python/controller tests, dashboard build
 bun run check:nix      # NixOS evaluations, builds and VM checks on Linux
-bun run roles:sync     # regenerate role lists in scripts, API and schema
+bun run roles:sync     # regenerate role lists in scripts, controller and schema
 ```
 
 Browser tests additionally require Playwright Chromium (`bunx playwright install chromium`). Native packaged installer validation requires the target OS and `packages/fleet/wizard/requirements-build.txt`. Portable checks do not establish physical installation or Windows signing readiness. CI uses GitHub-hosted runners; the reusable runner workflow is optional.

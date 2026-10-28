@@ -1,5 +1,9 @@
 # Bring-up readiness — 2026-10-14
 
+> Historical evidence below includes the former infrastructure and PostgreSQL deployment.
+> Current standalone deployment uses native SQLite and mandatory Litestream; follow
+> [the current controller guide](../../fleet-controller/README.md) instead of historical rollout commands.
+
 ## 2026-10-24 onboarding and recovery audit
 
 The normal Windows/Linux x86-64 UEFI flow is Fleet download → wizard → one
@@ -16,7 +20,7 @@ actual online GitHub runner registrations. Old agents remain **Not yet verified*
 | Stage conversion        | Verified image and exact role, persistent handoff marker                                                                                                       | Staging failure restores only runner withdrawal caused by that attempt; it never reverses an intentional removal                                                                   |
 | Live image, before wipe | Usable network; role key decrypts required secrets; GitHub registration authorized; actual Fleet approval; bundled role closure present in the local Nix store | Bounded temporary network retries; safe permanent diagnostics reported through the approved node credential; staged conversions return to the untouched source OS before disk work |
 | Disk installation       | All preflight checks passed; actual `nixos-install` and private credential readback succeed                                                                    | After disk work begins, failures never restart the destructive install automatically; report the failed phase without claiming success                                             |
-| First installed boot    | Same hardware identity and authenticated credential established by preflight                                                                                   | API outages cannot block the update timer or runner lifecycle; the agent retries reporting                                                                                         |
+| First installed boot    | Same hardware identity and authenticated credential established by preflight                                                                                   | Controller outages cannot block the update timer or runner lifecycle; the agent retries reporting                                                                                         |
 | Update                  | Exact Git revision with bounded local builds and signed upstream substitutes                                                                                   | Failed build leaves the current generation running; timer retries; duplicate revisions avoid redundant switches                                                                    |
 | Kernel update           | Reboot jitter completed before drain; successful health probes and bootloader update                                                                           | Failed drain, switch, probe, or reboot request restores admission; failed recovery stays marked for agent retry                                                                    |
 | Boot fallback           | GitHub/upstream-cache connectivity and update timer before blessing; protected healthy closure GC roots                                                        | Counted upgrade failures reboot only with a fallback entry; a first install stays alive and retries rather than reboot-looping                                                     |
@@ -112,11 +116,11 @@ repository or workflow was changed, and no physical node was qualified here.
 | Data                                                                 | Authoritative location                                                                            |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Bootstrap GitHub scope, App/installation IDs and repository fallback | `settings/github.json`, consumed by Nix, setup and health checks                                  |
-| Runtime repositories, labels, capacity, pause/cordon settings        | Existing fleet API/Postgres settings (`role:ci`); nodes cache the last accepted settings          |
-| Enrollment keys and API credentials                                  | Existing vault OpenTofu root and role-encrypted secrets; never plaintext JSON or application code |
+| Runtime repositories, labels, capacity, pause/cordon settings        | Existing fleet controller/Postgres settings (`role:ci`); nodes cache the last accepted settings          |
+| Enrollment keys and controller credentials                                  | Existing vault OpenTofu root and role-encrypted secrets; never plaintext JSON or application code |
 | Firmware, disk, CPU/RAM and hostname                                 | Probed from the machine; no per-node hardcoded files                                              |
 
-The JSON fallback lets registration keep working when the API is unavailable.
+The JSON fallback lets registration keep working when the controller is unavailable.
 It is the only committed location for the chosen repository name. Do not seed a
 second repository-specific constant into scripts or workflows.
 
@@ -129,7 +133,7 @@ second repository-specific constant into scripts or workflows.
 | Installer downloads                          | Publication failed with HTTP 422 because the ISO exceeded GitHub's [2 GiB per-asset limit](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases). No public installer release is available. | Merge the multipart publication fix and require a successful **publish** job. A green Fleet gate for an unrelated change can skip every build.                                                                          |
 | CI runners                                   | `settings/github.json` now contains the confirmed private-repository allowlist and repository registration scope. App/installation IDs are still TODO and the encrypted App key is absent.                                 | Owner must complete `just setup`, which reads that central JSON allowlist. Do not use this public workspace as a runner target.                                                                                         |
 | Role keys / enrollment                       | Distinct role keys were generated into the ignored vault input and matching public recipients are in `.sops.yaml`. Live Vault still lacks the enrollment policy/JWT role.                                                  | Preserve the generated ignored input, carry the same complete map into the managed CI vault inputs, and apply a reviewed vault plan. Confirm each needed `secret/fleet/<role>` document exists without printing it.     |
-| Fleet API                                    | `fleet.example.com` does not resolve; its image is unavailable to anonymous pulls. Live Vault lacks the three API settings.                                                                                             | Complete foundation, image publication, vault and fleet-root deployment through OpenTofu; require DNS, TLS, `/health` and authenticated health checks to pass.                                                          |
+| Fleet controller                                    | `fleet.example.com` does not resolve; its image is unavailable to anonymous pulls. Live Vault lacks the three controller settings.                                                                                             | Complete foundation, image publication, vault and fleet-root deployment through OpenTofu; require DNS, TLS, `/health` and authenticated health checks to pass.                                                          |
 | Initial database schema                      | [CI deployment](https://github.com/crvouga/fleet/actions/runs/38676867317) fails planning Atlas: `schema "fleet" was not found`.                                                                                       | Bootstrap only the empty schema through a reviewed targeted foundation plan, then review/apply the full foundation plan (details below).                                                                                |
 | Automatic updates                            | Shared binary-cache URL/key are null; the cache role's secret file is null. GitHub lacks `FLEET_CACHE_URL`, `FLEET_CACHE_NAME`, `FLEET_ATTIC_TOKEN`.                                                                       | Bring up Attic with its own encrypted secret, commit its actual URL/public key, and manage workflow values through OpenTofu. Require a successful merge-group cache push. Without this, nodes wait instead of updating. |
 | Merge protections                            | Live `main` requires `Required`, but lacks the declared `Fleet` check and merge queue.                                                                                                                                     | Apply the reviewed foundation ruleset change after its cache prerequisites are available.                                                                                                                               |
@@ -153,7 +157,7 @@ skipped checks are not acceptance evidence.
    The ignored local file is not uploaded by a merge; omitting the keys from CI
    inputs would make the protected role documents fail their next plan.
 2. Bootstrap the missing database schema using the foundation procedure below.
-   Complete the full foundation and vault plans, publish the API image, then
+   Complete the full foundation and vault plans, publish the controller image, then
    apply the fleet root. These are cloud resources, exclusively managed by
    OpenTofu. Import any resource that already exists before adoption.
 3. Verify the installer contains each deployable role closure. Nodes build
@@ -205,7 +209,7 @@ A plain USB install generates its own age key. A role with encrypted shared
 secrets needs the matching canonical `<role>.age` on a separate `FLEET-KEY`
 volume, or the enrolled conversion path. An empty key volume creates a new key;
 it does not recover the key used to encrypt the committed secrets. A USB node
-also needs dashboard approval because it has no API role token. A devbox can
+also needs dashboard approval because it has no controller role token. A devbox can
 read its public SSH key from `devbox.pub` on that volume or the console.
 
 After the first boot, require: `fleet-node status` shows the intended role,

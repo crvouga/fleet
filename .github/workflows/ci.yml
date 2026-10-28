@@ -26,12 +26,24 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: ariga/setup-atlas@v0
       - run: bun install --frozen-lockfile
       - uses: ./.github/actions/browsers
         with:
-          packages: packages/fleet-api/node_modules/@playwright/test
+          packages: packages/fleet-controller/node_modules/@playwright/test
       - run: bun run check
+      - name: Install replication test tools
+        run: |
+          python -m pip install 'moto[server]==5.1.17'
+          version=0.5.17
+          archive="litestream-${version}-linux-x86_64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 3 --output "$archive" "https://github.com/benbjohnson/litestream/releases/download/v${version}/${archive}"
+          curl --fail --location --retry 3 --output checksums.txt "https://github.com/benbjohnson/litestream/releases/download/v${version}/checksums.txt"
+          grep " $archive$" checksums.txt | sha256sum --check --strict
+          tar xzf "$archive" litestream
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Verify disposable-host recovery from S3-compatible storage
+        run: python packages/fleet-controller/scripts/check-replication.py
     outputs:
       fleet: ${{ needs.changes.outputs.fleet }}
       nix: ${{ needs.changes.outputs.nix }}
@@ -459,7 +471,6 @@ jobs:
       - nix
       - installer
       - release
-      - image
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -499,15 +510,3 @@ jobs:
           if [ "$RELEASE_REQUIRED" = true ]; then
             test "$(jq -r '.release.result' <<< "$RESULTS")" = success
           fi
-      - name: Verify API container validation
-        env:
-          IMAGE_RESULT: ${{ needs.image.result }}
-        run: test "$IMAGE_RESULT" = success
-  image:
-    name: API container
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - name: Build the independent API image
-        run: docker build --file packages/fleet-api/Dockerfile --tag fleet-api:ci .

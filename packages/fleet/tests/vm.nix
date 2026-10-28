@@ -27,7 +27,7 @@ MOCK
     chmod +x $out/bin/Runner.Listener
   '') {};
   testSettings = settings // {
-    # The VM has no route to the fleet API. Leave the agent out so the test stays offline.
+    # The VM has no route to the fleet controller. Leave the agent out so the test stays offline.
     fleetApi = { url = ""; };
     secretsFile = null;
     # 2 cores and about 3 GiB must still start both slots. Production constants

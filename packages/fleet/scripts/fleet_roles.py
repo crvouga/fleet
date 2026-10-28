@@ -4,14 +4,14 @@
 roles.json is the only place a role is defined. Code that runs from this
 repository reads it through load(). Code that must stand alone keeps a copy of
 one view: node scripts and the bundled fleet-node.sh have no checkout, the
-fleet-api image does not contain this package, and the OpenTofu and Atlas files
+fleet-controller deployment does not contain this package, and the deployment files
 must show a role change in their own reviewed diff. `sync` rewrites every copy
 and `check` fails when one differs, so a role change is one edit to roles.json
 followed by `sync`.
 
 Views:
   known      every role in the registry, active or retired. OpenTofu keeps a
-             role token and age key and Postgres keeps node rows until a
+             role token and age key and SQLite keeps node rows until a
              reviewed change deletes the role from the registry.
   active     roles a machine may be installed, enrolled and updated as.
   installer  closure attributes on the shared installer image.
@@ -280,12 +280,12 @@ COPIES = (
          line(r"^(?P<head>installer_roles=\()(?P<list>[^)]*)(?P<tail>\).*)$")),
     Copy("packages/fleet/e2e/setup.sh", "active", "words",
          line(r"^(?P<head>installer_roles=\()(?P<list>[^)]*)(?P<tail>\).*)$")),
-    Copy("packages/fleet-api/src/types.ts", "known", "single-quoted",
+    Copy("packages/fleet-controller/src/types.ts", "known", "single-quoted",
          line(r"^(?P<head>export const ROLES = \[)(?P<list>[^\]]*)(?P<tail>\] as const;.*)$")),
-    Copy("packages/fleet-api/src/types.ts", "active", "single-quoted",
+    Copy("packages/fleet-controller/src/types.ts", "active", "single-quoted",
          line(r"^(?P<head>export const ACTIVE_ROLES = \[)(?P<list>[^\]]*)(?P<tail>\] as const.*)$")),
-    Copy("packages/fleet-api/schema.hcl", "known", "single-quoted",
-         line(r"^(?P<head>    expr = \"role IN \()(?P<list>[^)]*)(?P<tail>\)\".*)$")),
+    Copy("packages/fleet-controller/src/db/schema.sql", "known", "single-quoted",
+         line(r"^(?P<head>  CONSTRAINT nodes_role_known CHECK \(role IN \()(?P<list>[^)]*)(?P<tail>\)\).*)$")),
 
 )
 

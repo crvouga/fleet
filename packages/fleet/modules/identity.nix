@@ -3,7 +3,7 @@
   cap = settings.capacity;
   token = value: let text = toString value; in
     assert builtins.match "[A-Za-z0-9._-]+" text != null; text;
-  # cattle.py reads the API's cached capacity settings through fleetconf.py.
+  # cattle.py reads the controller's cached capacity settings through fleetconf.py.
   tools = import ./fleet-tools.nix { inherit lib pkgs; };
 in {
   assertions = [

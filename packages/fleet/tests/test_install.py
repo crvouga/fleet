@@ -420,7 +420,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual([path.name for path in self.agent_dir().iterdir()], ["role-token"])
         for text in (result.stdout, result.stderr, (self.root / "install.log").read_text(), self.log.read_text()):
             self.assertNotIn(token, text)
-        self.assertIn("fleet API role token: installed", (self.root / "install.log").read_text())
+        self.assertIn("fleet controller role token: installed", (self.root / "install.log").read_text())
 
     def test_a_token_document_without_api_token_installs_without_one(self):
         env, result = self.run_enrolled('{"data":{"data":{"age_key":"AGE-SECRET-KEY-ENROLLED"}}}')

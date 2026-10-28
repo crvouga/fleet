@@ -170,7 +170,7 @@ inputs@{ self, nixpkgs, disko, sops-nix, oh-my-pi, deployment ? {} }: let
       '';
       cattle-vm = import ./tests/cattle.nix testArgs;
       wifi-vm = import ./tests/wifi.nix testArgs;
-      # Every role reports to the fleet API. Pure evaluation: a role that loses
+      # Every role reports to the fleet controller. Pure evaluation: a role that loses
       # the unit, its boot target or its address fails here, not at a boot.
       agent-units = let
         url = deployment.shared.fleetApi.url or (import ./settings/shared.nix).fleetApi.url;

@@ -3,7 +3,7 @@
 
 No Nix is needed: each script is cut out of its module between fixed markers
 and the few Nix interpolations are replaced. A marker that moves fails loudly.
-These are the pieces that make the fleet API's runner settings take effect:
+These are the pieces that make the fleet controller's runner settings take effect:
 labels and repository per slot, the slot count, and the disk threshold. The
 Nix itself is evaluated by `nix flake check`.
 """

@@ -15,10 +15,10 @@ node records and operator-owned secrets. They cannot be installed or updated
 as active roles. Removing a retired name requires reviewing persistent data
 and secret mappings in each consuming deployment first.
 
-The optional management API provides data and configuration, never remote code.
-Without an API, local-mode installations still validate role closures and any
+The optional management controller provides data and configuration, never remote code.
+Without a controller, local-mode installations still validate role closures and any
 required secrets before disk work. Configured managed installations retain
-remote approval and never fall back to local approval after an API failure.
+remote approval and never fall back to local approval after a controller failure.
 
 Cloud infrastructure and runtime hosting are entirely operator supplied. Fleet
 contains no provider inventory, cloud reconciliation, deployment credentials or

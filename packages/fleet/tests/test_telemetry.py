@@ -247,7 +247,7 @@ class TelemetryTests(unittest.TestCase):
         value = self.collector.collect(self.identity, ["fleet-sync.timer", "nix-some\\x2dpath.mount"])
         # The real server decoder is the contract, rather than a Python copy
         # that could agree with the sender while both diverge from production.
-        validator = Path(__file__).resolve().parents[2] / "fleet-api/src/domain/telemetry-validation.ts"
+        validator = Path(__file__).resolve().parents[2] / "fleet-controller/src/domain/telemetry-validation.ts"
         code = "const {readTelemetry}=await import(Bun.argv.at(-1)); const p={list:[]}; readTelemetry(p,JSON.parse(await Bun.stdin.text())); if(p.list.length) throw Error(JSON.stringify(p.list));"
         result = subprocess.run([bun, "-e", code, str(validator)], input=json.dumps(value),
             capture_output=True, text=True, timeout=15, check=False)

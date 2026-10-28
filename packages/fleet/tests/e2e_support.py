@@ -1,5 +1,5 @@
-"""Building blocks for the full-chain test: the real fleet API started by
-packages/fleet-api/test/e2e/stack.ts, a Vault that speaks the parts of the
+"""Building blocks for the full-chain test: the real fleet controller started by
+packages/fleet-controller/test/e2e/stack.ts, a Vault that speaks the parts of the
 real API the fleet uses (OIDC login, wrapped reads, lookup, unwrap, userpass),
 and fixtures for a node's /proc, /run/fleet and /etc/fleet."""
 import hashlib
@@ -18,21 +18,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
-API_PACKAGE = ROOT.parent / "fleet-api"
-STACK = API_PACKAGE / "test" / "e2e" / "stack.ts"
+CONTROLLER_PACKAGE = ROOT.parent / "fleet-controller"
+STACK = CONTROLLER_PACKAGE / "test" / "e2e" / "stack.ts"
 
 AGE_KEY = "AGE-SECRET-KEY-1CHAINTESTNOTREALKEYMATERIAL000000000000000000000"
 
 
 def missing_tools():
     """Names of what the full-chain test needs and cannot find."""
-    needed = {"bun": "bun", "atlas": "atlas", "curl": "curl", "python3": "python3"}
+    needed = {"bun": "bun", "curl": "curl", "python3": "python3"}
     absent = [name for name, tool in needed.items() if shutil.which(tool) is None]
-    candidates = [shutil.which("initdb")]
-    for pattern in ("/usr/lib/postgresql/*/bin/initdb", "/opt/homebrew/opt/postgresql@*/bin/initdb"):
-        candidates.extend(str(path) for path in Path("/").glob(pattern.lstrip("/")))
-    if not any(candidates):
-        absent.append("postgres (initdb)")
     return absent
 
 
@@ -140,16 +135,14 @@ class ChainVault:
 
 
 class Stack:
-    """The real fleet API in its own process, with its own throwaway Postgres."""
+    """The real fleet controller in its own process, with its own throwaway SQLite database."""
 
-    def __init__(self, role_token, vault_addr, image=None):
+    def __init__(self, role_token, vault_addr):
         env = dict(os.environ)
         env.update({"FLEET_E2E_ROLE_TOKEN": role_token, "VAULT_ADDR": vault_addr})
-        if image:
-            env["FLEET_E2E_IMAGE"] = image
         self.process = subprocess.Popen(
             ["bun", str(STACK)],
-            cwd=API_PACKAGE,
+            cwd=CONTROLLER_PACKAGE,
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -168,13 +161,13 @@ class Stack:
                 if not line:
                     break
                 self.output.append(line)
-                if line.startswith('{"apiUrl"'):
+                if line.startswith('{"controllerUrl"'):
                     threading.Thread(target=self._drain, daemon=True).start()
                     return json.loads(line)
             elif self.process.poll() is not None:
                 break
         self.stop()
-        raise RuntimeError("the fleet API stack did not start:\n" + "".join(self.output)[-3000:])
+        raise RuntimeError("the fleet controller stack did not start:\n" + "".join(self.output)[-3000:])
 
     def _drain(self):
         for line in self.process.stdout:
