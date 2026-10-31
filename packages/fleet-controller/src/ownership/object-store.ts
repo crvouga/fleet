@@ -52,6 +52,14 @@ export class ObjectStoreError extends Error {
   }
 }
 
+function strongEtag(response: Response, operation: string): string {
+  const etag = response.headers.get('etag');
+  if (!response.ok || etag === null)
+    throw new ObjectStoreError(operation, response.status);
+  if (/^W\//i.test(etag)) throw new ObjectStoreError(operation, 'weak ETag');
+  return etag;
+}
+
 function baseUrl(storage: StorageConfig): string {
   const origin =
     storage.endpoint?.replace(/\/$/, '') ??
@@ -164,19 +172,23 @@ export function s3ConditionalStore(
   const base = baseUrl(storage);
   const url = (key: string) =>
     `${base}/${key.split('/').map(encodeURIComponent).join('/')}`;
-  const fetchUrl = (target: string, init: RequestInit) =>
-    client.fetch(target, {
+  const fetchUrl = (target: string, init: RequestInit) => {
+    const headers = new Headers(init.headers);
+    // R2 weakens ETags on compressed responses. Conditional ownership updates
+    // require strong validators; never strip W/ and pretend one is strong.
+    headers.set('accept-encoding', 'identity');
+    return client.fetch(target, {
       ...init,
+      headers,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+  };
   const send = (key: string, init: RequestInit) => fetchUrl(url(key), init);
   return {
     async get(key) {
       const response = await send(key, { method: 'GET' });
       if (response.status === 404) return null;
-      const etag = response.headers.get('etag');
-      if (!response.ok || etag === null)
-        throw new ObjectStoreError('read', response.status);
+      const etag = strongEtag(response, 'read');
       return { body: await response.text(), etag };
     },
     async put(key, body, condition) {
@@ -191,9 +203,7 @@ export function s3ConditionalStore(
       // 409: a concurrent conditional write is in progress (S3); treat as lost.
       if (response.status === 412 || response.status === 409)
         return { ok: false };
-      const etag = response.headers.get('etag');
-      if (!response.ok || etag === null)
-        throw new ObjectStoreError('conditional write', response.status);
+      const etag = strongEtag(response, 'conditional write');
       return { ok: true, etag };
     },
     list: (prefix) => listAll(fetchUrl, base, prefix),
