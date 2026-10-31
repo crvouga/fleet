@@ -442,7 +442,7 @@ that touch the replica or the working file are guarded:
 
 ### Hosting request
 
-Put these settings into the `crvouga/workspace` hosting request (#162) for the
+Put these settings into the `crvouga/personal` hosting request (#162) for the
 `fleet-api` service:
 
 | Setting                 | Value                                                                                                                  |
