@@ -41,7 +41,7 @@ const UNPINNED_ALLOWED: Readonly<Record<string, string>> = {
     'installs the pinned Bun (bun-version 1.4.4) in ci.yml and publish.yml, which run with contents: read only and no secrets; third party, pin it when a SHA is reviewed',
   'dorny/paths-filter@v4':
     'ci.yml change detection with contents/pull-requests read only and no secrets; third party, pin it when a SHA is reviewed',
-  'crvouga/workspace/.github/workflows/publish.yml@main':
+  'crvouga/personal/.github/workflows/publish.yml@main':
     'the repository owner\u2019s own release workflow (shared infrastructure the AGENTS.md allows for release engineering); called only from main after the checks pass, and the only place DEPLOY_DISPATCH_TOKEN is used; pin it to a reviewed SHA when the owner tags releases',
 };
 

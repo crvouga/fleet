@@ -34,6 +34,8 @@ export interface Instance {
 const spawned: Instance[] = [];
 
 export interface StartOptions {
+  /** Reuse a stopped instance's volume for persistent-host restart drills. */
+  readonly directory?: string;
   /** Extra environment for the supervisor (and so the worker). */
   readonly env?: Record<string, string>;
   /** Make the supervisor's clock run ahead by this many ms (retention drills). */
@@ -60,7 +62,8 @@ export async function startInstance(
   options: StartOptions = {}
 ): Promise<Instance> {
   const port = await freePort();
-  const directory = mkdtempSync(join(tmpdir(), 'fleet-owner-'));
+  const directory =
+    options.directory ?? mkdtempSync(join(tmpdir(), 'fleet-owner-'));
   const preload =
     options.clockSkewMs === undefined
       ? []
@@ -100,10 +103,12 @@ export async function startInstance(
 }
 
 export function killAll(): void {
-  for (const instance of spawned.splice(0)) {
-    killTree(instance.child.pid);
-    rmSync(instance.directory, { recursive: true, force: true });
-  }
+  const instances = spawned.splice(0);
+  for (const instance of instances) killTree(instance.child.pid);
+  for (const directory of new Set(
+    instances.map((instance) => instance.directory)
+  ))
+    rmSync(directory, { recursive: true, force: true });
 }
 
 export async function healthy(
@@ -207,15 +212,21 @@ export function bucketView(prefix: string): ConditionalStore {
 
 /**
  * Writes a pre-ownership replica directly under the prefix with real
- * Litestream (generation 0), holding a `legacy` table with one row.
+ * Litestream (generation 0), appending a marker to a `legacy` table.
+ * A supplied directory retains its working database and metadata for restart drills.
  */
-export function seedLegacyReplica(prefix: string, marker: number): void {
-  const directory = mkdtempSync(join(tmpdir(), 'fleet-legacy-'));
+export function seedLegacyReplica(
+  prefix: string,
+  marker: number,
+  retainedDirectory?: string
+): void {
+  const directory =
+    retainedDirectory ?? mkdtempSync(join(tmpdir(), 'fleet-legacy-'));
   try {
-    const path = join(directory, 'legacy.db');
+    const path = join(directory, retainedDirectory ? 'fleet.db' : 'legacy.db');
     const db = new Database(path);
     db.run('pragma journal_mode = wal');
-    db.run('create table legacy (v integer)');
+    db.run('create table if not exists legacy (v integer)');
     db.run('insert into legacy values (?)', [marker]);
     db.close();
     const config = join(directory, 'litestream.yml');
@@ -241,6 +252,6 @@ export function seedLegacyReplica(prefix: string, marker: number): void {
     if (result.exitCode !== 0)
       throw new Error(`legacy seed failed: ${result.stderr.toString()}`);
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    if (!retainedDirectory) rmSync(directory, { recursive: true, force: true });
   }
 }

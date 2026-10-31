@@ -46,9 +46,11 @@ def main():
                "FLEET_TEST_S3_ENDPOINT": endpoint,
                "FLEET_TEST_LITESTREAM_BIN": os.environ.get("FLEET_TEST_LITESTREAM_BIN", "litestream"),
                "AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test", "AWS_REGION": "us-east-1"}
-        result = subprocess.run(["bun", "test", "--timeout", "240000", "test/replication.test.ts", "test/ownership-replication.test.ts",
+        tests = sys.argv[1:] or ["test/replication.test.ts", "test/ownership-replication.test.ts",
                                 "test/restore-drill-replication.test.ts",
-                                "test/ownership-retention-replication.test.ts"],
+                                "test/ownership-retention-replication.test.ts",
+                                "test/ownership-volume-replication.test.ts"]
+        result = subprocess.run(["bun", "test", "--timeout", "240000", *tests],
                                 cwd=Path(__file__).resolve().parents[1], env=env, check=False)
         return result.returncode
     finally:

@@ -556,7 +556,7 @@ stops being needed fails the test:
 - `oven-sh/setup-bun@v2` (ci.yml, publish.yml) and `dorny/paths-filter@v4`
   (ci.yml): third-party and tag-pinned; both run with read-only permissions and
   no secrets. Pin them to reviewed SHAs.
-- `crvouga/workspace/.github/workflows/publish.yml@main` (publish.yml): the
+- `crvouga/personal/.github/workflows/publish.yml@main` (publish.yml): the
   owner's own reusable release workflow at a moving branch, receiving
   `DEPLOY_DISPATCH_TOKEN`; called only on main after checks. Pin it to a SHA.
 

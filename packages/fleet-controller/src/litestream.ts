@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
@@ -7,7 +8,8 @@ import { litestreamCredentials, type StorageConfig } from './storage';
 /** Generated without credentials; env expansion is disabled to preserve literal paths. */
 export function litestreamConfig(
   storage: StorageConfig,
-  metricsPort?: number
+  metricsPort?: number,
+  metadataPath?: string
 ): string {
   return stringify({
     // Loopback only: Litestream's Prometheus endpoint feeds the sync monitor.
@@ -15,6 +17,7 @@ export function litestreamConfig(
     dbs: [
       {
         path: storage.path,
+        ...(metadataPath === undefined ? {} : { 'meta-path': metadataPath }),
         replica: {
           type: 's3',
           bucket: storage.bucket,
@@ -38,7 +41,11 @@ export function configArgs(
   metricsPort?: number
 ): string[] {
   const config = join(directory, `${name}.yml`);
-  writeFileSync(config, litestreamConfig(storage, metricsPort), {
+  // A new remote generation needs a full snapshot, not an old generation's
+  // local LTX index (whose historical files may already have been compacted).
+  const replica = createHash('sha256').update(storage.prefix).digest('hex');
+  const metadata = join(directory, `${name}-${replica}.meta`);
+  writeFileSync(config, litestreamConfig(storage, metricsPort, metadata), {
     mode: 0o600,
   });
   return ['-config', config, '-no-expand-env'];
