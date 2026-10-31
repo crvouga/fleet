@@ -277,6 +277,11 @@ restored automatically on first start.
 Defaults (renew 5 s, expire 30 s, fence 20 s, standby poll 2 s) work on Railway
 without tuning.
 
+Ownership requests use `Accept-Encoding: identity` so S3-compatible endpoints
+preserve strong ETags. R2 can return weak ETags for compressed responses, which
+cannot satisfy conditional updates. Fleet rejects weak validators rather than
+removing their `W/` prefix; proxies must preserve strong object ETags.
+
 #### Health semantics
 
 `/health` answers `200` only from an instance that owns the replica and serves.
