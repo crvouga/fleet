@@ -266,6 +266,13 @@ restored automatically on first start.
 - **Local file.** The working file is kept only when its `.generation` marker
   shows it continues the generation being restored; otherwise it is moved to
   `fleet.db.superseded` (never deleted) and restored fresh.
+- **Replication metadata.** Each process and remote generation uses its own
+  temporary Litestream `meta-path`. Initial, continuous and final sync share it
+  within that generation. A new generation builds a full snapshot from SQLite;
+  it never depends on historical LTX files beside a retained working database.
+  The old metadata is left untouched. Keep the SQLite database, WAL/SHM and
+  `.generation` marker together when moving a volume; do not delete them to
+  repair a missing-LTX startup failure.
 
 Defaults (renew 5 s, expire 30 s, fence 20 s, standby poll 2 s) work on Railway
 without tuning.

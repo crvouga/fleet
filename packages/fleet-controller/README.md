@@ -20,7 +20,9 @@ root and start with `bun --env-file=deployment.env run start` from there.
 
 `bun run check` runs portable validation against real temporary SQLite files.
 For the full recovery drill, install Litestream 0.5.17 and
-`moto[controller]==5.1.17` in a Python virtual environment, then run
+`moto[server]==5.1.17` in a Python virtual environment, then run
 `python packages/fleet-controller/scripts/check-replication.py`. This starts only
 loopback S3 test storage and uses fake credentials. It verifies that the actual
-production launcher restores data after all local working state is deleted.
+production launcher restores data after all local working state is deleted,
+restarts on a retained volume with pruned historical LTX files, and preserves
+legacy data through migration and subsequent ownership generations.
