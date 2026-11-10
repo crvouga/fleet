@@ -160,6 +160,9 @@ class Sim(drills.Cluster):
     def assert_schema(self, c, when):
         return None
 
+    def assert_login_page(self, c):
+        return None
+
     def integrity(self, c):
         return "ok"
 
