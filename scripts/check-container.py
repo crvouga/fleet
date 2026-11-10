@@ -271,6 +271,14 @@ class Cluster:
         assert self.audit_entries(container) is not None, f"{when}: the schema-3 audit endpoint is not answering"
         assert self.integrity(container) == "ok", f"{when}: PRAGMA integrity_check failed"
 
+    def assert_login_page(self, container):
+        # The image must render server-side JSX, not stringify an element object.
+        with urlopen(container.base + "/login", timeout=5) as response:
+            body = response.read().decode()
+        assert response.status == 200, "GET /login did not answer 200"
+        assert "text/html" in response.headers.get("Content-Type", ""), "GET /login is not HTML"
+        assert "Sign in to Fleet controller" in body, "GET /login did not render the sign-in page: " + body[:80]
+
     def integrity(self, container):
         return docker("exec", container.name, "bun", "-e", READ_INTEGRITY)
 
@@ -385,6 +393,7 @@ def scenario_basics(cluster, bucket, denied_bucket):
     c = cluster.start(bucket, prefix)
     cluster.ready(c)
     cluster.assert_schema(c, "fresh database")
+    cluster.assert_login_page(c)
     cluster.settings(c, "PUT", {"heartbeat": {"intervalSeconds": 91}})
     cluster.stop(c)
     docker("start", c.name)

@@ -16,6 +16,9 @@ COPY packages/fleet-controller/package.json packages/fleet-controller/package.js
 FROM manifests AS build
 RUN bun install --frozen-lockfile
 COPY tsconfig*.json ./
+# Package tsconfigs choose each package's JSX runtime (hono/jsx for the controller).
+COPY packages/admin-ui/tsconfig.json packages/admin-ui/tsconfig.json
+COPY packages/fleet-controller/tsconfig.json packages/fleet-controller/tsconfig.json
 COPY packages/assert/src packages/assert/src
 COPY packages/logger/src packages/logger/src
 COPY packages/admin-ui/src packages/admin-ui/src
@@ -36,11 +39,15 @@ COPY --from=build /app/packages/admin-ui/src packages/admin-ui/src
 COPY --from=build /app/packages/fleet-controller/src packages/fleet-controller/src
 COPY --from=build /app/packages/fleet-controller/dist packages/fleet-controller/dist
 COPY tsconfig*.json ./
+COPY packages/fleet-controller/tsconfig.json packages/fleet-controller/tsconfig.json
 RUN test "$(litestream version)" = "0.5.17" \
     && mkdir -p /var/lib/fleet && chown bun:bun /var/lib/fleet
 ENV NODE_ENV=production PORT=8080 FLEET_DATABASE_PATH=/var/lib/fleet/fleet.db
 USER bun
+# Bun takes JSX settings from the working directory's tsconfig. From /app it would use
+# the root tsconfig, fall back to React JSX, and every page would render "[object Object]".
+WORKDIR /app/packages/fleet-controller
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 # Run the supervisor directly so PID 1 receives termination signals.
-ENTRYPOINT ["bun", "packages/fleet-controller/src/start.ts"]
+ENTRYPOINT ["bun", "src/start.ts"]
